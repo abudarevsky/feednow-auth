@@ -6,9 +6,15 @@
 
 Work from `specs/draft/feednow-auth-service-specification.md`. The numbered plans in `specs/wip/` are the delivery contract and must be completed in order unless their stated dependency is already accepted.
 
+Start with `docs/README.md` for the current application architecture,
+contracts, operations, and verified state. Treat `docs/` as the source of truth
+for what exists. `specs/` defines future-state strategy and transformation
+steps; specs may link to docs for their baseline, but docs must not link to WIP
+or draft specs. Follow `docs/requirements.md`.
+
 ## Architecture boundaries
 
-- Keep HTTP handling in `app/api`, credential and JWT logic in `app/auth`, domain types in `app/models`, business rules in `app/services`, and persistence details in `app/storage`.
+- Keep HTTP handling in `src/app/api`, credential and JWT logic in `src/app/auth`, domain types in `src/app/models`, business rules in `src/app/services`, and persistence details in `src/app/storage`.
 - Application services depend only on the storage contract. Do not expose SQLite rows, DynamoDB expressions, pagination tokens, sessions, or AWS exceptions above an adapter.
 - Use internal FeedNow IDs (`usr_`, `org_`, `key_`) as application identities. Never use email, Cognito username/sub, or Shopify IDs as primary user identifiers.
 - Keep product permissions as API-key scopes. Do not put commercial plan or rate-limit policy in scopes.
@@ -25,13 +31,13 @@ Work from `specs/draft/feednow-auth-service-specification.md`. The numbered plan
 ## Project layout
 
 ```text
-app/                 Runtime service code
+src/app/             Runtime service code
   api/               FastAPI routers, dependencies, and schemas
   auth/              JWT/API-key authentication and authorization resolution
   models/            Provider-neutral domain entities and value types
   services/          Provisioning, tenancy, membership, keys, and audit rules
   storage/           Contract and adapter implementations
-tests/               Unit, integration, and adapter conformance tests
+src/tests/           Unit, integration, and adapter conformance tests
 deploy/aws/          Lambda runtime packaging requirements
 deploy/aws/cdk/      AWS CDK application, stack, and deployment inputs
 specs/draft/         Source specification; edit only through an agreed revision

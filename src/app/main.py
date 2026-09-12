@@ -67,4 +67,11 @@ def create_app(routers: Sequence[APIRouter] | None = None) -> FastAPI:
 app = create_app()
 
 
-__all__ = ["APP_VERSION", "app", "create_app"]
+def run() -> None:
+    """Run the service through the installed ``feednow-auth`` command."""
+    import uvicorn
+
+    uvicorn.run("app.main:app")
+
+
+__all__ = ["APP_VERSION", "app", "create_app", "run"]

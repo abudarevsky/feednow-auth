@@ -39,7 +39,8 @@ AWS_ENV_VARS = (
 )
 
 #: Repository root, so the subprocess check imports the same ``app`` package.
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SRC_ROOT = REPO_ROOT / "src"
 
 
 @pytest.fixture
@@ -100,6 +101,7 @@ def test_module_level_app_boots_and_serves_health(aws_free_env: None) -> None:
 
 def test_importing_app_main_never_pulls_in_boto3(aws_free_env: None) -> None:
     env = {k: v for k, v in os.environ.items() if k not in AWS_ENV_VARS}
+    env["PYTHONPATH"] = str(SRC_ROOT)
     result = subprocess.run(
         [
             sys.executable,

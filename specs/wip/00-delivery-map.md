@@ -2,6 +2,10 @@
 
 ## Source and sequencing
 
+Current-state baseline: [agent-oriented application documentation](../../docs/README.md).
+The documentation describes what exists; this delivery map describes the
+future-state transformation sequence.
+
 This plan decomposes `../draft/feednow-auth-service-specification.md` into independently reviewable work. Each phase is a unit of work for an implementation agent, not a mandate to implement every later phase in the same change.
 
 | Phase | Unit of work | Depends on | Produces |
@@ -26,4 +30,3 @@ This plan decomposes `../draft/feednow-auth-service-specification.md` into indep
 ## Review rule
 
 An agent should use one phase file as its scope. If delivery uncovers a missing contract, propose an explicit update to the current or later phase rather than smuggling cross-cutting behavior into implementation.
-

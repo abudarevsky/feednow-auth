@@ -4,6 +4,10 @@
 
 `feednow-auth` is the central authentication, identity, tenancy, authorization, and API credential service for FeedNow products.
 
+Repository baseline: [current application documentation](../../docs/README.md).
+This specification defines the target behavior and transformation strategy;
+the documentation describes only behavior that exists and has been verified.
+
 Initial consumers:
 
 * Vispector
@@ -406,7 +410,7 @@ Future Shopify authentication must resolve into the same concept.
 Recommended structure:
 
 ```text
-app/
+src/app/
   storage/
     contract.py
     sqlite.py
@@ -650,21 +654,22 @@ prod
 
 ```text
 feednow-auth/
-├── app/
-│   ├── api/
-│   ├── auth/
-│   ├── models/
-│   ├── services/
-│   ├── storage/
-│   │   ├── contract.py
-│   │   ├── sqlite.py
-│   │   ├── dynamodb.py
-│   │   └── memory.py
-│   └── main.py
-├── tests/
-│   ├── unit/
-│   ├── integration/
-│   └── storage_contract/
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── auth/
+│   │   ├── models/
+│   │   ├── services/
+│   │   ├── storage/
+│   │   │   ├── contract.py
+│   │   │   ├── sqlite.py
+│   │   │   ├── dynamodb.py
+│   │   │   └── memory.py
+│   │   └── main.py
+│   └── tests/
+│       ├── unit/
+│       ├── integration/
+│       └── storage_contract/
 ├── deploy/
 │   └── aws/
 │       ├── lambda-requirements.txt
