@@ -55,12 +55,12 @@ Source contract: `01-foundation-and-domain-contracts.md`. One numbered task = on
 
 ## Definition of done check (maps to acceptance criteria)
 
-- [ ] Python 3.14.5 reproducibly declared via `.python-version` + committed `uv.lock`, spec-compatible `requires-python` (task 1)
-- [ ] App imports and exposes health without AWS credentials or a DB connection; boto3-free import proven in isolation (task 6)
-- [ ] Every §4 entity modeled with exact fields; internal IDs distinct from provider subjects (tasks 3–4)
-- [ ] No secrets/hashes/tokens in schemas except the one-time creation response (tasks 4–5)
-- [ ] Focused unit tests for serialization and invalid enum/shape rejection (tasks 2–5)
-- [ ] Handoff: contract modules, conventions, and mount contract documented (task 7)
+- [x] Python 3.14.5 reproducibly declared via `.python-version` + committed `uv.lock`, spec-compatible `requires-python` (task 1)
+- [x] App imports and exposes health without AWS credentials or a DB connection; boto3-free import proven in isolation (task 6)
+- [x] Every §4 entity modeled with exact fields; internal IDs distinct from provider subjects (tasks 3–4)
+- [x] No secrets/hashes/tokens in schemas except the one-time creation response (tasks 4–5)
+- [x] Focused unit tests for serialization and invalid enum/shape rejection (tasks 2–5)
+- [x] Handoff: contract modules, conventions, and mount contract documented (task 7)
 
 ## Escalations (planner action, not implementation work)
 
@@ -70,4 +70,46 @@ Source contract: `01-foundation-and-domain-contracts.md`. One numbered task = on
 
 ## Completion evidence
 
-_(implementation agent: append test/lint output here per phase)_
+**Status: Phase 01 COMPLETE (2026-09-12).** Precondition resolved — repo initialized; scaffold landed as commit `351757d`. Tasks 1–7 each landed as exactly one commit:
+
+| Task | Commit |
+| --- | --- |
+| 1 — Tooling scaffold and package tree | `b03d079` |
+| 2 — Conventions: IDs, timestamps, pagination, errors | `e503493` |
+| 3 — Enums and identity entities | `3812def` |
+| 4 — Credential, audit, and authorization entities | `e64eb16` |
+| 5 — Versioned API schemas and endpoint manifest | `e8fc010` |
+| 6 — FastAPI skeleton, health endpoint, no-AWS proof | `374f6ee` |
+| 7 — Handoff documentation and green sweep | this commit |
+
+Green sweep (task 7, recorded from the working tree at task 6 HEAD):
+
+```text
+$ uv run python -V
+Python 3.14.5
+$ uv run pytest
+335 passed, 2 warnings in 0.63s          # 326 unit + 9 integration
+$ uv run ruff check .
+All checks passed!
+$ uv run ruff format --check .
+55 files already formatted
+$ env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+    -u AWS_SESSION_TOKEN uv run python \
+    -c "import sys, app.main; assert 'boto3' not in sys.modules"
+exit 0                                    # no-AWS boot proof, isolated interpreter
+```
+
+The 2 pytest warnings are both third-party deprecations raised while importing
+the Starlette/FastAPI test client (`StarletteDeprecationWarning` about
+`httpx` at `fastapi/testclient.py:1`; an `anyio.BlockingPortal` alias
+`DeprecationWarning` at `starlette/testclient.py:53`) — neither originates
+from this repo's code.
+
+Review sign-offs (per-task @reviewer runs): task 5 — APPROVED after one
+major fix landed pre-commit (`scopes` made required on `ApiKeyCreateRequest`
+to match the stated contract); task 6 — APPROVED with no critical/major
+issues, contract-text nits fixed pre-commit. The three spec-revision
+proposals above remain planner actions; they are enumerated for consumers in
+the README "Phase 01 contracts (handoff)" derived register (payloads and
+success statuses are additionally listed in
+`app/api/schemas/manifest.py`'s docstring register).
