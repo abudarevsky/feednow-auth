@@ -15,10 +15,28 @@ when that behavior is actually implemented and verified.
 - Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
+- Storage is reached only through the 18-method `Storage` protocol and the
+  documented factory `open_sqlite_storage(path: str | Path) -> Storage`.
+  Signatures carry domain types exclusively: no row, driver exception,
+  session, or interpretable cursor may cross the boundary.
+- Storage never mints IDs or timestamps; writes take fully formed domain
+  entities and read back unchanged.
+- Every storage failure is a `StorageError` subclass. Missing entities raise
+  `EntityNotFoundError` (never `None`); uniqueness violations raise
+  `DuplicateEntityError` with a stable `kind` (`entity_id`,
+  `external_identity`, `membership`, `organization_slug`, `user_email`,
+  `api_key_id`); unknown parents raise `ReferenceNotFoundError`; bad cursors
+  raise `InvalidCursorError`.
+- Lists are ordered by `(created_at, id)` ascending with `id` as the
+  deterministic keyset tiebreaker; out-of-range limits are clamped, not
+  rejected.
 
 Canonical modules:
 
 - Domain: `src/app/models/`
 - API schemas and manifest: `src/app/api/schemas/`
 - App factory: `src/app/main.py`
-- Phase 02 storage boundary: `src/app/storage/`
+- Storage contract (protocol, errors, `ProvisionedUser`):
+  `src/app/storage/contract.py`
+- SQLite adapter and factory: `src/app/storage/sqlite.py`
+- Adapter-neutral storage conformance suite: `src/tests/storage_contract/`

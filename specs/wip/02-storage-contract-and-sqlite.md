@@ -3,6 +3,10 @@
 **Dependency:** Phase 01  
 **Handoff to:** Phases 03, 05, and 06
 
+Current-state baseline: [application documentation](../../docs/README.md).
+This phase defines the storage transformation from the documented current
+state to the required SQLite-backed owner state.
+
 ## Goal
 
 Create domain-oriented storage operations, a SQLite adapter for local/integration testing, and an executable adapter conformance suite.
@@ -28,4 +32,3 @@ No DynamoDB calls, HTTP routes, JWT parsing, or API-key secret hashing.
 ## Handoff
 
 Document the storage factory and conformance invocation. Later phases use only the contract; Phase 06 runs this unchanged suite against DynamoDB.
-

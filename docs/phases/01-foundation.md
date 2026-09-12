@@ -8,6 +8,7 @@ The repository currently contains the Phase 01 foundation:
 - health-only FastAPI app factory with no database or AWS initialization;
 - production Uvicorn standard extras, including `uvloop` where supported.
 
-The application currently exposes `/health`. Storage, provider validation,
-resource CRUD, and deployment behavior are not implemented in the current
-application state.
+The application currently exposes `/health`. Provider validation, resource
+CRUD, and deployment behavior are not implemented in the current application
+state. Storage was out of Phase 01's scope; the implemented storage boundary
+landed in Phase 02 and is documented in [Phase 02](02-storage.md).

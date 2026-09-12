@@ -7,7 +7,8 @@ this order before changing the service:
 2. [Contracts](contracts.md) — stable domain, API, error, and pagination rules.
 3. [Operations](operations.md) — local commands, production runtime, and checks.
 4. [Phase 01](phases/01-foundation.md) — completed foundation handoff.
-5. [Phase 02](phases/02-storage.md) — current storage baseline and gap.
+5. [Phase 02](phases/02-storage.md) — completed storage handoff: contract,
+   SQLite adapter, and conformance suite.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,
