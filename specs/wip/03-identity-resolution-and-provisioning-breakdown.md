@@ -73,11 +73,11 @@ Verified tree state against the plan above: tasks 1–3 are **implemented in the
 
 ## Definition of done check (maps to acceptance criteria)
 
-- [ ] Invalid, expired, wrong-issuer/audience, and malformed tokens rejected without storage mutation (tasks 3, 5 — per-reason unit cases + recording-wrapper zero-call proof)
-- [ ] First valid request yields exactly one user, identity, workspace, owner membership, and the creation audit trail (tasks 4, 5, 6)
-- [ ] Repeated and concurrent first requests resolve the same identity, no duplicate tenants (tasks 4, 6)
-- [ ] `/v1/me` returns no raw Cognito token/provider secret and uses FeedNow user/organization IDs (task 5)
-- [ ] Tests use signed fixtures or a JWKS test server, never a live Cognito pool (tasks 2, 3, 5, 6)
+- [x] Invalid, expired, wrong-issuer/audience, and malformed tokens rejected without storage mutation (tasks 3, 5 — per-reason unit cases + recording-wrapper zero-call proof)
+- [x] First valid request yields exactly one user, identity, workspace, owner membership, and the creation audit trail (tasks 4, 5, 6)
+- [x] Repeated and concurrent first requests resolve the same identity, no duplicate tenants (tasks 4, 6)
+- [x] `/v1/me` returns no raw Cognito token/provider secret and uses FeedNow user/organization IDs (task 5)
+- [x] Tests use signed fixtures or a JWKS test server, never a live Cognito pool (tasks 2, 3, 5, 6)
 
 ## Escalations (planner action, not implementation work)
 
@@ -90,3 +90,29 @@ Verified tree state against the plan above: tasks 1–3 are **implemented in the
 
 - **2026-09-12 — @reviewer: APPROVE-WITH-CHANGES.** Blocking, all applied: **B1** PyJWT floor raised `2.10→2.13` (2.10.0 substring-`iss` bypass CVE-2024-53861; 2.13.0 bundles JWKS-scheme SSRF, `PyJWK` alg-binding, and cache-wipe-on-error fixes on this phase's exact usage path) + verifier does its own `iss` set-membership instead of PyJWT `issuer=`, `cooldown_duration` banned (2.14-only); **B2** `JwksSource.signing_key` made issuer-bound `(issuer, kid)` + pinned check order in task 3 + cross-issuer test in task 2; **B3** convergence forbidden on `existing_user_id` alone (adapter email fallback makes it a stranger's id in the email-collision case) + stranger-id stub test in task 4 + Phase 02 docstring amendment escalated; **B4** explicit-`organization_id` semantics pinned (active membership + active org else 403) and tested both branches. Non-blocking applied: `auth/errors.py` file ownership + exception-mapping/cache-count notes (task 2), `verify_aud: False` pinned (task 3), audit targets pinned + decision cross-ref 5–7→5–8 (task 4), named 403/409/503 integration tests (task 5), main-thread warm-up before barrier (task 6), docs-linking rule + handoff updates (task 7). Sign-off recorded: granularity/ordering, AC coverage, boundary compliance, remaining decisions + spec citations, precondition/evidence sweep.
 - **2026-09-13 — @reviewer: APPROVE-WITH-CHANGES on the Completion plan + step-0 revision.** **Step-0 security judgment: approved** — no new unverified-parsing exposure (stage 1 already parses the same header unverified), strictly better fail-fast (alg/kid forgeries reject before claim extraction, issuer membership, and any network fetch), no new oracle, reason taxonomy coherent without touching `errors.py`. Blocking, all applied: **B1** task-2 commit needs an **interim** `auth/__init__.py` (working-tree file imports the then-untracked `app.auth.cognito`; `git add -p` can't split adjacent blocks; per-commit `git show` check added); **B2** step 0 pinned precisely — alg-before-kid within step 0, exact case-sensitive `"RS256"`, existing kid reason moved verbatim, `InvalidAlgorithmError` redundancy kept, `cognito.py` docstring must be updated to stages 0–7; **B3** header line and original precondition marked superseded before the specs commit enshrines them. Non-blocking applied: `request_count == 0` assertions + docstring rewrite for the forgery tests (item 2), item 5 explicitly closes the "extra integration case" door (no new reason strings → task 5 unchanged). Verified on-disk: decisions 1–5 shipped surface matches the plan (no drift for tasks 4/5); AC mapping unchanged; boundary compliance holds.
+
+## Completion evidence (2026-09-13, executed per the Completion plan)
+
+Commits, in plan order: `chore(specs)` precondition (specs-only: 02→done,
+draft 02/03 deletions, wip 03 + this breakdown); `feat(phase-03 task 1)`
+(pyproject/uv.lock/idgen/test); `feat(phase-03 task 2)` (errors/jwks/
+tests/support/jwks test + interim `auth/__init__.py` — per-commit check
+passed: the task-2 blob contains no `app.auth.cognito`/`AccessTokenVerifier`/
+`CognitoClaims` reference); `feat(phase-03 task 3)` (cognito.py + full
+`auth/__init__.py` + verifier test; step 0 remediation confirmed: alg-before-
+kid pre-claim pre-network, forgery tests carry `request_count == 0`, ruff
+clean); `feat(phase-03 task 4)` (identity service + 20 stub + 4 SQLite
+tests); `feat(phase-03 task 5)` (dependencies.py, api/me.py, 17 integration
+tests); `feat(phase-03 task 6)` (21 barrier-based concurrency cases: 20×8
+races converge on one `usr_`/`org_` with exactly 1/1/1/1/3 rows; sequential
+email-collision leaves no partial rows); `feat(phase-03 task 7)` (this docs
+sweep).
+
+Task counts: idgen 55, JWKS client 15, verifier 38, identity stub 20,
+identity SQLite 4, `/v1/me` integration 17, concurrency 21 — 170 Phase 03
+tests. Final sweep: `uv run pytest` **739 passed** (incl. the subprocess
+no-`boto3` proof), `uv run ruff check .` clean, `uv run ruff format --check .`
+clean (94 files), `git diff --check` clean. Handoff docs:
+`docs/phases/03-identity.md` (new), `docs/README.md`, `docs/architecture.md`,
+`docs/contracts.md`, `README.md` Phase 03 section; the safe convergence rule
+is documented Phase-03-side per the Phase 02 amendment escalation.

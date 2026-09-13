@@ -31,6 +31,39 @@ when that behavior is actually implemented and verified.
   deterministic keyset tiebreaker; out-of-range limits are clamped, not
   rejected.
 
+Authentication boundary (Phase 03):
+
+- Access tokens only: `RS256` exact header match (checked before any claim
+  extraction or network fetch), issuer by exact set membership against the
+  configured allowlist (never prefix matching, never the library's `issuer=`
+  option), `client_id` set membership, `token_use == "access"`, required
+  non-empty `email`, 60-second leeway on `exp`/`iat`/`nbf`. Rejections carry
+  fixed safe reasons and never mutate storage.
+- `JwksSource.signing_key(issuer, kid)` is **issuer-bound**: a `kid` is
+  resolved only from that issuer's key set; cross-issuer scanning is
+  impossible through the interface.
+- A Cognito `sub` becomes `(provider=cognito, provider_subject=sub,
+  provider_tenant=None)` — provider fields stop at the service seam; only
+  `usr_`/`org_` ids flow onward.
+- First-login provisioning is exactly one `provision_user` batch (user,
+  identity, personal org, owner membership, three creation audits) sharing
+  one clock read and one ID set. Race convergence happens **only** via the
+  identity-tuple re-read after `DuplicateExternalIdentityError`;
+  `existing_user_id` is an adapter email-fallback value — advisory
+  cross-check, never the convergence signal. A re-read miss is a genuine
+  email collision: `ProvisioningConflictError`, no partial rows.
+- Human `AuthorizationContext`: organization = earliest active membership
+  (or the explicit `organization_id`, which requires an active membership in
+  an active organization), `roles=[role]`, `scopes=[]`,
+  `actor_type="user"`, `actor_id=usr_`.
+- Status mapping: `TokenValidationError`→401, `DisabledUserError` /
+  `NoActiveOrganizationError`→403, `ProvisioningConflictError`→409,
+  `TokenProviderUnavailableError`→503 — all through the frozen `Error`
+  envelope; 503 carries `internal_error` (no new code invented).
+- `GET /v1/me` returns the caller's `User` fields only — the internal `usr_`
+  id is the only identifier returned; no `sub`, no `client_id`, no token
+  material, no record ids (`extid_`/`mem_`/`aud_`).
+
 Canonical modules:
 
 - Domain: `src/app/models/`
@@ -39,4 +72,10 @@ Canonical modules:
 - Storage contract (protocol, errors, `ProvisionedUser`):
   `src/app/storage/contract.py`
 - SQLite adapter and factory: `src/app/storage/sqlite.py`
-- Adapter-neutral storage conformance suite: `src/tests/storage_contract/`
+- Adapter-neutral storage conformance suite:
+  `src/tests/storage_contract/`
+- Token contract and verifier: `src/app/auth/cognito.py` (+ `errors.py`,
+  `jwks.py`, `dependencies.py`)
+- Resolution/provisioning rules and ID minting:
+  `src/app/services/identity.py`, `src/app/services/idgen.py`
+- First mounted router: `src/app/api/me.py`

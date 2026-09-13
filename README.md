@@ -159,10 +159,10 @@ uv run feednow-auth                  # installed entry point without reload
 ## Phase 02 storage contracts (handoff)
 
 Phase 02 ships the storage boundary only: the `Storage` protocol, the SQLite
-adapter, and the adapter-neutral conformance suite. No service, route, or
-deployment code reads or writes through it yet — Phases 03/04/05 are the first
-consumers, and Phase 06 runs the same suite against DynamoDB Local. Editing the
-modules below is a contract change requiring a spec revision.
+adapter, and the adapter-neutral conformance suite. At delivery no service or
+route used it; since Phase 03 the identity service and `GET /v1/me` are its
+first consumers, and Phase 06 runs the same suite against DynamoDB Local.
+Editing the modules below is a contract change requiring a spec revision.
 
 ### Contract modules
 
@@ -193,3 +193,36 @@ modules below is a contract change requiring a spec revision.
 | Audit | `append_audit_event(event) -> None` is the standalone write path for Phase 03–05 events; only provisioning batches go through `provision_user`. No audit read/list surface this phase (Phase 08). |
 | Connection model | Thread-local connections, `journal_mode=WAL`, `busy_timeout` 5000 ms, `foreign_keys` asserted on as the first statement per connection, idempotent schema init stamped with `PRAGMA user_version`; `close()` releases and the instance is not reusable. Concurrency tests use barriers + WAL, never sleeps. |
 | Conformance invocation | `uv run pytest src/tests/storage_contract` (60 tests: 56 suite cases + 4 harness isolation proofs) against a clean temporary SQLite database per test. |
+
+
+## Phase 03 identity contracts (handoff)
+
+Phase 03 ships the authentication-to-authorization boundary: Cognito access
+tokens verify into `CognitoClaims`, resolve (or atomically provision) an
+internal `User`, and build the §10 `AuthorizationContext` — surfaced through
+the first mounted router, `GET /v1/me`. The full contract, wiring example, and
+verification evidence live in
+[docs/phases/03-identity.md](docs/phases/03-identity.md).
+
+### Published interfaces
+
+| Interface | Module | Consumers |
+| --- | --- | --- |
+| `AccessTokenVerifier.verify(token) -> CognitoClaims` | `src/app/auth/cognito.py` | Phase 05 (API-key seam parity), Phase 07 wiring |
+| `JwksSource.signing_key(issuer, kid)` (issuer-bound) | `src/app/auth/jwks.py` | Phase 07 (real Cognito domains) |
+| `resolve_or_provision(storage, claims, *, now=None, ids=None) -> ResolvedIdentity` | `src/app/services/identity.py` | Phase 04+ auth dependencies |
+| `build_user_context(storage, user, organization_id=None)` | `src/app/services/identity.py` | Phase 04 explicit org selection (semantics pinned; no interface change) |
+| `build_current_user(storage, verifier)` / `build_me_router(storage, verifier)` | `src/app/auth/dependencies.py`, `src/app/api/me.py` | deployment entrypoint, Phase 04/05 routers |
+| `new_user_id()` … `new_audit_event_id()` | `src/app/services/idgen.py` | Phase 04+ writers (`key_` minting stays Phase 05) |
+
+### Identity conventions
+
+| Topic | Rule |
+| --- | --- |
+| Token contract | RS256 exact header match before any claim extraction or network fetch; issuer exact set-membership (never prefix, never PyJWT `issuer=`); `client_id` membership; `token_use == "access"`; required non-empty `email` (Phase 07 must configure the app client to surface it); 60 s leeway; fixed safe rejection reasons — no token material in messages or logs. |
+| Provider mapping | `(cognito, sub, None)`; provider fields stop at `resolve_or_provision`; only `usr_`/`org_` ids flow onward. |
+| Provisioning | One `utc_now()` read + one ID set per request; five entities + three audits (`user.created`/`organization.created`/`membership.created`, secret-free pinned metadata) in a single `provision_user` call. |
+| Race convergence | Identity-tuple re-read is the only convergence signal; `existing_user_id` is an email-fallback value — cross-check only. Re-read miss → `ProvisioningConflictError` (409), no partial rows. |
+| Context | Earliest active org by default (`limit=1` page over `(created_at, id)`); explicit `organization_id` requires active membership + active org, else 403; `roles=[role]`, `scopes=[]`. |
+| HTTP mapping | 401 `TokenValidationError` (zero storage calls — rejection never mutates), 403 disabled/no-org, 409 conflict, 503 provider outage (`internal_error` envelope code). |
+| Tests | Signed fixtures + loopback counting `JwksTestServer` (`src/tests/support/cognito.py`), never a live Cognito pool; stub-storage call-count proofs; barrier-based concurrency, no sleeps. |

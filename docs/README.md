@@ -9,6 +9,9 @@ this order before changing the service:
 4. [Phase 01](phases/01-foundation.md) — completed foundation handoff.
 5. [Phase 02](phases/02-storage.md) — completed storage handoff: contract,
    SQLite adapter, and conformance suite.
+6. [Phase 03](phases/03-identity.md) — completed identity handoff: Cognito
+   token verification, resolution/provisioning, authorization context, and
+   the `GET /v1/me` surface.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,
