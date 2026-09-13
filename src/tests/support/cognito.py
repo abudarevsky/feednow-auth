@@ -40,6 +40,11 @@ JWKS_SUFFIX = "/.well-known/jwks.json"
 
 RSA_KEY_SIZE = 2048
 
+# ``ThreadingHTTPServer.shutdown`` waits for the serve loop's polling interval.
+# Keep the loop responsive because this fixture is created and stopped by many
+# individual verifier tests.
+SERVER_POLL_INTERVAL_SECONDS = 0.01
+
 
 @dataclass(frozen=True)
 class TestKey:
@@ -174,9 +179,13 @@ class JwksTestServer:
         if self._thread is not None:
             raise RuntimeError("JwksTestServer already started")
         self._thread = threading.Thread(
-            target=self._server.serve_forever, name="jwks-test-server", daemon=True
+            target=self._serve_forever, name="jwks-test-server", daemon=True
         )
         self._thread.start()
+
+    def _serve_forever(self) -> None:
+        """Serve requests with a short shutdown polling interval."""
+        self._server.serve_forever(poll_interval=SERVER_POLL_INTERVAL_SECONDS)
 
     def stop(self) -> None:
         """Stop serving and close the socket; idempotent.
