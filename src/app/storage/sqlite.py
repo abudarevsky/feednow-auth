@@ -61,8 +61,11 @@ audit write (:meth:`SQLiteStorage.append_audit_event`) on the shared
 the :meth:`SQLiteStorage.provision_user` atomic compound — a single-transaction
 batch write (``BEGIN IMMEDIATE``) over the shared row-insert helpers the
 standalone ``create_*`` methods now delegate to, with the spec §6
-race-error mapping pinned in the contract. Behavior/conformance testing is
-owned by ``src/tests/storage_contract/``.
+race-error mapping pinned in the contract. Phase 04 task 1 added the second
+compound, :meth:`SQLiteStorage.provision_organization` (organization +
+membership + audits in one transaction, deliberately **no** race-convergence
+mapping — a slug conflict is a plain translated ``DuplicateEntityError``).
+Behavior/conformance testing is owned by ``src/tests/storage_contract/``.
 """
 
 from __future__ import annotations
@@ -93,6 +96,7 @@ from app.storage.contract import (
     DuplicateExternalIdentityError,
     EntityNotFoundError,
     InvalidCursorError,
+    ProvisionedOrganization,
     ProvisionedUser,
     ReferenceNotFoundError,
     Storage,
@@ -1240,7 +1244,7 @@ class SQLiteStorage:
             raise _translate_driver_error(exc) from exc
         conn.commit()
 
-    # -- Compound operations (task 7) -------------------------------------------
+    # -- Compound operations (task 7; Phase 04 task 1) --------------------------
 
     def _resolve_provision_race_user_id(
         self,
@@ -1255,9 +1259,9 @@ class SQLiteStorage:
         winner's committed rows): re-read the identity row for the batch's
         ``(provider, provider_subject, tenant_normalized)`` tuple, falling
         back to a users-by-email read. Both reads are adapter-internal — the
-        contract gains no 19th method — and return the winner's ``usr_`` id
-        so Phase 03 converges without a second query, or ``None`` when
-        neither resolves.
+        contract gains no separate resolve method — and return the winner's
+        ``usr_`` id so Phase 03 converges without a second query, or ``None``
+        when neither resolves.
         """
         row = conn.execute(
             "SELECT user_id FROM external_identities"
@@ -1350,6 +1354,62 @@ class SQLiteStorage:
         return ProvisionedUser(
             user=user,
             identity=identity,
+            organization=organization,
+            membership=membership,
+            audit_events=events,
+        )
+
+    def provision_organization(
+        self,
+        *,
+        organization: Organization,
+        membership: Membership,
+        audit_events: Sequence[AuditEvent],
+    ) -> ProvisionedOrganization:
+        """Atomically write organization + membership + audit events in one
+        transaction (Phase 04 breakdown decision 2; contract-pinned).
+
+        ``BEGIN IMMEDIATE`` is the first statement so the write lock is held
+        *before* any read snapshot exists (same discipline as
+        :meth:`provision_user`): a concurrent loser on the slug UNIQUE blocks
+        on ``busy_timeout``, then observes the winner's committed row and
+        fails on the real constraint. All rows go through the shared
+        ``_insert_*_row`` helpers, so the stored encoding is identical to the
+        standalone paths; nothing is committed until the whole batch has
+        succeeded, and every failure path is fully rolled back.
+
+        Conflict semantics deliberately differ from :meth:`provision_user`:
+        there is **no race-convergence mapping** here. A taken slug is a
+        plain translated :class:`~app.storage.contract.DuplicateEntityError`
+        (``kind="organization_slug"``), taken record ids are
+        ``kind="entity_id"``, and an unknown ``membership.user_id`` — the
+        only parent the batch does not itself create — surfaces as
+        :class:`~app.storage.contract.ReferenceNotFoundError` via the foreign
+        key. The returned :class:`~app.storage.contract.ProvisionedOrganization`
+        echoes the caller-supplied objects unchanged (caller-echo contract:
+        storage mints nothing and does not re-read what it wrote).
+        """
+        conn = self._connection()
+        # Materialize once: the insert loop and the caller-echo tuple below
+        # must share one iteration (a one-shot argument would otherwise
+        # persist rows but echo an empty batch).
+        events = tuple(audit_events)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._insert_organization_row(conn, organization)
+            self._insert_membership_row(conn, membership)
+            for audit_event in events:
+                self._insert_audit_event_row(conn, audit_event)
+        except sqlite3.Error as exc:
+            # Roll back the whole batch: a rejected organization write leaves
+            # no partial organization, membership, or audit rows, and the
+            # thread-local connection is never left inside an open
+            # transaction. No winner-resolution reads: slug conflicts are
+            # plain conflicts, never a converge (contract-pinned).
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+        return ProvisionedOrganization(
             organization=organization,
             membership=membership,
             audit_events=events,

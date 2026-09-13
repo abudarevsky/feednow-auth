@@ -7,8 +7,10 @@ Covers the task's verify lines:
 2. ``ProvisionedUser`` is frozen and is a pure caller-echo bundle.
 3. A minimal stub class satisfies ``isinstance`` under ``runtime_checkable``;
    a partial stub does not.
-4. The protocol exposes exactly the 18 §11/§12 methods, all synchronous, with
-   signatures that reference only domain/typing types (no driver types).
+4. The protocol exposes exactly the 19 §11/§12 methods (18 Phase 02
+   operations plus the Phase 04 ``provision_organization`` compound), all
+   synchronous, with signatures that reference only domain/typing types (no
+   driver types).
 5. Subprocess-isolated import check (fresh interpreter, Phase 01 task-6
    precedent): importing ``app.storage.contract`` and ``app.storage`` pulls in
    neither ``sqlite3``, ``boto3``, nor any adapter module. In-process
@@ -61,8 +63,10 @@ from app.models.ids import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 
-#: The 18 §11/§12 operations, exactly as the spec sketch names them plus the
-#: compound ``provision_user``.
+#: The 19 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
+#: ``provision_user`` compound) and the Phase 04 ``provision_organization``
+#: compound (breakdown decision 2 — an explicit addition to the current
+#: phase's contract).
 CONTRACT_METHODS = frozenset(
     {
         "create_user",
@@ -83,6 +87,7 @@ CONTRACT_METHODS = frozenset(
         "revoke_api_key",
         "append_audit_event",
         "provision_user",
+        "provision_organization",
     }
 )
 
@@ -380,6 +385,48 @@ def test_provisioned_user_accepts_any_sequence_of_audit_events() -> None:
     assert _bundle(audit_events=(a for a in (audit,))).audit_events == (audit,)
 
 
+def _org_bundle(**overrides: object) -> contract.ProvisionedOrganization:
+    values: dict[str, object] = {
+        "organization": make_organization(),
+        "membership": make_membership(),
+        "audit_events": [make_audit_event()],
+    }
+    values.update(overrides)
+    return contract.ProvisionedOrganization(**values)  # type: ignore[arg-type]
+
+
+def test_provisioned_organization_fields_are_the_contract_components() -> None:
+    assert set(contract.ProvisionedOrganization.model_fields) == {
+        "organization",
+        "membership",
+        "audit_events",
+    }
+
+
+def test_provisioned_organization_echoes_the_caller_objects_unchanged() -> None:
+    organization, membership = make_organization(), make_membership()
+    audit = make_audit_event()
+    bundle = _org_bundle(organization=organization, membership=membership)
+    # "Storage mints nothing and does not re-read": the very objects passed in.
+    assert bundle.organization is organization
+    assert bundle.membership is membership
+    assert bundle.audit_events == (audit,)
+
+
+def test_provisioned_organization_is_frozen_and_rejects_extras() -> None:
+    bundle = _org_bundle()
+    with pytest.raises(ValidationError):
+        bundle.organization = make_organization()  # type: ignore[misc]
+    with pytest.raises(ValidationError):
+        _org_bundle(rows=[{"leak": True}])  # type: ignore[call-arg]
+
+
+def test_provisioned_organization_accepts_any_sequence_of_audit_events() -> None:
+    audit = make_audit_event()
+    assert _org_bundle(audit_events=(audit,)).audit_events == (audit,)
+    assert _org_bundle(audit_events=(a for a in (audit,))).audit_events == (audit,)
+
+
 # ---------------------------------------------------------------------------
 # 3. runtime_checkable protocol conformance
 # ---------------------------------------------------------------------------
@@ -390,7 +437,7 @@ def test_minimal_stub_satisfies_isinstance() -> None:
 
 
 def test_partial_stub_does_not_satisfy_isinstance() -> None:
-    for missing in ("append_audit_event", "provision_user", "get_user"):
+    for missing in ("append_audit_event", "provision_user", "provision_organization", "get_user"):
         assert not isinstance(_stub_class(skip=missing)(), contract.Storage), missing
 
 
@@ -399,14 +446,14 @@ def test_plain_object_does_not_satisfy_isinstance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Protocol surface: 18 methods, sync, domain-only types
+# 4. Protocol surface: 19 methods, sync, domain-only types
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_exposes_exactly_the_18_contract_methods() -> None:
+def test_protocol_exposes_exactly_the_19_contract_methods() -> None:
     members = typing.get_protocol_members(contract.Storage)
     assert members == set(CONTRACT_METHODS)
-    assert len(members) == 18
+    assert len(members) == 19
 
 
 @pytest.mark.parametrize("name", sorted(CONTRACT_METHODS))
@@ -427,10 +474,13 @@ def test_signatures_reference_only_domain_types(name: str) -> None:
 
 
 def test_get_user_by_external_identity_is_the_resolve_operation() -> None:
-    # Pinned in the contract docstring so Phase 06 does not add a 19th method.
+    # Pinned in the contract docstring: the resolve seam is this same method,
+    # never a separate ``resolve_external_identity`` operation (Phase 04's
+    # ``provision_organization`` compound made the old "no 19th method"
+    # literal false; the phrase below is its truthful replacement).
     doc = contract.Storage.get_user_by_external_identity.__doc__ or ""
     assert "resolve_external_identity" in doc
-    assert "no 19th method" in doc
+    assert "no *separate* ``resolve_external_identity`` method" in doc
 
 
 def test_docstrings_pin_the_required_semantics() -> None:
@@ -441,6 +491,12 @@ def test_docstrings_pin_the_required_semantics() -> None:
     assert "not** filtered" in (contract.Storage.get_api_key.__doc__ or "")
     assert "fully rolled back" in (contract.Storage.provision_user.__doc__ or "")
     assert "Returns ``None``" in (contract.Storage.append_audit_event.__doc__ or "")
+    # Phase 04: the org compound pins its own atomicity, no-convergence
+    # semantics, and the Phase 06 replication obligation.
+    org_doc = contract.Storage.provision_organization.__doc__ or ""
+    assert "fully rolled back" in org_doc
+    assert "no race-convergence" in org_doc
+    assert "Phase 06 replication obligation" in org_doc
 
 
 # ---------------------------------------------------------------------------
@@ -462,6 +518,17 @@ def test_provision_user_audit_events_is_required_keyword_only() -> None:
     assert audit_events.default is inspect.Parameter.empty
     # No defaults anywhere: silently skipping §16 events must be impossible.
     assert all(p.default is inspect.Parameter.empty for p in parameters.values())
+
+
+def test_provision_organization_audit_events_is_required_keyword_only() -> None:
+    parameters = inspect.signature(contract.Storage.provision_organization).parameters
+    audit_events = parameters["audit_events"]
+    assert audit_events.kind is inspect.Parameter.KEYWORD_ONLY
+    assert audit_events.default is inspect.Parameter.empty
+    # Same discipline as provision_user: no defaults, and the batch's only
+    # external parent (membership.user_id) is checked, never defaulted.
+    assert all(p.default is inspect.Parameter.empty for p in parameters.values())
+    assert set(parameters) == {"self", "organization", "membership", "audit_events"}
 
 
 def test_multi_value_lookups_are_keyword_only() -> None:

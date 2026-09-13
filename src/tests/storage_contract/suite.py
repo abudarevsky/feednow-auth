@@ -64,6 +64,7 @@ from app.storage.contract import (
     DuplicateExternalIdentityError,
     EntityNotFoundError,
     InvalidCursorError,
+    ProvisionedOrganization,
     ProvisionedUser,
     ReferenceNotFoundError,
     Storage,
@@ -1274,6 +1275,191 @@ def test_concurrent_identical_provisions_yield_exactly_one_success(storage: Stor
         storage.get_user(batches[loser_token][0].id)
     with pytest.raises(EntityNotFoundError):
         storage.get_organization(batches[loser_token][2].id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 04 task 1 — provision_organization: atomic write of organization +
+# membership + audits (full read-back; audit rows proven via the
+# duplicate-append proof), slug conflict as a *plain* DuplicateEntityError
+# (never the race error — this compound has no convergence semantics), taken
+# org_/mem_/aud_ record ids as entity_id, unknown membership.user_id as
+# ReferenceNotFoundError, and full rollback of every rejected batch.
+# ---------------------------------------------------------------------------
+
+
+def test_provision_organization_writes_every_component_atomically(storage: Storage) -> None:
+    owner = make_user()
+    storage.create_user(owner)
+    organization = make_organization(organization_id="org_test_0002")
+    membership = make_membership(
+        membership_id="mem_test_0002",
+        organization_id="org_test_0002",
+        user_id="usr_test_0001",
+    )
+    first_event = make_audit_event(
+        audit_id="aud_test_0002",
+        organization_id="org_test_0002",
+        action="organization.created",
+    )
+    second_event = make_audit_event(
+        audit_id="aud_test_0003",
+        organization_id="org_test_0002",
+        action="membership.created",
+        created_at=T1,
+    )
+    result = storage.provision_organization(
+        organization=organization,
+        membership=membership,
+        audit_events=[first_event, second_event],
+    )
+    # Caller-echo contract: the bundle carries the supplied objects unchanged
+    # (storage mints nothing and does not re-read what it wrote).
+    assert isinstance(result, ProvisionedOrganization)
+    assert result.organization == organization
+    assert result.membership == membership
+    assert result.audit_events == (first_event, second_event)
+    # Every component is observable through its contract read path...
+    assert storage.get_organization(organization.id) == organization
+    assert storage.get_membership(organization_id=organization.id, user_id=owner.id) == membership
+    listed = storage.list_user_organizations(owner.id, PageParams(limit=10))
+    assert [listed_org.id for listed_org in listed.items] == [organization.id]
+    # ...and audit rows are proven via the duplicate-append proof (the suite
+    # has no audit read surface): re-appending a provisioned aud_ id is a
+    # primary-key conflict, never a silent second insert.
+    for event in (first_event, second_event):
+        with pytest.raises(DuplicateEntityError) as excinfo:
+            storage.append_audit_event(event)
+        assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+
+
+def test_provision_organization_slug_conflict_is_plain_duplicate_and_rolls_back(
+    storage: Storage,
+) -> None:
+    owner = make_user()
+    storage.create_user(owner)
+    existing = make_organization()  # slug "org-org_test_0001"
+    storage.create_organization(existing)
+    organization = make_organization(organization_id="org_test_0002", slug=existing.slug)
+    membership = make_membership(
+        membership_id="mem_test_0002",
+        organization_id="org_test_0002",
+        user_id="usr_test_0001",
+    )
+    audit = make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.provision_organization(
+            organization=organization,
+            membership=membership,
+            audit_events=[audit],
+        )
+    error = excinfo.value
+    assert error.kind is DuplicateEntityKind.ORGANIZATION_SLUG
+    # A slug conflict is NOT the race error: this compound never converges
+    # (unlike provision_user's email/identity-tuple mapping).
+    assert not isinstance(error, DuplicateExternalIdentityError)
+    # Full rollback: the rejected batch consumed none of its ids...
+    with pytest.raises(EntityNotFoundError):
+        storage.get_organization(organization.id)
+    with pytest.raises(EntityNotFoundError):
+        storage.get_membership(organization_id=organization.id, user_id=owner.id)
+    # ...including the audit id: appending it against the *existing*
+    # organization succeeds, proving the batch's audit row rolled back.
+    assert (
+        storage.append_audit_event(
+            make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0001")
+        )
+        is None
+    )
+    # The pre-existing organization is untouched.
+    assert storage.get_organization(existing.id) == existing
+
+
+def test_provision_organization_taken_record_ids_raise_entity_id_conflict(
+    storage: Storage,
+) -> None:
+    owner = make_user()
+    storage.create_user(owner)
+    storage.create_organization(make_organization())  # takes org_test_0001
+    storage.create_membership(make_membership())  # takes mem_test_0001
+    storage.append_audit_event(make_audit_event())  # takes aud_test_0001
+    # Taken org_ id with a *fresh* slug (so only the record-id PK can fire).
+    with pytest.raises(DuplicateEntityError) as org_conflict:
+        storage.provision_organization(
+            organization=make_organization(slug="fresh-slug-for-taken-id"),
+            membership=make_membership(
+                membership_id="mem_test_0002",
+                organization_id="org_test_0001",
+                user_id="usr_test_0001",
+            ),
+            audit_events=[
+                make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0001")
+            ],
+        )
+    assert org_conflict.value.kind is DuplicateEntityKind.ENTITY_ID
+    # Taken mem_ id (fresh org id; both membership FKs pass, so the only
+    # violation left is the record-id PK).
+    with pytest.raises(DuplicateEntityError) as mem_conflict:
+        storage.provision_organization(
+            organization=make_organization(organization_id="org_test_0002"),
+            membership=make_membership(
+                membership_id="mem_test_0001",
+                organization_id="org_test_0002",
+                user_id="usr_test_0001",
+            ),
+            audit_events=[
+                make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")
+            ],
+        )
+    assert mem_conflict.value.kind is DuplicateEntityKind.ENTITY_ID
+    # Taken aud_ id (fresh org/membership ids with passing FKs).
+    with pytest.raises(DuplicateEntityError) as aud_conflict:
+        storage.provision_organization(
+            organization=make_organization(organization_id="org_test_0002"),
+            membership=make_membership(
+                membership_id="mem_test_0002",
+                organization_id="org_test_0002",
+                user_id="usr_test_0001",
+            ),
+            audit_events=[make_audit_event()],
+        )
+    assert aud_conflict.value.kind is DuplicateEntityKind.ENTITY_ID
+    # Every rejected batch rolled back: only the three standalone writes
+    # above exist.
+    assert storage.get_organization(OrganizationId("org_test_0001")) == make_organization()
+    with pytest.raises(EntityNotFoundError):
+        storage.get_organization(OrganizationId("org_test_0002"))
+
+
+def test_provision_organization_unknown_membership_user_raises_reference_not_found(
+    storage: Storage,
+) -> None:
+    # The membership's user is the only parent this batch does not create;
+    # the organization and audit FKs are satisfied inside the batch, so the
+    # failure must name the missing user, not a phantom parent.
+    organization = make_organization(organization_id="org_test_0002")
+    membership = make_membership(
+        membership_id="mem_test_0002",
+        organization_id="org_test_0002",
+        user_id="usr_ghost_0001",
+    )
+    audit = make_audit_event(
+        audit_id="aud_test_0002",
+        organization_id="org_test_0002",
+        actor_user_id="usr_ghost_0001",
+    )
+    with pytest.raises(ReferenceNotFoundError):
+        storage.provision_organization(
+            organization=organization,
+            membership=membership,
+            audit_events=[audit],
+        )
+    # Full rollback: zero org/membership/audit rows from the rejected batch.
+    with pytest.raises(EntityNotFoundError):
+        storage.get_organization(organization.id)
+    with pytest.raises(EntityNotFoundError):
+        storage.get_membership(organization_id=organization.id, user_id=UserId("usr_ghost_0001"))
+    with pytest.raises(ReferenceNotFoundError):
+        storage.append_audit_event(audit)
 
 
 # ---------------------------------------------------------------------------

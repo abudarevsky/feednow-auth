@@ -15,7 +15,7 @@ when that behavior is actually implemented and verified.
 - Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
-- Storage is reached only through the 18-method `Storage` protocol and the
+- Storage is reached only through the 19-method `Storage` protocol and the
   documented factory `open_sqlite_storage(path: str | Path) -> Storage`.
   Signatures carry domain types exclusively: no row, driver exception,
   session, or interpretable cursor may cross the boundary.
@@ -30,6 +30,14 @@ when that behavior is actually implemented and verified.
 - Lists are ordered by `(created_at, id)` ascending with `id` as the
   deterministic keyset tiebreaker; out-of-range limits are clamped, not
   rejected.
+- Organization creation is exactly one `provision_organization` batch
+  (organization + owner membership + creation audits) — the only atomic
+  unit, because the owner invariant has no repair path. Unlike
+  `provision_user` there is no race convergence: a taken slug is a plain
+  `DuplicateEntityError(kind=organization_slug)`, taken record ids are
+  `entity_id`, and an unknown membership user is `ReferenceNotFoundError`;
+  every rejected batch is fully rolled back. Phase 06 must replicate the
+  atomics (contract docstring carries the duty).
 
 Authentication boundary (Phase 03):
 
@@ -69,8 +77,8 @@ Canonical modules:
 - Domain: `src/app/models/`
 - API schemas and manifest: `src/app/api/schemas/`
 - App factory: `src/app/main.py`
-- Storage contract (protocol, errors, `ProvisionedUser`):
-  `src/app/storage/contract.py`
+- Storage contract (protocol, errors, `ProvisionedUser`,
+  `ProvisionedOrganization`): `src/app/storage/contract.py`
 - SQLite adapter and factory: `src/app/storage/sqlite.py`
 - Adapter-neutral storage conformance suite:
   `src/tests/storage_contract/`

@@ -643,12 +643,13 @@ def test_closed_instance_is_not_reusable(tmp_path) -> None:  # type: ignore[no-u
 
 def test_contract_surface_has_no_remaining_stubs() -> None:
     # The task-2 skeleton existed so a forgotten method failed loudly with
-    # NotImplementedError; task 7 completed the surface with provision_user.
-    # Definition-of-done tripwire (acceptance: "all 18 contract methods
+    # NotImplementedError; task 7 completed the surface with provision_user,
+    # and Phase 04 task 1 added provision_organization (implemented).
+    # Definition-of-done tripwire (acceptance: "all contract methods
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 18, members
+    assert len(members) == 19, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

@@ -1,7 +1,7 @@
 """Domain-oriented storage contract (Phase 02, spec §11/§12).
 
 This module is the *only* storage surface application code (Phases 03, 05, 06)
-may depend on. It declares the 18 §11/§12 operations as a
+may depend on. It declares the 19 §11/§12 operations as a
 :class:`typing.Protocol` plus the domain error vocabulary adapters raise.
 
 Contract-wide rules (pinned by the Phase 02 breakdown; adapters must not
@@ -12,7 +12,8 @@ reinterpret them):
   through its threadpool. ``Storage`` methods are plain ``def``; async would be
   an invented constraint.
 - **Domain types only.** Every signature uses :mod:`app.models` types plus the
-  :class:`ProvisionedUser` result bundle below. No SQL/SQLite/DynamoDB-specific
+  :class:`ProvisionedUser`/:class:`ProvisionedOrganization` result bundles
+  below. No SQL/SQLite/DynamoDB-specific
   value may cross this boundary: no rows, no ``LastEvaluatedKey``, no
   ``ConditionalCheckFailedException``, no sessions, no pagination tokens with
   interpretable content, and no driver exceptions (spec §11 leak examples;
@@ -173,7 +174,7 @@ class InvalidCursorError(StorageError):
 
 
 # ---------------------------------------------------------------------------
-# Compound-operation result
+# Compound-operation results
 # ---------------------------------------------------------------------------
 
 
@@ -197,8 +198,26 @@ class ProvisionedUser(BaseModel):
     audit_events: tuple[AuditEvent, ...]
 
 
+class ProvisionedOrganization(BaseModel):
+    """Frozen result bundle returned by :meth:`Storage.provision_organization`.
+
+    **Caller-echo contract:** identical discipline to :class:`ProvisionedUser`
+    — the bundle carries the caller-supplied domain objects *unchanged*;
+    storage mints nothing and does not re-read what it wrote. Persistence is
+    proven by the conformance suite's read cases and, for audit rows, by the
+    duplicate-append proof; Phase 06 must not add reads to honor this shape.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    organization: Organization
+    membership: Membership
+    audit_events: tuple[AuditEvent, ...]
+
+
 # ---------------------------------------------------------------------------
-# The protocol (18 methods: spec §11 surface + §12 ``provision_user``)
+# The protocol (19 methods: spec §11 surface + the §12 compound
+# ``provision_user`` + the Phase 04 compound ``provision_organization``)
 # ---------------------------------------------------------------------------
 
 
@@ -261,8 +280,8 @@ class Storage(Protocol):
         """Resolve a provider identity to the internal :class:`User`.
 
         **This method *is* spec §12's ``resolve_external_identity``** — one
-        operation, §11's name; there is no 19th method on this protocol (the
-        naming mismatch is a spec-revision proposal).
+        operation, §11's name; there is no *separate* ``resolve_external_identity`` method
+        on this protocol (the naming mismatch is a spec-revision proposal).
 
         ``provider_subject`` is a provider-side string (Cognito ``sub``,
         Shopify shop ID) and is never coerced into, or matched against, a
@@ -510,6 +529,53 @@ class Storage(Protocol):
         """
         ...
 
+    def provision_organization(
+        self,
+        *,
+        organization: Organization,
+        membership: Membership,
+        audit_events: Sequence[AuditEvent],
+    ) -> ProvisionedOrganization:
+        """Atomically write organization + membership + audit events in one
+        transaction (Phase 04 breakdown decision 2; a spec §12 compound —
+        the §12 addition is an escalated spec-revision proposal).
+
+        Organization creation must not be two sequential writes: the owner
+        membership has no repair path (no organization update/delete exists),
+        so a crash between ``create_organization`` and ``create_membership``
+        would burn the slug forever behind a permanent 409. This compound is
+        the sanctioned atomic unit: one transaction over the same row-insert
+        behavior the standalone paths use; every failure path is fully rolled back,
+        so no partial organization, membership, or audit rows survive a
+        rejected batch.
+
+        ``audit_events`` is **required** keyword-only (same discipline as
+        :meth:`provision_user`): creation events are part of the atomic unit
+        (spec §16) and no default may let a caller silently skip them. The
+        returned :class:`ProvisionedOrganization` echoes the caller-supplied
+        objects unchanged — storage mints nothing and does not re-read.
+
+        Conflict semantics differ from :meth:`provision_user` **on purpose**:
+        there is no race-convergence here. A taken slug is a plain
+        :class:`DuplicateEntityError` (``kind="organization_slug"``) — a
+        conflict, never a converge; taken ``org_``/``mem_``/``aud_`` record
+        ids surface as ``kind="entity_id"``. The membership's ``user_id`` is
+        the only parent the batch does not itself create: unknown, it raises
+        :class:`ReferenceNotFoundError` (the organization and audit FKs are
+        satisfied inside the batch).
+
+        **Phase 06 replication obligation:** DynamoDB must enforce the same
+        all-or-nothing batch, the same conflict kinds, and the same reference
+        checks inside its conditional writes; the conformance suite pins the
+        observable behavior, not the mechanism.
+
+        Raises:
+            DuplicateEntityError: ``kind="organization_slug"`` for a taken
+                slug, ``kind="entity_id"`` for a taken record id.
+            ReferenceNotFoundError: when ``membership.user_id`` is unknown.
+        """
+        ...
+
 
 __all__ = [
     "DuplicateEntityError",
@@ -517,6 +583,7 @@ __all__ = [
     "DuplicateExternalIdentityError",
     "EntityNotFoundError",
     "InvalidCursorError",
+    "ProvisionedOrganization",
     "ProvisionedUser",
     "ReferenceNotFoundError",
     "Storage",
