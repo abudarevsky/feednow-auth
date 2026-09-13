@@ -1,7 +1,7 @@
 # Phase 03 — Identity resolution and safe provisioning
 
 **Dependency:** Phase 02  
-**Handoff to:** Phases 04, 06, and 07
+**Handoff to:** Phases 05, 06, and 07
 
 ## Goal
 
@@ -29,4 +29,3 @@ Registration, hosted UI, OAuth callback, federation configuration, and membershi
 ## Handoff
 
 Publish the authentication dependency interface and resolved AuthorizationContext for routers and API-key authentication.
-
