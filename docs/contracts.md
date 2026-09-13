@@ -72,6 +72,37 @@ Authentication boundary (Phase 03):
   id is the only identifier returned; no `sub`, no `client_id`, no token
   material, no record ids (`extid_`/`mem_`/`aud_`).
 
+Authorization boundary (Phase 04):
+
+- Role rank is `viewer < member < admin < owner` (`ROLE_RANK`). Org-scoped
+  reads require an active membership (any role); member add/remove require
+  rank ≥ admin. Organization creation requires only authentication and the
+  creator becomes `owner` through the atomic batch. `owner` is not
+  grantable, not removable, and not changeable through the API (policy plus
+  the deliberate absence of storage update methods).
+- Unknown org, inactive org, missing membership, inactive membership, and
+  insufficient role all answer the same 403 with one fixed message
+  (existence-oracle-free). `authorization.denied` is audited whenever the
+  organization row exists with metadata exactly `{reason, operation}`;
+  unknown-org denials are structurally unaudited (FK exception); an
+  audit-append failure on a denial is a 500, never a silent 403
+  (fail-closed).
+- Mutation audits: `organization.created` `{"type"}` + `membership.created`
+  `{"role": "owner"}` inside the creation batch; `membership.created` /
+  `membership.removed` (role at removal) appended standalone **after** the
+  successful write. No `mem_` record id or email appears in any response
+  body; record ids live only in audit targets.
+- Status mapping (frozen codes only): type/owner-role guards and foreign
+  cursors → 400 `validation_error`; non-member and unknown target `usr_` →
+  404 `not_found`; slug conflict, duplicate pair, and owner immutability →
+  409 `conflict`; any other `StorageError` stays untranslated to the 500
+  handler.
+- The shared dependency factories `build_organization_member_dependency` /
+  `build_organization_admin_dependency` (keyed on the resolved context's
+  actor, so Phase 05's `api_key` branch joins at the same seam) yield a
+  frozen `OrganizationAccess(identity, organization, membership)`; shipped
+  routers carry no authz logic and register manifest entries only.
+
 Canonical modules:
 
 - Domain: `src/app/models/`
@@ -86,4 +117,8 @@ Canonical modules:
   `jwks.py`, `dependencies.py`)
 - Resolution/provisioning rules and ID minting:
   `src/app/services/identity.py`, `src/app/services/idgen.py`
+- Authorization rules and audit builders: `src/app/services/authorization.py`
+- Shared organization-access dependency: `src/app/auth/organization_access.py`
+- Tenancy services and routers: `src/app/services/{organization,member}.py`,
+  `src/app/api/{organizations,members}.py`
 - First mounted router: `src/app/api/me.py`

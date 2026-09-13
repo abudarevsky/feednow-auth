@@ -67,11 +67,37 @@ The tree is dirty from the Phase 03 close-out plus an **abandoned scaffold** fro
 
 ## Definition of done check (maps to acceptance criteria)
 
-- [ ] A user lists only memberships and cannot read another organization by guessed ID (tasks 4, 5 — list scoping + uniform-403 GET matrix)
-- [ ] Only documented roles mutate organizations/memberships; out-of-policy attempts are denied consistently (tasks 2, 3, 4, 5 — decision-3 policy + byte-identical 403)
-- [ ] Membership creation/removal is duplicate-safe and preserves documented owner invariants (tasks 1, 2, 5, 6 — 409 paths, owner immutability, barrier proofs)
-- [ ] Authorized mutations create safe audit events; denials create `authorization.denied` without sensitive data (tasks 2, 4, 5, 6 — direct-row assertions + hygiene sweep; unknown-org no-FK exception documented per decision 4)
-- [ ] Integration tests cover owner/admin/member/viewer decisions and cross-tenant denial for every endpoint (tasks 4, 5 — all six §14 endpoints of this phase)
+- [x] A user lists only memberships and cannot read another organization by guessed ID (tasks 4, 5 — list scoping + uniform-403 GET matrix)
+- [x] Only documented roles mutate organizations/memberships; out-of-policy attempts are denied consistently (tasks 2, 3, 4, 5 — decision-3 policy + byte-identical 403)
+- [x] Membership creation/removal is duplicate-safe and preserves documented owner invariants (tasks 1, 2, 5, 6 — 409 paths, owner immutability, barrier proofs)
+- [x] Authorized mutations create safe audit events; denials create `authorization.denied` without sensitive data (tasks 2, 4, 5, 6 — direct-row assertions + hygiene sweep; unknown-org no-FK exception documented per decision 4)
+- [x] Integration tests cover owner/admin/member/viewer decisions and cross-tenant denial for every endpoint (tasks 4, 5 — all six §14 endpoints of this phase)
+
+## Delivery evidence (task 7)
+
+Commits: precondition `chore(specs)` (specs moves only), then
+`feat(phase-04 task 1..7)` per this breakdown. The abandoned scaffold
+(decision 0) was deleted uncommitted and replaced wholesale by tasks 4/5;
+`NOTES.md` deleted; `.pi/` never committed.
+
+Final sweep (2026-09-13):
+
+- `uv run pytest` → **943 passed** (baseline 739 + 204 Phase 04: task 1 19,
+  task 2 69, task 3 7, task 4 23, task 5 24, task 6 62).
+- `uv run pytest src/tests/storage_contract` → 64 passed (60 adapter-neutral
+  suite cases — including the four new `provision_organization` proofs — +
+  4 harness isolation cases); DynamoDB entry deferred to Phase 06 per plan.
+- `uv run ruff check .` → All checks passed; `uv run ruff format --check .`
+  → clean; `git diff --check` → clean.
+- No-`boto3` subprocess import proof (`test_app_skeleton.py`) green;
+  Phase 04 added no runtime dependencies (`pyproject.toml` untouched).
+- Handoff: `docs/phases/04-organizations.md` (new) linked from
+  `docs/README.md`; `docs/architecture.md`, `docs/contracts.md`, and
+  `README.md` updated in the same commit; no docs link to WIP/draft specs.
+
+Escalations below remain open as spec-revision proposals (planner record,
+not implementation work); Phase 06/07 obligations and handoff notes are
+recorded in the phase doc's "Published interfaces" and this file.
 
 ## Escalations (planner action, not implementation work)
 

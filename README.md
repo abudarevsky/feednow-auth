@@ -168,7 +168,7 @@ Editing the modules below is a contract change requiring a spec revision.
 
 | Module | Surface | First consumer |
 | --- | --- | --- |
-| `src/app/storage/contract.py` | `Storage` (`@runtime_checkable` Protocol, 18 sync methods: users, external identities, organizations, memberships, API keys, `append_audit_event`, `provision_user`, three paginated lists); domain errors `StorageError`/`EntityNotFoundError`/`DuplicateEntityError` (+`DuplicateEntityKind`)/`DuplicateExternalIdentityError`/`ReferenceNotFoundError`/`InvalidCursorError`; frozen `ProvisionedUser` caller-echo bundle | Phases 03/04/05 services; Phase 06 adapter |
+| `src/app/storage/contract.py` | `Storage` (`@runtime_checkable` Protocol, 19 sync methods: users, external identities, organizations, memberships, API keys, `append_audit_event`, `provision_user`, `provision_organization`, three paginated lists); domain errors `StorageError`/`EntityNotFoundError`/`DuplicateEntityError` (+`DuplicateEntityKind`)/`DuplicateExternalIdentityError`/`ReferenceNotFoundError`/`InvalidCursorError`; frozen `ProvisionedUser`/`ProvisionedOrganization` caller-echo bundles | Phases 03/04/05 services; Phase 06 adapter |
 | `src/app/storage/__init__.py` | Contract symbols only; never imports an adapter | any `app.storage` importer |
 | `src/app/storage/sqlite.py` | `open_sqlite_storage(path: str | Path) -> Storage` factory, `SQLiteStorage` adapter, schema v1 (6 tables, 5 unique indexes), codecs, opaque keyset cursors, sqlite3→domain error translation | Phase 03 provisioning; Phase 06 (as the behavior reference) |
 | `src/tests/storage_contract/suite.py` | 56 adapter-neutral behavior cases + deterministic `make_*` builders; module docstring is the fixture/import/builder reuse contract | Phase 06 DynamoDB entry (imported unchanged) |
@@ -186,11 +186,11 @@ Editing the modules below is a contract change requiring a spec revision.
 | Tenant normalization | `provider_tenant=None` stores as `''` and reads back as `None` (lossless: `ProviderTenant` pins `min_length=1`); SQLite `UNIQUE` treats NULLs as distinct, so normalization is what makes the constraint deterministic. Phase 06 keeps the same semantics. |
 | Stored timestamps | Fixed-width TEXT `YYYY-MM-DDTHH:MM:SS.ffffffZ` (microseconds always present) so lexicographic order equals chronological order; `to_utc_rfc3339` (API JSON) must not be reused for stored columns. |
 | Pagination | Keyset over `(created_at, id)` ascending; opaque base64url cursor carrying position plus a list-scope tag (a cursor from one list is invalid for another); `limit + 1` fetch decides `next_cursor`; `limit` re-clamped via `clamp_limit`; tampered/foreign cursors raise `InvalidCursorError`. Cursors are created/decoded only inside the adapter. |
-| Transactions / CAS | `provision_user` writes user + identity + organization + membership + audit events (required keyword-only) in one `BEGIN IMMEDIATE` transaction; any email/identity-tuple conflict maps to `DuplicateExternalIdentityError` (with `existing_user_id` when resolvable) after full rollback. `revoke_api_key` is a first-write-wins CAS: duplicate/concurrent revocations return the stored key with the original `revoked_at` (idempotent success); an unknown id raises. |
+| Transactions / CAS | `provision_user` writes user + identity + organization + membership + audit events (required keyword-only) in one `BEGIN IMMEDIATE` transaction; any email/identity-tuple conflict maps to `DuplicateExternalIdentityError` (with `existing_user_id` when resolvable) after full rollback. `provision_organization` (Phase 04) writes organization + membership + audit events in one transaction with **no** race convergence: a slug conflict is a plain `DuplicateEntityError(kind=organization_slug)`. `revoke_api_key` is a first-write-wins CAS: duplicate/concurrent revocations return the stored key with the original `revoked_at` (idempotent success); an unknown id raises. |
 | Tenancy | `get_api_key`/`revoke_api_key` are keyed by the `key_` identity and are deliberately **not** org-filtered (verification resolves the org *from* the key); `get_api_key_by_key_id` is the §8 credential-segment lookup. Org-scoped route enforcement is Phase 05 service work. |
 | Referential integrity | `identity→user`, `membership→org+user`, `api_key→org+creator`, `audit→org` are enforced by every adapter (`PRAGMA foreign_keys=ON` in SQLite; conditional writes in Phase 06) and raise `ReferenceNotFoundError`. |
 | Stored JSON / enums | `scopes` and `audit.metadata` round-trip exactly as JSON (scope order and duplicates preserved — normalization is Phase 05); enums store exact `StrEnum` strings; row→domain goes through `model_validate`, so corrupt stored values fail loudly. |
-| Audit | `append_audit_event(event) -> None` is the standalone write path for Phase 03–05 events; only provisioning batches go through `provision_user`. No audit read/list surface this phase (Phase 08). |
+| Audit | `append_audit_event(event) -> None` is the standalone write path for Phase 03–05 events; compound batches (`provision_user`, `provision_organization`) carry their own events atomically. No audit read/list surface this phase (Phase 08). |
 | Connection model | Thread-local connections, `journal_mode=WAL`, `busy_timeout` 5000 ms, `foreign_keys` asserted on as the first statement per connection, idempotent schema init stamped with `PRAGMA user_version`; `close()` releases and the instance is not reusable. Concurrency tests use barriers + WAL, never sleeps. |
 | Conformance invocation | `uv run pytest src/tests/storage_contract` (60 tests: 56 suite cases + 4 harness isolation proofs) against a clean temporary SQLite database per test. |
 
@@ -226,3 +226,32 @@ verification evidence live in
 | Context | Earliest active org by default (`limit=1` page over `(created_at, id)`); explicit `organization_id` requires active membership + active org, else 403; `roles=[role]`, `scopes=[]`. |
 | HTTP mapping | 401 `TokenValidationError` (zero storage calls — rejection never mutates), 403 disabled/no-org, 409 conflict, 503 provider outage (`internal_error` envelope code). |
 | Tests | Signed fixtures + loopback counting `JwksTestServer` (`src/tests/support/cognito.py`), never a live Cognito pool; stub-storage call-count proofs; barrier-based concurrency, no sleeps. |
+
+## Phase 04 organizations contracts (handoff)
+
+Phase 04 ships the tenancy boundary: organization list/create/read and
+member list/add/remove endpoints behind a shared role-check dependency,
+uniform audited denials, and the atomic `provision_organization` storage
+compound. The full contract, wiring example, and verification evidence live
+in [docs/phases/04-organizations.md](docs/phases/04-organizations.md).
+
+### Published interfaces
+
+| Interface | Module | Consumers |
+| --- | --- | --- |
+| `build_organization_member_dependency(storage, verifier, operation_id)` / `build_organization_admin_dependency(...)` → `OrganizationAccess` | `src/app/auth/organization_access.py` | Phase 05 (org-scoped key routes; `api_key` actor branch joins here) |
+| `classify_access(organization, membership, min_role)` / `ROLE_RANK` / `AccessOutcome` | `src/app/services/authorization.py` | any future role-policy surface (pure rules, no FastAPI) |
+| `Storage.provision_organization(*, organization, membership, audit_events) -> ProvisionedOrganization` | `src/app/storage/contract.py` | Phase 06 (must replicate the atomics; suite cases are adapter-neutral) |
+| `build_organizations_router(storage, verifier)` / `build_members_router(storage, verifier)` | `src/app/api/organizations.py`, `src/app/api/members.py` | Phase 07 deployment entrypoint (mount with `build_me_router` on the same instances) |
+| `audit_denial(...)` + `build_organization_created_audit` / `build_membership_created_audit` / `build_membership_removed_audit` / `build_denial_audit` | `src/app/services/authorization.py` | Phase 05 mutation/denial audits (same metadata discipline) |
+
+### Tenancy conventions
+
+| Topic | Rule |
+| --- | --- |
+| Role policy | `viewer < member < admin < owner` (`ROLE_RANK`); reads need any active membership, member add/remove need rank ≥ admin; org creation is authenticated-only and the creator becomes `owner`. `owner` is not grantable, not removable, not changeable (policy + no storage update methods). |
+| Denials | Five outcomes (unknown org, inactive org, absent membership, inactive membership, insufficient role) → one byte-identical 403 with a fixed message (no existence oracle); `classify_access` precedence (org status → presence → membership status → rank) keeps the audit `reason` deterministic. |
+| Denial audit | `authorization.denied` with metadata exactly `{"reason", "operation"}` appended **before** the 403 whenever the org row exists; unknown-org denials are structurally unaudited (FK exception); append failure → 500 (fail-closed), never a silent 403. |
+| Mutation audit | Creation batch audits `organization.created` `{"type"}` + `membership.created` `{"role": "owner"}` atomically; API add/remove append `membership.created`/`membership.removed` (role at removal) **after** the committed write; `mem_` ids appear only in audit targets, never in responses. |
+| Status mapping | 400 `validation_error` (type/owner-role guards, foreign cursors), 404 `not_found` (non-member, unknown target `usr_`), 409 `conflict` (slug taken, pair exists, owner immutable); other `StorageError` stays untranslated → frozen 500. |
+| Races | Slug conflict is a plain 409, never a converge (unlike `provision_user`); duplicate member grants and removals proven by 20-repeat barrier cases (one 201/204, losers 409/404, delete is non-idempotent by contract). |

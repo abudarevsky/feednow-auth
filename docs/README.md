@@ -12,6 +12,9 @@ this order before changing the service:
 6. [Phase 03](phases/03-identity.md) — completed identity handoff: Cognito
    token verification, resolution/provisioning, authorization context, and
    the `GET /v1/me` surface.
+7. [Phase 04](phases/04-organizations.md) — completed tenancy handoff:
+   organization/member endpoints, the shared role-check dependency, uniform
+   audited denials, and the atomic `provision_organization` batch.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

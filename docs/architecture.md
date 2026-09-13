@@ -18,7 +18,9 @@ escape `src/app/storage`.
 
 Phase 01 exposes only the health endpoint and frozen contracts. Phase 03
 mounts the first §14 route (`GET /v1/me`) through `create_app(routers=[...])`
-with `build_me_router`; every mounted route must match the manifest in
+with `build_me_router`; Phase 04 mounts the six organization/member routes
+the same way with `build_organizations_router` and `build_members_router`;
+every mounted route must match the manifest in
 `src/app/api/schemas/manifest.py`. Later phases mount more routers the same
 way.
 
@@ -37,7 +39,22 @@ Bearer token (src/app/auth)
                                    at the auth boundary
 ```
 
+Phase 04 adds the tenancy seam on top of that chain (see
+[Phase 04](phases/04-organizations.md) for the pinned policy):
+
+```text
+organization-scoped request (src/app/auth/organization_access.py)
+  -> build_current_user            the published Phase 03 chain (401/403/409/503)
+  -> get_organization + get_membership
+  -> app.services.authorization    classify_access (ROLE_RANK, fixed precedence)
+  -> granted? OrganizationAccess   (handler receives org + membership, re-checks nothing)
+     denied?  authorization.denied audit (when the org row exists) -> uniform 403
+```
+
 Dependency direction is preserved: `app/auth` and `app/services` use the
 storage contract and domain models; the verifier knows nothing about storage,
 and the service maps provider claims into domain types at one seam
-(`resolve_or_provision`), keeping the provider layer swappable.
+(`resolve_or_provision`), keeping the provider layer swappable. The
+authorization rules are pure functions with no FastAPI import; the HTTP
+composition lives in `app/auth`, and status translation for service errors
+lives in the `app/api` routers.
