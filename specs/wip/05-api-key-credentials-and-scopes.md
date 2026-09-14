@@ -30,3 +30,16 @@ Key rotation, OAuth client credentials, usage metering, rate limits, and commerc
 
 Provide a reusable dependency for product middleware/infrastructure authorizers without requiring synchronous feednow-auth calls on every request.
 
+## Implementation tasks
+
+1. Implement API key service with credential generation, validation, and lifecycle management (src/app/services/api_key_service.py)
+2. Extend data models to support API key credentials (src/app/models/api_key.py)
+3. Update storage contract to support API key operations (src/app/storage/contract.py)
+4. Create API endpoints for create/list/revoke operations (src/app/api/keys.py)
+5. Implement configuration and secrets handling with pepper loading (src/app/auth/)
+6. Implement authorization context resolution for API keys (src/app/auth/)
+7. Integrate authentication middleware for API key validation (src/app/auth/)
+8. Add audit events for API key operations (src/app/services/audit_service.py)
+9. Create comprehensive test suite covering all aspects of API key functionality (src/tests/)
+10. Update documentation and verify all acceptance criteria are met (docs/)
+
