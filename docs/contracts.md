@@ -16,8 +16,11 @@ when that behavior is actually implemented and verified.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
 - Storage is reached only through the 19-method `Storage` protocol and the
-  documented factory `open_sqlite_storage(path: str | Path) -> Storage`.
-  Signatures carry domain types exclusively: no row, driver exception,
+  documented factories `open_sqlite_storage(path: str | Path) -> Storage`
+  and `open_dynamodb_storage(*, endpoint_url=None, region="us-east-1",
+  table_prefix="", dynamodb_resource=None) -> DynamoDbStorage` (both with
+  `close()`). Adapters are imported by explicit submodule path only;
+  signatures carry domain types exclusively: no row, driver exception,
   session, or interpretable cursor may cross the boundary.
 - Storage never mints IDs or timestamps; writes take fully formed domain
   entities and read back unchanged.
@@ -36,8 +39,9 @@ when that behavior is actually implemented and verified.
   `provision_user` there is no race convergence: a taken slug is a plain
   `DuplicateEntityError(kind=organization_slug)`, taken record ids are
   `entity_id`, and an unknown membership user is `ReferenceNotFoundError`;
-  every rejected batch is fully rolled back. Phase 06 must replicate the
-  atomics (contract docstring carries the duty).
+  every rejected batch is fully rolled back. Both shipped adapters replicate
+  the atomics (SQLite: one transaction; DynamoDB: one `TransactWriteItems`
+  with positional conflict classification).
 
 Authentication boundary (Phase 03):
 
@@ -146,6 +150,39 @@ Credential boundary (Phase 05):
   is non-idempotent; retry with fresh entropy). The `{key_id}` path parameter
   is the `key_` application identity, never the credential segment.
 
+Storage adapter parity (Phase 06):
+
+- The DynamoDB adapter is behavior-identical to SQLite on the shared
+  conformance suite (60 adapter-neutral cases, byte-identical `suite.py`
+  across entries — an adapter change satisfies a failing case, never the
+  suite). Uniqueness DynamoDB cannot enforce natively lives in one
+  key-only `unique_constraints` table (`user_email`, `organization_slug`,
+  `external_identity` with `None`→`""` tenant normalization, `api_key_id`,
+  `membership_id` guard → `entity_id`); record-id and membership-pair
+  conflicts are native conditional puts.
+- Every multi-item write is one `TransactWriteItems` whose items are
+  submitted in SQLite's statement order with a parallel descriptor list;
+  the first `ConditionalCheckFailed` in submission order decides the
+  `DuplicateEntityError` kind / `ReferenceNotFoundError`. Transient
+  `TransactionConflict` is retried bounded (the `busy_timeout` analogue);
+  throughput faults and exhaustion surface as the base `StorageError`
+  (retryable channel) — no new error classes.
+- `provision_user`'s email/identity-tuple conflict is spec §6's race
+  (`DuplicateExternalIdentityError`, winner resolved by one post-rollback
+  constraint `GetItem`); `provision_organization`'s taken slug is a plain
+  duplicate — the deliberate asymmetry is adapter-independent.
+- `revoke_api_key` is a conditional `UpdateItem` CAS with stored-truth
+  idempotency (original `revoked_at` preserved; absence is
+  `EntityNotFoundError`); `delete_membership` is a conditional `DeleteItem`
+  (non-idempotent) — both field-for-field SQLite-equivalent.
+- Cursors are adapter-native opaque keyset tokens (DynamoDB: base64url
+  `{"scope", "resume"}` from the last **returned** item's key set); they
+  never byte-match across adapters and nothing above the adapter parses
+  them. `list_user_organizations` reassembles its page through one
+  `BatchGetItem` read-back of the trimmed page only.
+- Driver failures translate inside the adapter to fixed, echo-free domain
+  text (no table names, driver messages, regions, or request ids escape).
+
 Canonical modules:
 
 - Domain: `src/app/models/`
@@ -154,8 +191,11 @@ Canonical modules:
 - Storage contract (protocol, errors, `ProvisionedUser`,
   `ProvisionedOrganization`): `src/app/storage/contract.py`
 - SQLite adapter and factory: `src/app/storage/sqlite.py`
-- Adapter-neutral storage conformance suite:
-  `src/tests/storage_contract/`
+- DynamoDB adapter, `SCHEMA`, and factory: `src/app/storage/dynamodb.py`
+  (imported only by explicit submodule path)
+- Adapter-neutral storage conformance suite and its two entries:
+  `src/tests/storage_contract/` (DynamoDB Local harness:
+  `src/tests/support/dynamodb_local.py`)
 - Token contract and verifier: `src/app/auth/cognito.py` (+ `errors.py`,
   `jwks.py`, `dependencies.py`)
 - Credential primitives, pepper seam, and API-key verification:

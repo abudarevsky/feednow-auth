@@ -19,6 +19,10 @@ this order before changing the service:
    minting/listing/revocation endpoints, the peppered-hash verification seam,
    human-or-key principal dispatch, the scoped-access dependency, and the
    extended denial vocabulary.
+9. [Phase 06](phases/06-dynamodb.md) — completed adapter handoff: the
+   production DynamoDB adapter behind the frozen storage contract, the
+   table/index schema and least-privilege IAM matrix for Phase 07, and the
+   conformance suite passing against DynamoDB Local.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

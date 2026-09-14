@@ -720,3 +720,37 @@ The service is complete when:
 8. No product code depends on DynamoDB-specific behavior.
 9. A future Shopify identity can map into the same user/organization model.
 10. A future PostgreSQL adapter can be introduced without changing service business logic.
+
+---
+
+## 21. Shared account UI and browser-edge compatibility
+
+`feednow-auth-ui` is a separately deployed static React application hosted at
+`account.feednow.io`. It is a consumer of this service, not a replacement for
+any identity, session, authorization, API-key, redirect, or persistence
+responsibility in this specification.
+
+CloudFront presents a same-origin browser surface: static account routes are
+served from the UI origin and `/api/*` is forwarded to `feednow-auth`.
+Versioned product APIs remain versioned internally. Before the UI implements
+calls, the service must publish a canonical mapping between the browser
+`/api/*` namespace and versioned service routes; the edge must never convert
+an API error into the UI SPA fallback.
+
+The service must provide a versioned, structured browser contract for:
+
+* trusted client context and validated client handoff;
+* existing central-session discovery;
+* email/password sign-in and backend-defined opaque challenges;
+* registration availability, email verification, password recovery, and
+  backend-started federation;
+* account/profile and current-session state;
+* authenticated API-key list, one-time issuance, and revocation;
+* logout with server-side redirect validation; and
+* safe validation/authentication/rate-limit/error responses plus CSRF support.
+
+The browser never receives authority to trust product labels, redirect URLs, or
+logout URLs; it may only retain opaque state provided for a backend-validated
+flow. It must not host direct Cognito SDK logic or long-lived tokens. This is a
+future compatibility requirement: it does not assert that the listed browser
+endpoints already exist.

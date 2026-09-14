@@ -73,6 +73,22 @@ audits, or non-creation payloads, and the §8 key-id segment appears only as
 the point-lookup column and inside the masked `key_prefix` (never as a
 standalone path or payload field).
 
+Phase 06 adds the second storage adapter behind the same frozen contract
+(see [Phase 06](phases/06-dynamodb.md) for the schema and IAM matrix):
+`src/app/storage/dynamodb.py` owns the seven-table `SCHEMA`, the codecs, the
+positional conflict classification, and the transactional compounds; the
+SQLite adapter is untouched. The dependency direction is unchanged —
+`app/api`, `app/auth`, and `app/services` import only
+`app.storage.contract` and obtain adapters through a documented factory —
+and the boundary is now proven repo-wide: an AST scan pins
+`storage/dynamodb.py` as the only module under `src/app` importing
+`boto3`/`botocore`/`app.storage.dynamodb`, and the subprocess-isolated
+`import app.main` proof shows the entrypoint loads no driver or adapter
+module. DynamoDB rows, expressions, `LastEvaluatedKey` values, and driver
+exceptions never escape the adapter; both adapters pass the same
+adapter-neutral conformance suite (SQLite always; DynamoDB against
+DynamoDB Local, marker-gated).
+
 Dependency direction is preserved: `app/auth` and `app/services` use the
 storage contract and domain models; the verifier knows nothing about storage,
 and the service maps provider claims into domain types at one seam
