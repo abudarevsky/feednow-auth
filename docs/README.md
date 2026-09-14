@@ -15,6 +15,10 @@ this order before changing the service:
 7. [Phase 04](phases/04-organizations.md) — completed tenancy handoff:
    organization/member endpoints, the shared role-check dependency, uniform
    audited denials, and the atomic `provision_organization` batch.
+8. [Phase 05](phases/05-api-keys.md) — completed credential handoff: API-key
+   minting/listing/revocation endpoints, the peppered-hash verification seam,
+   human-or-key principal dispatch, the scoped-access dependency, and the
+   extended denial vocabulary.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

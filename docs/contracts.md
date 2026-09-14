@@ -103,6 +103,49 @@ Authorization boundary (Phase 04):
   frozen `OrganizationAccess(identity, organization, membership)`; shipped
   routers carry no authz logic and register manifest entries only.
 
+Credential boundary (Phase 05):
+
+- The literal is `fn_<live|test>_<key-id>_<secret>`: 8-char fixed environment
+  prefix, 26-char Crockford-base32 ULID key-id (charset contains no `_`),
+  43-char base64url secret (256 bits). Parsing splits at the **first** `_`
+  after the fixed prefix; every shape violation raises one fixed,
+  input-echo-free format error. `secret_hash` is
+  `HMAC-SHA256(pepper, secret)` lowercase hex; `key_prefix` is the 44-char
+  masked display value (`fn_<env>_<key-id>_<6 chars>...`) — the only place
+  any secret-derived text may appear in a read response.
+- The pepper comes only from a `PepperSource` (`StaticPepper` today;
+  **Phase 07 obligation**: Secrets Manager at the entrypoint, never an env
+  dump), enforces ≥ 32 bytes at construction, and never appears in
+  `repr`/`str`, logs, audits, or error text.
+- `verify_api_key` runs a fixed order (parse → point lookup with a
+  timing-equalizing dummy comparison on miss → secret match → environment
+  match → status → expiry; `expires_at == now` is expired) and every failure
+  raises the one uniform 401 message; any other `StorageError` propagates
+  untranslated → 500. Verification is read-only — no storage write happens
+  on any request path (`last_used_at` stays unset by design).
+- `build_current_principal` dispatches on the bearer prefix only (`fn_…` vs
+  JWT `eyJ…` — collision impossible); `Principal` carries exactly one actor.
+  API-key §10 context: `actor_type="api_key"`, `actor_id=key_`, stored
+  organization, `roles=[]` always, stored scopes — no human-role escalation.
+- Management routes are human-only **where a `pepper_source` is wired** (the
+  api-keys router today; the organizations/members routers join when the
+  entrypoint wires pepper — until then a key bearer there simply fails JWT
+  verification → 401): a key bearer gets the uniform 403 audited
+  `human_only`. The scope dependency's
+  key branch is org status → `organization_mismatch` → `insufficient_scope`
+  (exact-string scope membership; no wildcards or hierarchy); its human
+  branch ignores `required_scope` (roles govern people). `authorization.denied`
+  now accepts any `ActorId` (`usr_`/`key_`, type derived via `actor_type_for`)
+  and seven reasons; metadata stays `{reason, operation}`.
+- Creation audits `api_key.created` `{"environment", "scopes"}` (sorted-unique)
+  **after** the write and returns the full literal exactly once (the 201);
+  revocation is get → tenancy check (foreign key: the same 404 message
+  **before** any CAS call) → first-write-wins CAS (idempotent, original
+  `revoked_at` preserved) → one truthful `api_key.revoked` `{}` audit per
+  processed call. Minted-id collisions are 409 with zero audit rows (create
+  is non-idempotent; retry with fresh entropy). The `{key_id}` path parameter
+  is the `key_` application identity, never the credential segment.
+
 Canonical modules:
 
 - Domain: `src/app/models/`
@@ -115,10 +158,15 @@ Canonical modules:
   `src/tests/storage_contract/`
 - Token contract and verifier: `src/app/auth/cognito.py` (+ `errors.py`,
   `jwks.py`, `dependencies.py`)
+- Credential primitives, pepper seam, and API-key verification:
+  `src/app/auth/credentials.py`, `src/app/auth/pepper.py`,
+  `src/app/auth/api_key_auth.py`, `src/app/auth/principal.py`
 - Resolution/provisioning rules and ID minting:
   `src/app/services/identity.py`, `src/app/services/idgen.py`
 - Authorization rules and audit builders: `src/app/services/authorization.py`
 - Shared organization-access dependency: `src/app/auth/organization_access.py`
 - Tenancy services and routers: `src/app/services/{organization,member}.py`,
   `src/app/api/{organizations,members}.py`
+- API-key service rules and router: `src/app/services/api_key_service.py`,
+  `src/app/api/keys.py`
 - First mounted router: `src/app/api/me.py`

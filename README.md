@@ -255,3 +255,40 @@ in [docs/phases/04-organizations.md](docs/phases/04-organizations.md).
 | Mutation audit | Creation batch audits `organization.created` `{"type"}` + `membership.created` `{"role": "owner"}` atomically; API add/remove append `membership.created`/`membership.removed` (role at removal) **after** the committed write; `mem_` ids appear only in audit targets, never in responses. |
 | Status mapping | 400 `validation_error` (type/owner-role guards, foreign cursors), 404 `not_found` (non-member, unknown target `usr_`), 409 `conflict` (slug taken, pair exists, owner immutable); other `StorageError` stays untranslated → frozen 500. |
 | Races | Slug conflict is a plain 409, never a converge (unlike `provision_user`); duplicate member grants and removals proven by 20-repeat barrier cases (one 201/204, losers 409/404, delete is non-idempotent by contract). |
+
+## Phase 05 API-key contracts (handoff)
+
+Phase 05 ships the credential boundary: `fn_live_`/`fn_test_` API-key
+minting/revocation behind the three mounted §14 routes, the peppered-HMAC
+verification seam, human-or-key principal dispatch, the scoped-access
+dependency, and the extended audited denial vocabulary. The full contract,
+wiring example, and verification evidence live in
+[docs/phases/05-api-keys.md](docs/phases/05-api-keys.md). Phase 05 adds no
+storage methods (19-method contract frozen) and no runtime dependencies
+(stdlib only).
+
+### Published interfaces
+
+| Interface | Module | Consumers |
+| --- | --- | --- |
+| `verify_api_key(storage, pepper_source, literal, *, now=None) -> VerifiedApiKey` + `build_api_key_context` / `key_has_scope` | `src/app/auth/api_key_auth.py` | Phase 06+ product authorizers (in-process, read-only), Phase 07 wiring |
+| `build_current_principal(storage, verifier, pepper_source)` → `Principal` | `src/app/auth/dependencies.py`, `src/app/auth/principal.py` | any human-or-key route; deployment entrypoint |
+| `build_organization_scope_dependency(storage, verifier, pepper_source, required_scope, operation_id)` → `PrincipalAccess` | `src/app/auth/organization_access.py` | the reusable scoped-authorizer seam (product operations) |
+| `PepperSource` / `StaticPepper` (≥ 32 bytes, redacted) | `src/app/auth/pepper.py` | **Phase 07**: Secrets Manager implementation at the entrypoint |
+| `generate_key_id` / `generate_secret` / `build_literal` / `parse_literal` / `hash_secret` / `secret_matches` / `dummy_secret_matches` | `src/app/auth/credentials.py` | service + verifier layers only; the §8 segment never leaves the credential layer |
+| `create_api_key` / `revoke_api_key` / `list_api_keys` + audit builders | `src/app/services/api_key_service.py` | `build_api_keys_router`; Phase 08 audit surface |
+| `build_api_keys_router(storage, verifier, pepper_source)` | `src/app/api/keys.py` | deployment entrypoint (`create_app(routers=[...])`) |
+
+### Credential conventions
+
+| Topic | Rule |
+| --- | --- |
+| Literal | `fn_<live\|test>_<26-char Crockford-26 ULID key-id>_<43-char base64url secret>` (256-bit secret); parse splits at the first `_` after the fixed 8-char prefix; every shape violation → one fixed, input-echo-free format error. |
+| Storage | Only `key_id` (UNIQUE), `secret_hash = HMAC-SHA256(pepper, secret)` lowercase hex, and the 44-char masked `key_prefix` persist; the plaintext secret exists only in transit and the one-time 201 (`ApiKeyCreatedResponse.key`). |
+| Verification | Fixed order parse → lookup (dummy constant-time compare on unknown key-id) → secret → environment → status → expiry (`expires_at == now` is expired); every failure is the one uniform 401 message; other `StorageError` → 500 untranslated. Org status/scopes are authorization (audited uniform 403), not authentication. |
+| Dispatch | Bearer prefix only: `fn_live_`/`fn_test_` → key seam, anything else → the unchanged Phase 03 JWT chain (`eyJ…` and `fn_…` can never collide); `Principal` carries exactly one actor. |
+| Context | Key §10 context: `actor_type="api_key"`, `actor_id=key_`, stored org, `roles=[]` always, stored sorted-unique scopes. Pepper-wired management routes (api-keys today) refuse keys with the audited `human_only` denial; on unwired routes an `fn_` literal fails JWT verification → 401. |
+| Scopes | Exact-string membership; no wildcards, no hierarchy; `required_scope` never applies to human actors. |
+| Denials | Seven `authorization.denied` reasons (Phase 04's four + `human_only`, `organization_mismatch`, `insufficient_scope`), any `ActorId` actor (`usr_`/`key_` via `actor_type_for`), metadata exactly `{reason, operation}`; unknown-org FK exception and fail-closed 500 unchanged. |
+| Lifecycle | Create is non-idempotent (collision → 409, zero audits); revoke is first-write-wins CAS — idempotent 204 preserving the original `revoked_at`, one truthful `api_key.revoked` `{}` per processed call; foreign/unknown key → one byte-identical 404 before any CAS call; verification reads stored truth per request (revocation immediately effective). |
+| Audits | `api_key.created` `{"environment", "scopes"}` appended **after** the successful write; both key audits target `api_key`/`key_` under the human actor. |

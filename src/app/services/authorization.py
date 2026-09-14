@@ -29,6 +29,14 @@ exactly the pinned key sets — ``{"reason", "operation"``} for denials,
 create/remove — and never carries email, provider ``sub``, tokens, or
 secret material. :func:`audit_denial` propagates append failures
 (fail-closed: a denial that cannot be audited is a 500, never a silent 403).
+
+Phase 05 decision 7 generalizes the *denial* audit surface only:
+:func:`build_denial_audit`/:func:`audit_denial` accept any §10 actor
+identity (``usr_`` or ``key_``) with ``actor_type`` derived via
+:func:`~app.models.authorization_context.actor_type_for`, and
+:class:`AccessOutcome` gains the three API-key denial strings
+(``human_only``, ``organization_mismatch``, ``insufficient_scope``).
+Human-actor behavior is unchanged.
 """
 
 from __future__ import annotations
@@ -39,8 +47,9 @@ from enum import StrEnum
 from typing import Final
 
 from app.models.audit_event import AuditEvent
+from app.models.authorization_context import actor_type_for
 from app.models.enums import MembershipRole, MembershipStatus, OrganizationStatus, OrganizationType
-from app.models.ids import AuditEventId, MembershipId, OrganizationId, UserId
+from app.models.ids import ActorId, AuditEventId, MembershipId, OrganizationId, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.timestamps import utc_now
@@ -53,10 +62,14 @@ from app.storage.contract import Storage
 
 
 class AccessOutcome(StrEnum):
-    """Result vocabulary of :func:`classify_access` (decision 4).
+    """Result vocabulary of :func:`classify_access` and the API-key scope
+    dependency (decision 4, extended by Phase 05 decision 7).
 
-    The four denial strings are exactly the ``reason`` values permitted in
+    The seven denial strings are exactly the ``reason`` values permitted in
     ``authorization.denied`` audit metadata; ``granted`` is never audited.
+    ``human_only``, ``organization_mismatch``, and ``insufficient_scope``
+    are produced by the Phase 05 API-key paths (decisions 6/7), not by
+    :func:`classify_access`, whose human-actor behavior is unchanged.
     """
 
     GRANTED = "granted"
@@ -64,6 +77,9 @@ class AccessOutcome(StrEnum):
     INACTIVE_MEMBERSHIP = "inactive_membership"
     INACTIVE_ORGANIZATION = "inactive_organization"
     INSUFFICIENT_ROLE = "insufficient_role"
+    HUMAN_ONLY = "human_only"
+    ORGANIZATION_MISMATCH = "organization_mismatch"
+    INSUFFICIENT_SCOPE = "insufficient_scope"
 
 
 #: The auditable denial reasons (everything :class:`AccessOutcome` except
@@ -74,6 +90,9 @@ DENIAL_REASONS: Final[frozenset[AccessOutcome]] = frozenset(
         AccessOutcome.INACTIVE_MEMBERSHIP,
         AccessOutcome.INACTIVE_ORGANIZATION,
         AccessOutcome.INSUFFICIENT_ROLE,
+        AccessOutcome.HUMAN_ONLY,
+        AccessOutcome.ORGANIZATION_MISMATCH,
+        AccessOutcome.INSUFFICIENT_SCOPE,
     }
 )
 
@@ -291,7 +310,7 @@ def build_denial_audit(
     *,
     audit_id: AuditEventId,
     organization_id: OrganizationId,
-    actor_user_id: UserId,
+    actor_id: ActorId,
     reason: AccessOutcome,
     operation: str,
     now: datetime,
@@ -300,15 +319,19 @@ def build_denial_audit(
     (decision 4): the :class:`AccessOutcome` denial string and the manifest
     ``operation_id``. No target (the model pins denial as a broad action),
     no email, no ``sub``, no token, no caller role beyond what the reason
-    implies. Raises ``ValueError`` for a non-denial reason — ``granted``
-    accesses are never audited here."""
+    implies. The actor is any §10 application identity (Phase 05 decision 7):
+    ``actor_type`` is derived from the concrete class of ``actor_id`` via
+    :func:`~app.models.authorization_context.actor_type_for`, so a ``key_``
+    actor is audited as ``api_key`` and a ``usr_`` actor as ``user`` with
+    identical shape. Raises ``ValueError`` for a non-denial reason —
+    ``granted`` accesses are never audited here."""
     if reason not in DENIAL_REASONS:
         raise ValueError(f"not an auditable denial reason: {reason!r}")
     return AuditEvent(
         id=audit_id,
         organization_id=organization_id,
-        actor_type="user",
-        actor_id=actor_user_id,
+        actor_type=actor_type_for(actor_id),
+        actor_id=actor_id,
         action="authorization.denied",
         metadata={"reason": reason.value, "operation": operation},
         created_at=now,
@@ -317,7 +340,7 @@ def build_denial_audit(
 
 def audit_denial(
     storage: Storage,
-    actor_user_id: UserId,
+    actor_id: ActorId,
     organization_id: OrganizationId,
     reason: AccessOutcome,
     operation: str,
@@ -328,15 +351,17 @@ def audit_denial(
 
     Called **only when the organization row exists** (the audit→organization
     FK; decision 4 documents unknown-organization denials as structurally
-    unauditable). ``now`` defaults to one clock read; the ``aud_`` id is
-    minted here — the only minting in this module, and still outside storage.
-    Append failures propagate (fail-closed: a denial that cannot be audited
-    must surface as a 500, never a silent 403).
+    unauditable). ``actor_id`` is the acting application identity — ``usr_``
+    or ``key_`` (Phase 05 decision 7); existing positional call sites pass
+    ``UserId`` values and are unaffected. ``now`` defaults to one clock read;
+    the ``aud_`` id is minted here — the only minting in this module, and
+    still outside storage. Append failures propagate (fail-closed: a denial
+    that cannot be audited must surface as a 500, never a silent 403).
     """
     event = build_denial_audit(
         audit_id=new_audit_event_id(),
         organization_id=organization_id,
-        actor_user_id=actor_user_id,
+        actor_id=actor_id,
         reason=reason,
         operation=operation,
         now=now if now is not None else utc_now(),

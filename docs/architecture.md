@@ -20,6 +20,7 @@ Phase 01 exposes only the health endpoint and frozen contracts. Phase 03
 mounts the first §14 route (`GET /v1/me`) through `create_app(routers=[...])`
 with `build_me_router`; Phase 04 mounts the six organization/member routes
 the same way with `build_organizations_router` and `build_members_router`;
+Phase 05 mounts the three api-keys routes with `build_api_keys_router`;
 every mounted route must match the manifest in
 `src/app/api/schemas/manifest.py`. Later phases mount more routers the same
 way.
@@ -50,6 +51,27 @@ organization-scoped request (src/app/auth/organization_access.py)
   -> granted? OrganizationAccess   (handler receives org + membership, re-checks nothing)
      denied?  authorization.denied audit (when the org row exists) -> uniform 403
 ```
+
+Phase 05 adds the machine-credential seam (see
+[Phase 05](phases/05-api-keys.md) for the pinned contract):
+
+```text
+bearer request (src/app/auth/dependencies.py -> build_current_principal)
+  -> prefix dispatch               fn_live_/fn_test_ -> API key; anything else -> JWT
+  -> app.auth.api_key_auth         verify_api_key: parse -> point lookup (dummy
+                                   compare on miss) -> secret -> env -> status -> expiry
+  -> app.auth.principal            Principal(user XOR api_key, §10 context)
+  -> organization_access scope dep org status -> organization_mismatch -> insufficient_scope
+  -> granted? PrincipalAccess      denied? authorization.denied (usr_ or key_ actor) -> uniform 403
+```
+
+The credential primitives (`src/app/auth/credentials.py`) and the pepper
+source (`src/app/auth/pepper.py`) stay inside `app/auth`: services and
+routers only see domain rows, the `key_` application identity, and resolved
+contexts — the plaintext secret never crosses into persistence, logs,
+audits, or non-creation payloads, and the §8 key-id segment appears only as
+the point-lookup column and inside the masked `key_prefix` (never as a
+standalone path or payload field).
 
 Dependency direction is preserved: `app/auth` and `app/services` use the
 storage contract and domain models; the verifier knows nothing about storage,

@@ -15,6 +15,9 @@ pure-function assertions:
 4. The decision-3 guards raise the pinned errors with fixed, identifier-free
    messages.
 5. Module purity: no FastAPI import (AST proof, suite-harness precedent).
+6. Phase 05 task 4 (decision 7): ``actor_type_for`` derivation, the
+   generalized ``build_denial_audit``/``audit_denial`` actor surface
+   (``usr_``/``key_``), and the extended seven-reason denial vocabulary.
 """
 
 from __future__ import annotations
@@ -29,8 +32,9 @@ from typing import Any
 import pytest
 
 from app.models.audit_event import AuditEvent
+from app.models.authorization_context import actor_type_for, ensure_actor_id_matches_actor_type
 from app.models.enums import MembershipRole, MembershipStatus, OrganizationStatus, OrganizationType
-from app.models.ids import AuditEventId, MembershipId, OrganizationId, UserId
+from app.models.ids import ApiKeyId, AuditEventId, MembershipId, OrganizationId, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.services import authorization as rules
@@ -60,6 +64,7 @@ from app.storage.contract import StorageError
 _NOW = datetime(2026, 9, 13, 9, 0, 0, 123456, tzinfo=UTC)
 _ORG_ID = OrganizationId("org_rules_0001")
 _ACTOR = UserId("usr_actor_0001")
+_KEY_ACTOR = ApiKeyId("key_rules_0001")
 _AUDIT_ID = AuditEventId("aud_rules_0001")
 _MEMBERSHIP_ID = MembershipId("mem_rules_0001")
 
@@ -217,7 +222,7 @@ def test_denial_audit_shape_is_exactly_reason_and_operation(reason: AccessOutcom
     event = build_denial_audit(
         audit_id=_AUDIT_ID,
         organization_id=_ORG_ID,
-        actor_user_id=_ACTOR,
+        actor_id=_ACTOR,
         reason=reason,
         operation="get_organization",
         now=_NOW,
@@ -238,7 +243,7 @@ def test_denial_audit_serialization_carries_no_provider_or_secret_material() -> 
     event = build_denial_audit(
         audit_id=_AUDIT_ID,
         organization_id=_ORG_ID,
-        actor_user_id=_ACTOR,
+        actor_id=_ACTOR,
         reason=AccessOutcome.INSUFFICIENT_ROLE,
         operation="list_members",
         now=_NOW,
@@ -257,7 +262,7 @@ def test_denial_audit_rejects_granted_as_reason() -> None:
         build_denial_audit(
             audit_id=_AUDIT_ID,
             organization_id=_ORG_ID,
-            actor_user_id=_ACTOR,
+            actor_id=_ACTOR,
             reason=AccessOutcome.GRANTED,
             operation="get_organization",
             now=_NOW,
@@ -459,13 +464,17 @@ def test_module_imports_no_fastapi_or_starlette() -> None:
         assert not module.startswith(("fastapi", "starlette")), module
 
 
-def test_denial_reason_vocabulary_is_the_four_non_granted_outcomes() -> None:
+def test_denial_reason_vocabulary_is_the_seven_non_granted_outcomes() -> None:
     assert frozenset(set(AccessOutcome) - {AccessOutcome.GRANTED}) == DENIAL_REASONS
     assert {reason.value for reason in DENIAL_REASONS} == {
         "no_membership",
         "inactive_membership",
         "inactive_organization",
         "insufficient_role",
+        # Phase 05 decision 7 — API-key denial strings
+        "human_only",
+        "organization_mismatch",
+        "insufficient_scope",
     }
 
 
@@ -475,3 +484,76 @@ def test_classify_access_takes_the_pinned_positional_signature() -> None:
     assert absent.outcome is AccessOutcome.NO_MEMBERSHIP
     granted = classify_access(_org(), _membership(MembershipRole.VIEWER), MembershipRole.VIEWER)
     assert granted.is_granted
+
+
+# ---------------------------------------------------------------------------
+# 6. Phase 05 task 4 (decision 7): generalized denial-audit actor surface
+# ---------------------------------------------------------------------------
+
+
+def test_actor_type_for_round_trips_both_actor_identity_classes() -> None:
+    assert actor_type_for(_ACTOR) == "user"
+    assert actor_type_for(_KEY_ACTOR) == "api_key"
+
+
+def test_actor_type_for_complements_the_pair_validator() -> None:
+    # The derivation and the validation share one source: deriving then
+    # validating any legitimate actor never raises.
+    for actor in (_ACTOR, _KEY_ACTOR):
+        ensure_actor_id_matches_actor_type(actor_type_for(actor), actor)
+
+
+@pytest.mark.parametrize(
+    "not_an_actor",
+    [
+        MembershipId("mem_rules_0001"),
+        AuditEventId("aud_rules_0001"),
+        OrganizationId("org_rules_0001"),
+        "usr_actor_0001",  # plain str: prefix alone never makes an actor identity
+    ],
+)
+def test_actor_type_for_rejects_non_actor_ids(not_an_actor: object) -> None:
+    with pytest.raises(ValueError, match="not an actor identity"):
+        actor_type_for(not_an_actor)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("reason", sorted(DENIAL_REASONS, key=lambda item: item.value))
+def test_denial_audit_with_api_key_actor_yields_the_key_shape(reason: AccessOutcome) -> None:
+    # Decision 7: identical shape to the human case, actor_type derived from
+    # the concrete class — a key_ actor is audited as api_key, never user.
+    event = build_denial_audit(
+        audit_id=_AUDIT_ID,
+        organization_id=_ORG_ID,
+        actor_id=_KEY_ACTOR,
+        reason=reason,
+        operation="create_api_key",
+        now=_NOW,
+    )
+    assert event.action == "authorization.denied"
+    assert event.id == _AUDIT_ID
+    assert event.organization_id == _ORG_ID  # audit->org FK target
+    assert event.actor_type == "api_key"
+    assert isinstance(event.actor_id, ApiKeyId)
+    assert event.actor_id == _KEY_ACTOR
+    assert event.target_type is None and event.target_id is None  # broad action
+    assert event.created_at == _NOW
+    assert set(event.metadata) == {"reason", "operation"}
+    assert event.metadata == {"reason": reason.value, "operation": "create_api_key"}
+
+
+def test_audit_denial_accepts_a_key_actor_positionally() -> None:
+    # The Phase 04 positional call pattern (organization_access.py) is
+    # source-compatible for both actor classes.
+    storage = RecordingStorage()
+    audit_denial(
+        storage,  # type: ignore[arg-type]
+        _KEY_ACTOR,
+        _ORG_ID,
+        AccessOutcome.HUMAN_ONLY,
+        "create_api_key",
+        now=_NOW,
+    )
+    assert len(storage.appended) == 1
+    event = storage.appended[0]
+    assert event.actor_type == "api_key" and event.actor_id == _KEY_ACTOR
+    assert event.metadata == {"reason": "human_only", "operation": "create_api_key"}

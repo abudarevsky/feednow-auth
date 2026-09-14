@@ -45,6 +45,24 @@ def ensure_actor_id_matches_actor_type(actor_type: ActorType, actor_id: ActorId)
         )
 
 
+def actor_type_for(actor_id: ActorId) -> ActorType:
+    """Derive the §10 actor kind from the concrete class of ``actor_id``.
+
+    The inverse direction of :func:`ensure_actor_id_matches_actor_type`
+    (which validates a given pair): callers that *hold* an actor identity
+    and must build a consistent ``actor_type``/``actor_id`` pair — e.g. the
+    generalized denial-audit builders (Phase 05 decision 7) — use this so
+    the derivation shares the same single source as the validation.
+    Raises ``ValueError`` for anything that is not a ``UserId``/``ApiKeyId``
+    (record IDs and plain strings are never actor identities).
+    """
+    if isinstance(actor_id, UserId):
+        return "user"
+    if isinstance(actor_id, ApiKeyId):
+        return "api_key"
+    raise ValueError(f"not an actor identity (usr_/key_ expected): {type(actor_id).__name__}")
+
+
 class AuthorizationContext(BaseModel):
     """Resolved authorization for one request: who acts, in which org, with what."""
 
@@ -62,4 +80,9 @@ class AuthorizationContext(BaseModel):
         return self
 
 
-__all__ = ["ActorType", "AuthorizationContext", "ensure_actor_id_matches_actor_type"]
+__all__ = [
+    "ActorType",
+    "AuthorizationContext",
+    "actor_type_for",
+    "ensure_actor_id_matches_actor_type",
+]

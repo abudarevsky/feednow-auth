@@ -46,7 +46,7 @@ HEAD is still `a76a6f8` and **nothing of Phase 05 is committed**. The working tr
 
 ## Tasks
 
-**Tasks 1–2 are delivered on disk (pending commits 1–2 above). Remaining implementation scope: tasks 3–8**, in the pinned dependency order 3 → 4 → 5 → 6 → 7 → 8 (credentials→service→verify→generalize→dispatch→router→proofs→docs seam unchanged).
+**Tasks 1–7 are delivered on disk (tasks 1–2 committed as 847bbe0 and its parent; tasks 3–7 uncommitted in the working tree, each approved at its step review). Task 8 (handoff docs + green sweep) is delivered — see "Delivery evidence (task 8)" below.** The pinned dependency order 3 → 4 → 5 → 6 → 7 → 8 (credentials→service→verify→generalize→dispatch→router→proofs→docs seam) was followed exactly.
 
 1. **Credential primitives + pepper abstraction + `key_` minting**
    - **Status (2026-09-13): ✅ implemented, uncommitted — lands as commit 1 after a Verify re-run; no new code expected.**
@@ -92,11 +92,57 @@ HEAD is still `a76a6f8` and **nothing of Phase 05 is committed**. The working tr
 
 ## Definition of done check (maps to acceptance criteria)
 
-- [ ] Full plaintext returned only by successful creation, exactly once; list/reads masked (tasks 2, 6, 7 — one-crossing-point router + body/file sweeps)
-- [ ] Invalid format, unknown, expired, revoked, disabled(org), mismatched secrets rejected without segment oracle (tasks 3, 5, 7 — uniform 401 + timing-equalized dummy compare + byte-identical bodies; org-disabled rides the uniform audited 403 class per decision 4's AC-2 reading)
-- [ ] Revocation immediately effective + `api_key.revoked` (tasks 2, 6, 7 — CAS + fresh-read proof + barrier)
-- [ ] Human contexts expose roles; keys expose org/actor/scopes with no role escalation (tasks 3, 5, 6 — `roles==[]` pin + `human_only` matrix)
-- [ ] Tests prove non-persistence/non-logging, env prefixes, scope enforcement, cross-org isolation (tasks 1, 3, 5, 7 — matrix + hygiene extension + `organization_mismatch`)
+- [x] Full plaintext returned only by successful creation, exactly once; list/reads masked (tasks 2, 6, 7 — one-crossing-point router + body/file sweeps)
+- [x] Invalid format, unknown, expired, revoked, disabled(org), mismatched secrets rejected without segment oracle (tasks 3, 5, 7 — uniform 401 + timing-equalized dummy compare + byte-identical bodies; org-disabled rides the uniform audited 403 class per decision 4's AC-2 reading)
+- [x] Revocation immediately effective + `api_key.revoked` (tasks 2, 6, 7 — CAS + fresh-read proof + barrier)
+- [x] Human contexts expose roles; keys expose org/actor/scopes with no role escalation (tasks 3, 5, 6 — `roles==[]` pin + `human_only` matrix)
+- [x] Tests prove non-persistence/non-logging, env prefixes, scope enforcement, cross-org isolation (tasks 1, 3, 5, 7 — matrix + hygiene extension + `organization_mismatch`)
+
+## Delivery evidence (task 8)
+
+Commits: precondition `chore(specs)` (`86c21a1`, specs moves only), then
+`feat(phase-05 task 1)` (`b9d4901`), `feat(phase-05 task 2)` (`847bbe0`),
+and tasks 3–8 delivered in the working tree (each step reviewer-approved;
+task 7's F1–F5 corrections applied — WAL-inclusive raw-file sweep,
+sample-then-check-stop watcher, tautology removed, `caplog.text`, comment
+fixed). The task 3–8 commits land per this breakdown's file lists.
+
+Final sweep (2026-09-14):
+
+- `uv run pytest` → **1253 passed** (baseline 943 + 310 Phase 05: tasks 1–2
+  146 — `test_credentials` 84, `test_pepper` 19, `test_idgen` +11,
+  `test_api_key_service` 32; task 3 34; task 4 +17 (`test_authorization_rules`
+  69→86); task 5 +28 (`test_principal_dispatch` 15,
+  `test_organization_access` 7→20); task 6 20; task 7 +65
+  (`test_api_key_secrecy` 4, `test_api_key_auth_matrix` 18,
+  `test_api_key_concurrency` 42, `test_audit_hygiene` 2→3)).
+- `uv run pytest src/tests/storage_contract` → 64 passed **unchanged**
+  (decision 1 honored: Phase 05 adds no storage methods; the five api-key
+  ops — key_id UNIQUE, revoke CAS — were already adapter-neutral suite
+  cases for Phase 06).
+- `uv run ruff check .` → All checks passed; `uv run ruff format --check .`
+  → 129 files clean; `git diff --check` → clean.
+- No-`boto3` subprocess import proof (`test_app_skeleton.py`) green;
+  Phase 05 added no runtime dependencies (`pyproject.toml`/`uv.lock`
+  untouched — stdlib only, decision 3).
+- Handoff: `docs/phases/05-api-keys.md` (new) linked from `docs/README.md`;
+  `docs/architecture.md`, `docs/contracts.md`, and `README.md` updated in
+  the same step; no docs link to WIP/draft specs. Known limitations
+  recorded there: `last_used_at` never set (read-only verification, no
+  storage write path), expiry enforced but not settable via the frozen §15
+  request, no rotation/wildcards/self-management, audit-append-after-commit
+  window, duplicate truthful revoke audits, key survives creator-user
+  disable (no coupling invented — Phase 08 candidate).
+
+Escalations below remain open as spec-revision proposals (planner record,
+not implementation work); Phase 06/07 obligations and handoff notes are
+recorded in the phase doc's "Published interfaces" and this file.
+
+Correction note (2026-09-14, task 8): the re-baseline review-line above
+records **1087** with `test_api_key_service` 30 (+144); the committed
+task-2 file collects **32** (+146) — the two additional tests landed
+between that measurement and commit `847bbe0`. The recorded results are
+not rewritten; the current-state counts in this section are authoritative.
 
 ## Escalations (planner action, not implementation work)
 
@@ -111,3 +157,4 @@ HEAD is still `a76a6f8` and **nothing of Phase 05 is committed**. The working tr
 
 - **@planner 2026-09-13 (re-baseline, for @reviewer):** delivery moved after the APPROVE-WITH-CHANGES pass — tasks 1–2 are implemented in the working tree and verified green (**1087 passed**, ruff clean, HEAD `a76a6f8` unchanged); the precondition section was rewritten as the three-commit structure (commit 0 `chore(specs)` — content unchanged, commit 1 task 1, commit 2 task 2) under verify-then-commit discipline; decision 0's scaffold claim is superseded by the delivery-state note (implementation conformed to decisions 2/3/9/10, spot-verified); tasks 3–8 are **unchanged** from the approved text and remain the whole of the implementation scope. Requesting re-approval of the re-baselined plan (on-disk claims + commit structure + remaining-part coverage of ACs 1–5).
 - **@reviewer 2026-09-14: APPROVE (re-baseline approved — build-step may proceed with commits 0/1/2, then task 3).** No changes applied to this file; the re-baseline is accepted as written. All claims independently re-verified against the tree: (1) **On-disk state** — `uv run pytest` → **1087 passed**, `ruff check .` and `ruff format --check .` (119 files) clean, `git rev-parse --short HEAD` = `a76a6f8`; per-file collects match the claim exactly (`test_credentials` 84, `test_pepper` 19, `test_api_key_service` 30, `test_idgen` 66 vs 55 baseline → +144 new). `git status --porcelain` is precisely the described tree: 4 Phase-04/draft deletions, 3 `specs/done/04-*` additions, both `specs/wip/05-*` files plus the `.original.md` draft copy, 9 dirty `src/` paths, and untracked `.kilo` — commit 0's explicit stage-list is complete and exact (no `src/`, no `.kilo/`, no `NOTES.md` — the latter doesn't exist in status), and commits 1–2 cover all nine `src/` paths with nothing orphaned (commit 1: `credentials.py`, `pepper.py`, `idgen.py`, `auth/__init__.py`, `test_credentials.py`, `test_pepper.py`, `test_idgen.py`; commit 2: `api_key_service.py`, `test_api_key_service.py`). (2) **Task 1–2 conformance spot-audit — the supersession claim is true.** `credentials.py`: Crockford alphabet contains no `_`; `generate_key_id` is the pinned 130-bit encoding (48-bit ms timestamp in chars 1–10, first char ∈ `0–7` by the two zero pad bits, `secrets.randbits(80)` in chars 11–26); `parse_literal` strips the fixed 8-char prefix and `partition`s at the **first** `_` with exact Crockford-26 shape validation on the key-id segment and `_`-tolerant secret; `hash_secret` is lowercase-hex HMAC-SHA256; `dummy_secret_matches` performs the identical hash+`compare_digest` work against `"0"*64` — a digest no achievable HMAC output equals, so it can never authenticate; `ParsedCredential` and the format error carry one fixed, input-echo-free message (repr/str redact the secret; `build_literal` avoids echo by membership-checking instead of raising through `ValueError.__context__`). `pepper.py`: `PepperSource` runtime-checkable protocol, `StaticPepper` enforces ≥32 bytes at pure construction, copies bytearray input, `__repr__`/`__str__` → `StaticPepper(<redacted>)`, short-pepper error names only the floor. `idgen.py`: `new_api_key_id` uses the established `_mint(ApiKeyId)` strategy and the deferral docstring is discharged in both halves; the credential segment stays out of idgen (test-pinned). `api_key_service.py`: create order is normalize → mint (injectable bundle, secret redacted in repr) → build (`status=ACTIVE`, `expires_at=None`, 44-char `key_prefix`, `secret_hash`) → `storage.create_api_key` → `api_key.created` **strictly after** → literal assembled from stored segments; `DuplicateEntityError` → `ApiKeyConflictError`, any other storage error propagates untranslated with zero audits; revoke is get → tenancy check raising the same `ApiKeyNotFoundError` **before any CAS call** → CAS (idempotent, original `revoked_at` preserved) → exactly one `api_key.revoked` per processed call; audit metadata asserted with exact equality (`{"environment", "scopes"}` / `{}`); no FastAPI imports; service touches only the frozen 19-method storage contract. The 144 tests are not weaker than the Verify bullets: sequencing is proven via recorded call order (`["create_api_key", "append_audit_event"]`), the no-CAS proof via `"revoke_api_key" not in storage.calls`, dummy-compare equal-work via a monkeypatched hash counter, 10k uniqueness/shape, 32-byte secret decode, `_`-bearing round-trips, known-vector HMAC, and no-echo sweeps over exception chains. (3) **Tasks 3–8 unchanged** — `diff` against `specs/draft/05-api-key-credentials-and-scopes-breakdown.original.md` shows the only deltas since approval are the three claimed re-baseline edits (header, precondition/commit-structure section, scaffold-disposition paragraph, task 1–2 status lines) plus the previously applied B1–B8 changes; task 3–8 bodies, all twelve planner decisions, the DoD check, and the Escalations are untouched (tasks 6–8 differ from the pre-B original only by the B2 renumbering). (4) **AC coverage survives** — the five phase-spec ACs map to tasks 2/6/7, 3/5/7, 2/6/7, 3/5/6, 1/3/5/7 respectively; delivered tasks 1–2 discharge the primitives/rules halves, and every remaining obligation lands in tasks 3–8 in the pinned order 3→4→5→6→7→8. (5) **AGENTS.md boundaries** — no plaintext secret, pepper, or literal can reach persistence or logs on any shipped path (HMAC-hex-only rows, redacted reprs, fixed messages); internal `key_`/`usr_`/`org_` IDs only (the §8 segment never leaves the credential layer); services depend only on the storage contract; Phase 06/07/08 obligations remain confined to the Escalations section and docstring notes (no `boto3`, no Secrets Manager import, no compound methods invented). Verify-then-commit discipline (no rewrite of task 1–2 code unless a Verify bullet fails) is the correct framing and is honored by this approval.
+- **@reviewer 2026-09-14 (task 7 step review): APPROVE-WITH-CHANGES.** Independently re-verified on the tree: `uv run pytest` → **1253 passed**, the four task-7 files → **67 passed** re-run 3× (~4 s, barrier-based, no sleeps), `ruff check .` clean, `ruff format --check .` (128 files) clean, `git diff --check` clean. No production file changed in this step (mtimes: all `src/app/` edits ≤ 11:29, task-7 test edits 12:07–12:15; `build_key_prefix`/`new_api_key_creation_ids` confirmed already in committed task-2 code, and the service reads the clock **once** per revoke so CAS `revoked_at` and audit `created_at` are the same object — the winner-timestamp membership pin is sound; the router passes no `ids=`, so the case-3 monkeypatch of the module-global `new_api_key_creation_ids` is the real call path). **Conformance:** the key_prefix exemption is decision-2-legal and narrow — only `*.segment` entries are exempted, only where §8 designed them to live (masked `key_prefix` values in responses, with a compensating per-column pin that no other `api_keys` column carries any segment; raw persisted-row, audit, and hygiene sweeps keep the strict rule for segments, and literal/secret/pepper keep the strict rule everywhere including the owning 201 vs foreign-key cross-check); `caplog.format` genuinely does not exist on pytest 9.1.1 `LogCaptureFixture` (verified), so the `record.getMessage()` join is a legitimate fix; the `key_denials` actor-set correction is right (the `insufficient_scope` denial belongs to seeded `key_noscope`); revoked-metadata `[..] == [{}, {}]` is the correct dict comparison; the hygiene extension is purely additive (11 removed lines are docstring/`__init__` shape only — Phase 04 batteries and assertions unchanged) and its mixed-actor battery pins §16 vocabulary, exact metadata, both-actor identity agreement, and strict segment absence in audits. Concurrency case 1 pins all four decision-10 semantics (8×204, one stored `revoked_at` ∈ audit timestamps, 8 truthful audits, monotonic 200→401 never-back with deterministic post-race re-verify); case 2 pins non-idempotent creation (8 distinct ids/segments/secrets/literals, direct-read row/audit equality); case 3 pins decision 11 for **both** collision kinds with zero-audit/zero-mutation direct reads. **Required change before the task-7 commit — F1:** the raw-database sweep (secrecy test, section (5)) reads only `env.db_path.read_bytes()` while the storage connection is still open, but the adapter runs `PRAGMA journal_mode = WAL` (`sqlite.py:607`) — proven by repro: battery-written content (and any would-be plaintext leak, plus pre-revoke row versions) lives in `secrecy.sqlite-wal`, **not** in the main file, which is near-empty schema. The docstring's "(WAL included)" claim is therefore false and the sweep is vacuous for its purpose. Fix: scan every `secrecy.sqlite*` file (main + `-wal` + `-shm`) for the non-exempt materials, keeping the existing segment exemption (segments legitimately persist in `key_id`, WAL included). **Non-blocking hardening — F2:** make the watcher's post-commit sample deterministic by reordering its loop to sample-then-check-stop (`while True: …; if stop.is_set(): break`) so `False in trace` is structurally guaranteed rather than timing-overwhelming. **Nits — F3:** `test_api_key_secrecy.py:728` `>= set()` is a tautology (the next line does the work; delete it); **F4:** prefer `caplog.text` over the `getMessage()` join (formats exception text too — strictly stronger); **F5:** concurrency module comment says "32-byte" pepper for a 36-byte constant. Task-7 text and the rest of the plan unchanged; build-step applies F1 (F2–F5 at the same pass), then the phase proceeds to task 8.

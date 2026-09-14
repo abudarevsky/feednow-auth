@@ -1,4 +1,4 @@
-"""Audit-hygiene acceptance sweep (Phase 04 task 6).
+"""Audit-hygiene acceptance sweep (Phase 04 task 6; extended by Phase 05 task 7).
 
 Runs the **full mutation + denial battery** for Phase 04 against the real
 stack (provisioning via ``/v1/me``, organization create, member add/remove,
@@ -6,13 +6,21 @@ and one denial for each of the four decision-4 reasons), then reads *every*
 audit row directly from the SQLite file and proves the AGENTS.md no-secrets
 rule and the §16 vocabulary pin:
 
-- every ``action`` is inside the §16 set (this phase can only produce five
-  of them; ``api_key.*`` arrive with Phase 05);
+- every ``action`` is inside the §16 set (Phase 05 adds the two ``api_key.*``
+  actions; the pinned-metadata table below carries them);
 - every ``metadata`` key set is exactly the decision-4/7 pinned shape for
   its action — nothing extra can sneak in;
 - no row contains email material (``@``), the provider ``sub`` sentinel, the
   JWT itself, or any bearer/token marker;
 - every actor is a ``usr_`` application identity with ``actor_type=user``.
+
+The Phase 05 extension (task 7) mounts the keys router on the same
+environment and runs a **mixed-actor battery**: ``api_key.created``,
+``api_key.revoked``, and the ``human_only`` denial audited under a ``key_``
+actor — the same vocabulary/metadata/no-secrets sweep must hold when both
+actor kinds write to one database (the other two new denial reasons,
+``organization_mismatch`` and ``insufficient_scope``, need the scope probe
+and are pinned by ``test_api_key_secrecy.py`` and ``test_api_key_auth_matrix.py``).
 """
 
 from __future__ import annotations
@@ -26,14 +34,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import APIRouter
 from fastapi.testclient import TestClient
 from support.cognito import JwksTestServer, TestKey, generate_test_key, sign_token
 
+from app.api.keys import build_api_keys_router
 from app.api.me import build_me_router
 from app.api.members import build_members_router
 from app.api.organizations import build_organizations_router
 from app.auth.cognito import CognitoAccessTokenVerifier
+from app.auth.credentials import parse_literal
 from app.auth.jwks import CognitoJwksSource
+from app.auth.pepper import StaticPepper
 from app.main import create_app
 from app.models.enums import (
     IdentityProvider,
@@ -53,6 +65,10 @@ from app.storage.sqlite import SQLiteStorage
 _T0 = datetime(2026, 9, 13, 17, 0, 0, tzinfo=UTC)
 _ALLOWED_CLIENT = "hygiene-client"
 
+#: Fixed 32+-byte test pepper for the Phase 05 keys-router extension (never
+#: production, same discipline as the other Phase 05 suites).
+_PEPPER = b"integration-hygiene-pepper-0123456789ab"
+
 #: UUID-shaped provider subject: unmistakably identifiable if it ever leaked
 #: into an audit field (the "sub-like material" check).
 _SENTINEL_SUB = "123e4567-e89b-12d3-a456-426614174099"
@@ -69,12 +85,15 @@ _SPEC_16_ACTIONS = {
     "authorization.denied",
 }
 
-#: Decision-4/7 pinned metadata key sets, per action.
+#: Decision-4/7 pinned metadata key sets, per action (Phase 05 adds the two
+#: ``api_key.*`` shapes pinned by decisions 9/10).
 _PINNED_METADATA_KEYS: dict[str, set[str]] = {
     "user.created": {"provider"},
     "organization.created": {"type"},
     "membership.created": {"role"},
     "membership.removed": {"role"},
+    "api_key.created": {"environment", "scopes"},
+    "api_key.revoked": set(),
     "authorization.denied": {"reason", "operation"},
 }
 
@@ -147,7 +166,14 @@ def key() -> TestKey:
 
 
 class _HygieneEnv:
-    def __init__(self, db_path: Path, server: JwksTestServer, key: TestKey) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        server: JwksTestServer,
+        key: TestKey,
+        *,
+        pepper_source: StaticPepper | None = None,
+    ) -> None:
         self.db_path = db_path
         self.storage = SQLiteStorage(db_path)
         issuer = server.issuer("pool-a")
@@ -156,13 +182,16 @@ class _HygieneEnv:
             allowed_issuers=[issuer],
             allowed_client_ids=[_ALLOWED_CLIENT],
         )
-        app = create_app(
-            routers=[
-                build_me_router(self.storage, verifier),
-                build_organizations_router(self.storage, verifier),
-                build_members_router(self.storage, verifier),
-            ]
-        )
+        routers: list[APIRouter] = [
+            build_me_router(self.storage, verifier),
+            build_organizations_router(self.storage, verifier),
+            build_members_router(self.storage, verifier),
+        ]
+        if pepper_source is not None:
+            # Phase 05 task-7 extension: the keys router with the pepper wired,
+            # so the key-refusal (``human_only``) branch is live on these routes.
+            routers.append(build_api_keys_router(self.storage, verifier, pepper_source))
+        app = create_app(routers=routers)
         self.client = TestClient(app, raise_server_exceptions=False)
         self.issuer = issuer
         self.key = key
@@ -195,6 +224,20 @@ class _HygieneEnv:
 def env(tmp_path: Path, key: TestKey) -> Iterator[_HygieneEnv]:
     with JwksTestServer({"pool-a": [key]}) as server:
         built = _HygieneEnv(tmp_path / "hygiene.sqlite", server, key)
+        yield built
+        built.close()
+
+
+@pytest.fixture
+def key_env(tmp_path: Path, key: TestKey) -> Iterator[_HygieneEnv]:
+    """Same stack plus the keys router (pepper wired — the Phase 05 extension)."""
+    with JwksTestServer({"pool-a": [key]}) as server:
+        built = _HygieneEnv(
+            tmp_path / "hygiene_keys.sqlite",
+            server,
+            key,
+            pepper_source=StaticPepper(_PEPPER),
+        )
         yield built
         built.close()
 
@@ -361,3 +404,88 @@ def test_mutation_audits_target_the_right_records(env: _HygieneEnv) -> None:
     assert json.loads(rows_a["membership.removed"]["metadata"]) == {"role": "viewer"}
     # The mem_ record id appears ONLY in audits, never in a response body.
     assert rows_a["membership.removed"]["target_id"] not in added.text
+
+
+def test_mixed_actor_battery_stays_in_vocabulary_and_secret_free(
+    key_env: _HygieneEnv,
+) -> None:
+    """Phase 05 task-7 extension: the same sweep with both actor kinds writing.
+
+    ``api_key.created``, ``api_key.revoked``, and the ``human_only`` denial
+    (a key bearer refused on a management route, audited under the ``key_``
+    actor) land in one database next to the human mutations; the §16
+    vocabulary, the pinned metadata shapes, and the no-credential-material
+    rule must all hold unchanged.
+    """
+    _seed_user(key_env.storage, "usr_admin", "admin-sub", "admin@example.test")
+    _seed_org(key_env.storage, "org_team", "team")
+    _seed_membership(key_env.storage, "org_team", "usr_admin", MembershipRole.OWNER, "mem_team")
+    admin_token = key_env.token("admin-sub", "admin@example.test")
+    headers = key_env.auth(admin_token)
+
+    created = key_env.client.post(
+        "/v1/organizations/org_team/api-keys",
+        headers=headers,
+        json={"name": "hygiene key", "environment": "live", "scopes": ["vispector:inspection:run"]},
+    )
+    assert created.status_code == 201
+    body = created.json()
+    literal = str(body["key"])
+    parts = parse_literal(literal)
+
+    # AC 4's escalation proof: the minted key itself is refused on the list
+    # route (uniform 403) and the refusal is audited under the key identity.
+    denied = key_env.client.get(
+        "/v1/organizations/org_team/api-keys", headers=key_env.auth(literal)
+    )
+    assert denied.status_code == 403
+
+    revoked = key_env.client.delete(
+        f"/v1/organizations/org_team/api-keys/{body['id']}", headers=headers
+    )
+    assert revoked.status_code == 204
+
+    rows_a = _all_audit_rows(key_env.db_path)
+    actions = {row["action"] for row in rows_a}
+    assert actions <= _SPEC_16_ACTIONS, f"off-vocabulary actions: {actions - _SPEC_16_ACTIONS}"
+    assert actions == {"api_key.created", "api_key.revoked", "authorization.denied"}
+    serialized = json.dumps(rows_a)
+    for row in rows_a:
+        assert row["action"] in _PINNED_METADATA_KEYS, row["action"]
+        metadata = json.loads(row["metadata"])
+        assert set(metadata) == _PINNED_METADATA_KEYS[row["action"]], row
+        assert str(row["organization_id"]).startswith("org_")
+        # Actor identity/type agreement for both actor kinds (decision 7).
+        if row["actor_type"] == "user":
+            assert str(row["actor_id"]).startswith("usr_")
+        else:
+            assert row["actor_type"] == "api_key"
+            assert str(row["actor_id"]).startswith("key_")
+
+    created_rows = [row for row in rows_a if row["action"] == "api_key.created"]
+    assert len(created_rows) == 1
+    assert json.loads(created_rows[0]["metadata"]) == {
+        "environment": "live",
+        "scopes": ["vispector:inspection:run"],
+    }
+    assert created_rows[0]["target_type"] == "api_key"
+    assert created_rows[0]["target_id"] == body["id"]
+    revoked_rows = [row for row in rows_a if row["action"] == "api_key.revoked"]
+    assert [json.loads(row["metadata"]) for row in revoked_rows] == [{}]
+    assert revoked_rows[0]["target_id"] == body["id"]
+
+    denial_meta = [
+        json.loads(row["metadata"]) for row in rows_a if row["action"] == "authorization.denied"
+    ]
+    assert denial_meta == [{"reason": "human_only", "operation": "list_api_keys"}]
+    assert {row["actor_id"] for row in rows_a if row["actor_type"] == "api_key"} == {body["id"]}
+
+    # No credential material rides any audit row (AGENTS.md; the literal, the
+    # secret, the §8 segment, and the pepper all stay out of metadata), and
+    # the human JWT stays out too.
+    for material in (literal, parts.secret, parts.key_id, _PEPPER.decode()):
+        assert material not in serialized
+    assert admin_token not in serialized
+    assert "@" not in serialized
+    assert "bearer" not in serialized.lower()
+    assert "eyJ" not in serialized
