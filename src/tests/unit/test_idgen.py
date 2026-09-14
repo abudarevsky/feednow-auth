@@ -1,13 +1,17 @@
-"""Unit tests for Phase 03 task 1 application ID minting (:mod:`app.services.idgen`).
+"""Unit tests for FeedNow application ID minting (:mod:`app.services.idgen`).
 
-Verify lines covered (per the Phase 03 breakdown, task 1):
+Verify lines covered (per the Phase 03 breakdown, task 1, extended by the
+Phase 05 breakdown, task 1):
 
 1. Each minter returns the correct concrete typed ID class with a valid prefix.
 2. 10,000 samples per minter are unique.
 3. No minter accepts or derives from email/``sub``/provider input (zero-argument
    signatures, input-rejecting calls, a stubbed entropy source proving ``uuid4``
    is the only input, and an AST guard over the module body).
-4. The Phase 05 boundary holds: this module mints no ``key_``/``key_id`` values.
+4. The Phase 05 boundary holds in its discharged form: the ``key_``
+   application ID is minted here (task 1), while the §8 ``key_id``
+   credential segment stays outside this module (it lives in
+   :mod:`app.auth.credentials`).
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from app.models.ids import (
     UserId,
 )
 from app.services.idgen import (
+    new_api_key_id,
     new_audit_event_id,
     new_external_identity_id,
     new_membership_id,
@@ -44,13 +49,14 @@ from app.services.idgen import (
 MINTERS: list[tuple[object, type, str]] = [
     (new_user_id, UserId, "usr"),
     (new_organization_id, OrganizationId, "org"),
+    (new_api_key_id, ApiKeyId, "key"),
     (new_external_identity_id, ExternalIdentityId, "extid"),
     (new_membership_id, MembershipId, "mem"),
     (new_audit_event_id, AuditEventId, "aud"),
 ]
 
 #: Application identities may surface as ``actor_id``; record IDs may not.
-APPLICATION_MINTERS = {new_user_id, new_organization_id}
+APPLICATION_MINTERS = {new_user_id, new_organization_id, new_api_key_id}
 
 #: Uniqueness sample size pinned by the task's verify line.
 SAMPLES = 10_000
@@ -148,12 +154,13 @@ def test_module_has_no_non_minter_public_helpers_with_arguments():
         assert list(inspect.signature(obj, eval_str=True).parameters) == []
 
 
-# -- 4. Phase 05 boundary (key_/key_id stay out of Phase 03) ---------------
+# -- 4. Phase 05 boundary (key_ discharged; credential segment stays out) ----
 
 
-def test_module_exports_exactly_the_five_phase_03_minters():
+def test_module_exports_exactly_the_six_pinned_minters():
     assert sorted(idgen.__all__) == sorted(
         [
+            "new_api_key_id",
             "new_audit_event_id",
             "new_external_identity_id",
             "new_membership_id",
@@ -163,10 +170,28 @@ def test_module_exports_exactly_the_five_phase_03_minters():
     )
 
 
-def test_no_api_key_minter_is_exported():
-    assert not hasattr(idgen, "new_api_key_id")
+def test_new_api_key_id_validates_as_api_key_id():
+    """Phase 05 task 1 discharged the ``key_`` half of the Phase 01 deferral."""
+    value = new_api_key_id()
+    assert type(value) is ApiKeyId
+    assert isinstance(value, ApplicationId)
+    assert not isinstance(value, RecordId)
+    assert value.startswith("key_")
+    assert ApiKeyId(value) == value
+
+
+def test_credential_segment_minting_stays_out_of_idgen():
+    """The §8 ULID/CSPRNG credential entropy belongs to ``app.auth.credentials``.
+
+    No minter here may be a credential-segment minter: the only ``key``-ish
+    export is the ``key_`` application identity, and nothing in the module
+    produces 26-char Crockford segments.
+    """
     assert not hasattr(idgen, "new_key_id")
-    assert ApiKeyId not in {id_class for _, id_class, _ in MINTERS}
+    assert not hasattr(idgen, "generate_key_id")
+    assert not hasattr(idgen, "generate_secret")
+    minted_suffixes = [new_api_key_id().removeprefix("key_") for _ in range(50)]
+    assert all(re.fullmatch(r"[0-9a-f]{32}", suffix) for suffix in minted_suffixes)
 
 
 def test_module_docstring_records_the_deferral_and_phase_05_boundary():

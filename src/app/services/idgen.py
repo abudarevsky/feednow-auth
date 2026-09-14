@@ -1,18 +1,21 @@
-"""Application ID minting for FeedNow internal identifiers (Phase 03 task 1).
+"""Application ID minting for FeedNow internal identifiers (Phase 03 task 1,
+extended by Phase 05 task 1).
 
 This module discharges **Phase 03's half of the Phase 01 ID-generation
 deferral**. Phase 01 shipped prefix-validating value types only and explicitly
 postponed concrete generation strategies: "Concrete generation strategies
 (entropy source, ULID-style ``key_id`` per spec §8) belong to owner phases
-03/05" (:mod:`app.models.ids`). The owner split is unchanged and this module
-implements only the Phase 03 side of it:
+03/05" (:mod:`app.models.ids`). With Phase 05 task 1 the deferral is now
+fully discharged, one half per owner phase:
 
 - Owned here (Phase 03): ``usr_``, ``org_``, ``extid_``, ``mem_``, ``aud_``.
-- **Not owned here:** the ``key_`` application ID and the §8 ``key_id``
-  credential segment inside ``fn_live_<key-id>_<secret>`` stay with **Phase
-  05** (API-key credentials and scopes). No API-key minter is exported from
-  this module, so Phase 05 cannot accidentally inherit a Phase 03 entropy
-  contract for credential material.
+- Owned here since **Phase 05 task 1**: the ``key_`` application identity
+  (:func:`new_api_key_id`) — the same ``prefix + "_" + uuid4().hex``
+  strategy as every other application ID.
+- **Not owned here:** the §8 ``key_id`` credential segment inside
+  ``fn_live_<key-id>_<secret>`` lives in :mod:`app.auth.credentials`, not in
+  this module, so credential entropy (ULID/CSPRNG) never masquerades as
+  application-ID entropy.
 
 Strategy (per the Phase 03 breakdown, planner decision "ID generation"):
 ``prefix + "_" + uuid.uuid4().hex`` — 32 lowercase hex characters, which
@@ -38,6 +41,7 @@ from __future__ import annotations
 import uuid
 
 from app.models.ids import (
+    ApiKeyId,
     ApplicationId,
     AuditEventId,
     ExternalIdentityId,
@@ -82,7 +86,19 @@ def new_audit_event_id() -> AuditEventId:
     return _mint(AuditEventId)
 
 
+def new_api_key_id() -> ApiKeyId:
+    """Mint a new internal FeedNow API-key identity (``key_``).
+
+    Phase 05 task 1 discharges this half of the Phase 01 deferral. It is the
+    **application identity** of the credential row — deliberately distinct
+    from the §8 ``key_id`` credential segment inside the literal, which is
+    minted by :func:`app.auth.credentials.generate_key_id`.
+    """
+    return _mint(ApiKeyId)
+
+
 __all__ = [
+    "new_api_key_id",
     "new_audit_event_id",
     "new_external_identity_id",
     "new_membership_id",
