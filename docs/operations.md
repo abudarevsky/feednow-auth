@@ -46,10 +46,45 @@ storage boundary: the `Storage` contract, the SQLite adapter behind
 adds the production DynamoDB adapter behind `open_dynamodb_storage` (schema,
 IAM matrix, and limitations in
 [docs/phases/06-dynamodb.md](phases/06-dynamodb.md)); the same suite runs
-against DynamoDB Local through the marker-gated entry. The service still
-does not deploy to AWS (Phase 07) or expose an audit read surface
-(Phase 08). Do not infer those capabilities from a passing health check or
-a green conformance run.
+against DynamoDB Local through the marker-gated entry. Phase 07 adds the
+deployable AWS runtime — the Python CDK stack, the import-safe Lambda
+composition root, and the HTTP API (commands and evidence in
+[docs/phases/07-aws-infrastructure.md](phases/07-aws-infrastructure.md),
+operator summary below). The service still does not expose an audit read
+surface (Phase 08). Do not infer those capabilities from a passing health
+check or a green conformance run.
+
+## Deployed runtime (Phase 07)
+
+Full command inventory and evidence live in
+[docs/phases/07-aws-infrastructure.md](phases/07-aws-infrastructure.md).
+Operator summary:
+
+- Deployment inputs are four non-secret names — `FEEDNOW_ENV`
+  (`dev|staging|prod`), `CDK_DEFAULT_ACCOUNT`, `AWS_REGION`,
+  `COGNITO_CALLBACK_URLS` — set in the shell or in a never-committed
+  `deploy/aws/cdk/.env` (copy `.env.example`; shell wins).
+- Synth/deploy/destroy run from `deploy/aws/cdk` against the
+  `FeedNowAuth-<env>` stack; the placeholder synth command in the phase doc
+  runs as written. The runtime reads only the five stack-injected
+  `FEEDNOW_*` keys (region, table prefix, Cognito issuer/client allowlists,
+  pepper secret *name*); the pepper value is fetched once per container
+  from Secrets Manager at cold start.
+- After deploying dev/staging, prove the live path with the smoke script
+  (from the repository root; refuses `prod` without `--force`, prints only
+  ids):
+
+  ```bash
+  PYTHONPATH=. uv run python deploy/aws/smoke/smoke.py \
+    --env dev --region <region> \
+    --user-pool-id <CognitoUserPoolId> --client-id <CognitoClientId> \
+    --api-url <ApiEndpoint> --table-prefix feednow-auth-dev-
+  ```
+
+- Rollback safety: dev/staging tables are destroyed with the stack; prod
+  tables, the user pool, and the pepper secret are `RETAIN` — deleting the
+  prod stack keeps the data, and losing the prod pepper invalidates every
+  stored API-key digest (rotation is Phase 08).
 
 ## Verification
 

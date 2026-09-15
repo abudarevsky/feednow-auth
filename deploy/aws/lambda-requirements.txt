@@ -1,0 +1,14 @@
+# Lambda payload dependencies (Phase 07 task 5).
+#
+# Installed into the function bundle by the CDK asset bundling step (task 6);
+# the CDK *synth* path uses deploy/aws/cdk/requirements.txt instead and never
+# sees these. Ranges mirror the pyproject.toml floors so the deployed payload
+# can never drift below what the test suite exercises.
+#
+# Deliberately absent: uvicorn (Mangum invokes the ASGI app in-process) and
+# the CDK tooling packages.
+boto3>=1.35,<2
+fastapi>=0.115,<1
+mangum>=0.19,<1
+pydantic>=2,<3
+pyjwt[crypto]>=2.13,<3

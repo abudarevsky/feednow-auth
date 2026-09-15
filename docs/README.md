@@ -23,6 +23,12 @@ this order before changing the service:
    production DynamoDB adapter behind the frozen storage contract, the
    table/index schema and least-privilege IAM matrix for Phase 07, and the
    conformance suite passing against DynamoDB Local.
+10. [Phase 07](phases/07-aws-infrastructure.md) — completed infrastructure
+   handoff: the environment-parameterized Python CDK stack (Cognito PKCE
+   pool, the seven Phase 06 tables, the generated pepper secret, the
+   least-privilege Lambda role, the HTTP API with redaction-safe access
+   logs), the import-safe cold-start composition root, and the
+   non-production deployed smoke procedure with its recorded evidence.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,
