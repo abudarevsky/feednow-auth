@@ -60,6 +60,10 @@ _SUB = "raced-sub-0123456789"
 #: what drives the ``users.email`` UNIQUE violation.
 _COLLISION_EMAIL = "collision@example.test"
 
+#: Domain of every derived verified email, so per-attempt variants can stay
+#: well-formed addresses (the uniqueness tag goes in the local part).
+_VERIFIED_DOMAIN = "verified.example.test"
+
 _COUNT_TABLES = (
     "users",
     "external_identities",
@@ -85,11 +89,12 @@ def _verified_email(sub: str) -> str:
     """The user-info email belonging to ``sub``.
 
     Derived from the subject instead of hardcoded: one subject means one
-    verified email (what a real concurrent first-login looks like), and no
-    assertion in this file depends on the value — the service reads the batch
-    email from the gated profile and converges on the identity tuple alone.
+    verified email (what a real concurrent first-login looks like). No
+    assertion depends on the *value* — the service reads the batch email from
+    the gated profile and converges on the identity tuple alone; the one
+    email assertion below only checks membership in the offered set.
     """
-    return f"{sub}@verified.example.test"
+    return f"{sub}@{_VERIFIED_DOMAIN}"
 
 
 def _profile(sub: str = _SUB, *, email: str | None = None) -> CognitoProfile:
@@ -227,7 +232,10 @@ def test_concurrent_race_converges_regardless_of_batch_email(tmp_path: Path) -> 
     """
 
     def email_for(attempt: int) -> str:
-        return f"{_verified_email(_SUB)}+{attempt}"
+        # Plus-addressing in the *local* part: distinct per attempt, and each
+        # value stays a well-formed address (User.email pins length only, not
+        # format, so a malformed fixture would pass for the wrong reason).
+        return f"{_SUB}+{attempt}@{_VERIFIED_DOMAIN}"
 
     winner = _run_race_once(
         tmp_path,
