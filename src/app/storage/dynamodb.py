@@ -30,6 +30,13 @@ login-state/session group
 :meth:`DynamoDbStorage.create_app_session`, and
 :meth:`DynamoDbStorage.get_app_session`) against two new single-table
 :data:`SCHEMA` entries carrying a numeric ``expires_at_epoch`` TTL attribute.
+**Phase 12 task 2** added the ``application_role`` role codec (an item without
+the attribute is a pre-Phase-12 row and reads back as ``user``), the
+``users/by-email`` GSI and the :meth:`DynamoDbStorage.list_users_by_email`
+exact lookup, and retired the ``user_email`` constraint item entirely: email is
+a non-unique lookup field now, so a duplicate address is a legal write and the
+:meth:`DynamoDbStorage.provision_user` race converge keys on the identity tuple
+alone.
 
 Design carried from the Phase 06 breakdown (planner decisions 2, 3, 5, 6, 7):
 
@@ -180,13 +187,19 @@ class TableSpec:
 #: tables, the memberships table keyed by the native (org, user) pair with
 #: both listing GSIs, the api-keys listing GSI, the key-only
 #: ``unique_constraints`` table that enforces every uniqueness DynamoDB
-#: cannot enforce natively, and — additive from Phase 11 task 7 — the two
-#: single-table session stores ``oauth_login_states`` and ``app_sessions``
+#: cannot enforce natively, the additive Phase 11 task 7 single-table session
+#: stores ``oauth_login_states`` and ``app_sessions``
 #: (partition key ``pk`` = the caller-minted opaque id, with a numeric
 #: ``expires_at_epoch`` attribute reserved for the Phase 11 task-8 TTL
-#: enablement).
+#: enablement), and the additive Phase 12 ``users/by-email`` GSI
+#: (``g_email`` = the exact stored address, sort key ``pk``) behind the
+#: non-unique email lookup — an access path, never a constraint.
 SCHEMA: Final[tuple[TableSpec, ...]] = (
-    TableSpec(name="users", partition_key="pk"),
+    TableSpec(
+        name="users",
+        partition_key="pk",
+        indexes=(IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),),
+    ),
     TableSpec(name="organizations", partition_key="pk"),
     TableSpec(name="external_identities", partition_key="pk"),
     TableSpec(name="audit_events", partition_key="pk"),
@@ -218,14 +231,16 @@ _SCHEMA_TABLE_NAMES: Final[frozenset[str]] = frozenset(spec.name for spec in SCH
 # frozen ``DuplicateEntityKind`` each enforced item maps to. ``membership_id``
 # is the ``mem_`` record-id guard (kind ``entity_id``); the ``membership`` pair
 # kind belongs to the org/user tuple, which is native on the base table and so
-# never appears as a constraint item.
+# never appears as a constraint item. Phase 12 removed ``user_email``: email is
+# a non-unique lookup field, so no item guards it and
+# ``DuplicateEntityKind.USER_EMAIL`` (a frozen vocabulary member) is never
+# translated on this adapter either.
 # ---------------------------------------------------------------------------
 
 
 class ConstraintKind(StrEnum):
     """``unique_constraints`` PK label for one enforced uniqueness."""
 
-    USER_EMAIL = "user_email"
     ORGANIZATION_SLUG = "organization_slug"
     EXTERNAL_IDENTITY = "external_identity"
     API_KEY_ID = "api_key_id"
@@ -234,7 +249,6 @@ class ConstraintKind(StrEnum):
 
 #: Constraint-item label -> the domain conflict kind it surfaces as.
 DUPLICATE_KIND_BY_CONSTRAINT: Final[Mapping[ConstraintKind, DuplicateEntityKind]] = {
-    ConstraintKind.USER_EMAIL: DuplicateEntityKind.USER_EMAIL,
     ConstraintKind.ORGANIZATION_SLUG: DuplicateEntityKind.ORGANIZATION_SLUG,
     ConstraintKind.EXTERNAL_IDENTITY: DuplicateEntityKind.EXTERNAL_IDENTITY,
     ConstraintKind.API_KEY_ID: DuplicateEntityKind.API_KEY_ID,
@@ -275,6 +289,15 @@ _API_KEYS_RESUME_KEYS: Final[tuple[str, ...]] = ("pk", "g_org", "g_created")
 #: simply keeps fetching until the page's ``limit + 1`` accumulation or the
 #: segment is exhausted.
 SCAN_BATCH: Final = 100
+
+#: Accumulation bound for the one **uncursored** list read
+#: (:meth:`DynamoDbStorage.list_users_by_email`): the contract makes that
+#: operation a documented bounded lookup with no pagination token, so its Query
+#: must drain the whole ``g_email`` partition and the loop's real exit is the
+#: missing ``LastEvaluatedKey``. The value is unreachable by any item count, so
+#: it never truncates a page-sized read the way a cursor list's ``limit + 1``
+#: does.
+_LIST_USERS_BY_EMAIL_MAX: Final = 1 << 62
 
 #: Bounded re-requests of ``BatchGetItem`` unprocessed keys (production can
 #: partialize; Local answers completely). Exhaustion is a retryable
@@ -365,29 +388,52 @@ def encode_sort_key(created_at: datetime, tiebreaker_id: str) -> str:
 
 
 def user_item(user: User) -> dict[str, Any]:
-    """The ``users`` item for one domain user (``pk`` is the ``usr_`` identity)."""
+    """The ``users`` item for one domain user (``pk`` is the ``usr_`` identity).
+
+    Phase 12 adds two attributes and removes nothing:
+    ``application_role`` is written as its enum string on **every** path (the
+    writer always names the value — the model default is not a storage
+    behavior), and ``g_email`` is the ``by-email`` GSI key pair's partition
+    attribute, the exact stored address with no normalization (the SQLite
+    ``users_email_lookup`` index matches the raw column too), so
+    :meth:`DynamoDbStorage.list_users_by_email` is an exact-key Query and never
+    a Scan.
+    """
     return {
         "pk": str(user.id),
         "display_name": user.display_name,
         "email": user.email,
         "status": str(user.status),
+        "application_role": str(user.application_role),
+        "g_email": user.email,
         "created_at": encode_timestamp(user.created_at),
         "updated_at": encode_timestamp(user.updated_at),
     }
 
 
 def user_from_item(item: Mapping[str, Any]) -> User:
-    """Rebuild a :class:`~app.models.user.User` from a ``users`` item."""
-    return User.model_validate(
-        {
-            "id": item["pk"],
-            "display_name": item["display_name"],
-            "email": item["email"],
-            "status": item["status"],
-            "created_at": decode_timestamp(item["created_at"]),
-            "updated_at": decode_timestamp(item["updated_at"]),
-        }
-    )
+    """Rebuild a :class:`~app.models.user.User` from a ``users`` item.
+
+    The Phase 12 ``application_role`` follows the documented old-data rule: an
+    item that **does not carry** the attribute is a pre-Phase-12 row and reads
+    back as :attr:`~app.models.enums.ApplicationRole.USER` (the only role any
+    writer of that era could produce — administration is out of band), so the
+    attribute is simply not handed to the model and its ``USER`` default
+    applies. An attribute that **is** present is validated like every other
+    field: a corrupt role string fails loudly through ``model_validate``
+    (contract tripwire), never a silent downgrade.
+    """
+    payload: dict[str, Any] = {
+        "id": item["pk"],
+        "display_name": item["display_name"],
+        "email": item["email"],
+        "status": item["status"],
+        "created_at": decode_timestamp(item["created_at"]),
+        "updated_at": decode_timestamp(item["updated_at"]),
+    }
+    if "application_role" in item:
+        payload["application_role"] = item["application_role"]
+    return User.model_validate(payload)
 
 
 def external_identity_item(identity: ExternalIdentity) -> dict[str, Any]:
@@ -655,21 +701,13 @@ def app_session_from_item(item: Mapping[str, Any]) -> AppSession:
 # Constraint items (decision 2): the ``unique_constraints`` rows enforcing the
 # uniquenesses DynamoDB cannot enforce on a base-table key. Key-only by design,
 # so a lookup whose entity id is *unknown* is a single ``GetItem``. ``kind`` and
-# ``entity_id`` are on every item; ``user_id`` additionally on the email and
-# identity-tuple items, which is how ``get_user_by_external_identity`` and
+# ``entity_id`` are on every item; ``user_id`` additionally on the identity-tuple
+# item, which is how ``get_user_by_external_identity`` and
 # ``provision_user``'s race resolution read the owning user without a second
 # query (the SQLite paths do the same through an index lookup / a JOIN).
+# Phase 12 deleted the ``user_email`` guard item: equal addresses are legal
+# separate users, so email is a ``by-email`` GSI lookup instead of a constraint.
 # ---------------------------------------------------------------------------
-
-
-def user_email_constraint_item(user: User) -> dict[str, Any]:
-    """The ``user_email`` constraint item guarding one user's email."""
-    return {
-        "pk": encode_constraint_key(ConstraintKind.USER_EMAIL, user.email),
-        "kind": ConstraintKind.USER_EMAIL.value,
-        "entity_id": str(user.id),
-        "user_id": str(user.id),
-    }
 
 
 def external_identity_constraint_item(identity: ExternalIdentity) -> dict[str, Any]:
@@ -798,9 +836,11 @@ class DuplicateConflict:
 
 @dataclass(frozen=True)
 class IdentityRaceConflict:
-    """Descriptor: a ``provision_user`` email/identity-tuple failure.
+    """Descriptor: a ``provision_user`` identity-tuple constraint failure.
 
     Spec §6's concurrent-first-login race is a converge, not a plain conflict;
+    the identity tuple is the **only** trigger from Phase 12 on (the email
+    constraint this once shared the mapping with no longer exists), and
     ``existing_user_id`` is resolved by the operation (task 6) after the
     rollback, so this carries the base error with ``None``.
     """
@@ -1122,26 +1162,16 @@ class DynamoDbStorage:
     def create_user(self, user: User) -> User:
         """Persist a new user and echo the caller-supplied entity back.
 
-        Storage mints nothing: the item is exactly ``user``. The base put and
-        the ``user_email`` constraint put go in **one** transaction, so a
-        rejected write leaves neither row behind (SQLite's rollback equivalent).
-        A taken email surfaces as ``kind="user_email"`` and a ``usr_`` id
-        collision as ``kind="entity_id"``, both translated positionally
-        (decision 3); submission order mirrors SQLite's statement order.
+        Storage mints nothing: the item is exactly ``user``. Email is **not** a
+        uniqueness constraint from Phase 12 on (the ``user_email`` guard item
+        is gone), so two distinct ``usr_`` identities may carry the same
+        address and only a ``usr_`` id collision is translated — as
+        ``kind="entity_id"``, positionally (decision 3) — and a rejected write
+        leaves no item behind (SQLite's rollback equivalent).
         """
         self._transact(
-            [
-                self._put("users", user_item(user), ("pk",)),
-                self._put(
-                    "unique_constraints",
-                    user_email_constraint_item(user),
-                    ("pk",),
-                ),
-            ],
-            [
-                DuplicateConflict(DuplicateEntityKind.ENTITY_ID),
-                DuplicateConflict(DuplicateEntityKind.USER_EMAIL),
-            ],
+            [self._put("users", user_item(user), ("pk",))],
+            [DuplicateConflict(DuplicateEntityKind.ENTITY_ID)],
         )
         return user
 
@@ -1151,6 +1181,35 @@ class DynamoDbStorage:
         if item is None:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_item(item)
+
+    def list_users_by_email(self, email: str) -> list[User]:
+        """Exact-match lookup of every user that carries ``email`` (Phase 12).
+
+        The ``users/by-email`` GSI (partition ``g_email`` = the exact stored
+        address, sort ``pk``) answers with the full payload (``ALL``
+        projection), so this is one exact-key Query and never a Scan; an
+        unknown address simply yields no items, which is an empty list and
+        **not** :class:`EntityNotFoundError` (a lookup, not §12's resolve
+        signal). The index sorts by ``usr_`` id, while the contract pins
+        ``(created_at, id)`` ordering, so the decoded users are sorted here —
+        bounded because email is a documented bounded lookup with no cursor
+        (:data:`_LIST_USERS_BY_EMAIL_MAX` drains the partition). Items written
+        before Phase 12 carry no ``g_email`` and are invisible to this path
+        until the documented one-time backfill runs; they stay reachable
+        through :meth:`get_user`.
+        """
+        items = self._query_matches(
+            "users",
+            index_name="by-email",
+            key_condition="#g_email = :email",
+            filter_expression=None,
+            expression_names={"#g_email": "g_email"},
+            expression_values={":email": email},
+            resume=None,
+            stop_after=_LIST_USERS_BY_EMAIL_MAX,
+        )
+        users = [user_from_item(item) for item in items]
+        return sorted(users, key=lambda user: (user.created_at, str(user.id)))
 
     def create_external_identity(self, identity: ExternalIdentity) -> ExternalIdentity:
         """Attach a provider identity to an existing user (caller-echo).
@@ -1257,8 +1316,11 @@ class DynamoDbStorage:
         runs before items come back, so filtered continuation relies on the
         keyset resume from the last *returned* match, never on
         ``LastEvaluatedKey``); the loop keeps paging until the caller's
-        ``limit + 1`` accumulation is met or the segment ends — the probe-row
-        pattern shared with SQLite's ``_build_page``. Index queries cannot
+        ``stop_after`` accumulation is met or the segment ends — the probe-row
+        pattern shared with SQLite's ``_build_page``, where a paginated list
+        passes ``limit + 1`` and the uncursored email lookup passes an
+        unreachable bound so it drains the partition
+        (:data:`_LIST_USERS_BY_EMAIL_MAX`). Index queries cannot
         request consistent reads (DynamoDB rejects the flag on a GSI);
         DynamoDB Local answers strongly consistent, and production GSI
         replication lag is a documented Phase 06 limitation.
@@ -1777,11 +1839,11 @@ class DynamoDbStorage:
         (decision 3): the failing item is located with the same positional rule
         that decided the error (first ``ConditionalCheckFailed`` in submission
         order), the key-only constraint table (decision 2) carries the owner's
-        ``user_id`` on the email and identity-tuple items, and the constraint
-        ``pk`` is fully known from the failed write's own inputs — so the
-        winner resolves in one read, the analogue of SQLite's post-rollback
-        identity-then-email fallback reads. The transaction cancelled and
-        rolled back completely before this read, so it sees the *concurrent
+        ``user_id`` on the identity-tuple item (Phase 12: the only race
+        trigger), and the constraint ``pk`` is fully known from the failed
+        write's own inputs — so the winner resolves in one read, the analogue
+        of SQLite's post-rollback identity-tuple read. The transaction cancelled
+        and rolled back completely before this read, so it sees the *concurrent
         winner's* committed rows. Anything unresolvable yields ``None``
         (contract: "when the adapter can resolve it, else ``None``") — never a
         second error masking the race.
@@ -1819,9 +1881,11 @@ class DynamoDbStorage:
 
         Submission order mirrors SQLite's statement order — users → identities
         → organizations → memberships → audits, each group base put then
-        constraint put — so a multi-failure race classifies identically on both
-        adapters, and the parallel, same-ordered descriptors map each cancelled
-        item to its domain error (the first ``ConditionalCheckFailed`` decides).
+        constraint put (from Phase 12 the users group is base-put only: email
+        carries no guard item) — so a multi-failure race classifies identically
+        on both adapters, and the parallel, same-ordered descriptors map each
+        cancelled item to its domain error (the first ConditionalCheckFailed
+        decides).
         The membership item denormalizes the ``created_at`` of the organization
         the membership actually points at onto ``g_org_created`` (decision 2:
         the batch's own organization supplies it; an external organization is
@@ -1836,13 +1900,16 @@ class DynamoDbStorage:
         cross-check reveals a parent the batch does not itself create"
         obligation and the DynamoDB replication of SQLite's foreign keys.
 
-        Conflict semantics (contract-pinned): an email **or** identity-tuple
-        constraint failure is spec §6's concurrent-first-login race — never a
-        plain email conflict — and surfaces as
+        Conflict semantics (contract-pinned): the identity tuple is the **sole**
+        race trigger from Phase 12 on — its constraint failure is spec §6's
+        concurrent-first-login race and surfaces as
         :class:`~app.storage.contract.DuplicateExternalIdentityError` after the
         full rollback (transactions are all-or-nothing, so no partial row of
         the rejected batch survives), with ``existing_user_id`` resolved by one
-        constraint-item ``GetItem`` (:meth:`_resolve_race_winner`). Slug,
+        constraint-item ``GetItem`` (:meth:`_resolve_race_winner`). A batch that
+        merely shares an **email** with an existing user but carries a fresh
+        identity tuple commits as a second, independent user: email is a lookup
+        field, never a conflict, on this path or :meth:`create_user`. Slug,
         membership-pair, and record-id failures propagate as their own
         :class:`DuplicateEntityError` kinds. Transient ``TransactionConflict``
         cancellations re-run the whole transaction (the SQLite
@@ -1876,11 +1943,9 @@ class DynamoDbStorage:
             membership_organization_created_at = decode_timestamp(external_org["created_at"])
         else:
             membership_organization_created_at = organization.created_at
-        email_constraint = user_email_constraint_item(user)
         identity_constraint = external_identity_constraint_item(identity)
         items: list[dict[str, Any]] = [
             self._put("users", user_item(user), ("pk",)),
-            self._put("unique_constraints", email_constraint, ("pk",)),
             self._put("external_identities", external_identity_item(identity), ("pk",)),
             self._put("unique_constraints", identity_constraint, ("pk",)),
             self._put("organizations", organization_item(organization), ("pk",)),
@@ -1902,7 +1967,6 @@ class DynamoDbStorage:
         ]
         descriptors: list[ConflictDescriptor] = [
             DuplicateConflict(DuplicateEntityKind.ENTITY_ID),
-            IdentityRaceConflict(),
             DuplicateConflict(DuplicateEntityKind.ENTITY_ID),
             IdentityRaceConflict(),
             DuplicateConflict(DuplicateEntityKind.ENTITY_ID),
@@ -1915,11 +1979,9 @@ class DynamoDbStorage:
             descriptors.append(DuplicateConflict(DuplicateEntityKind.ENTITY_ID))
         # Race winner resolution (decision 3): the constraint PK is fully known
         # from the failed write's own inputs, and the positional rule that
-        # decided the error identifies which race item failed. When the email
-        # and the identity tuple collide for *different* users (the contract
-        # leaves "the winner" unspecified there and the suite never constructs
-        # it), submission order resolves the email item's owner — §6's real
-        # race carries one email and one tuple for the same winner.
+        # decided the error identifies which race item failed. The identity
+        # tuple is the only race item left (Phase 12 retired the email guard),
+        # and §6's real race means that tuple's owner is the winner.
         race_constraint_pk_by_index: dict[int, str] = {
             index: str(items[index]["Put"]["Item"]["pk"])
             for index, descriptor in enumerate(descriptors)
@@ -2279,7 +2341,6 @@ __all__ = [
     "organization_item",
     "organization_slug_constraint_item",
     "ttl_epoch_seconds",
-    "user_email_constraint_item",
     "user_from_item",
     "user_item",
 ]

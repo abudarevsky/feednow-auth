@@ -181,16 +181,17 @@ def _provision(ddb: _DynamoDb, batch: _RaceBatch) -> ProvisionedUser:
 
 
 def _constraint_pks(
-    user: User,
     identity: ExternalIdentity,
     organization: Organization,
     membership: Membership,
 ) -> dict[str, str]:
-    """The four constraint PKs a ``provision_user`` batch writes, by kind."""
+    """The three constraint PKs a ``provision_user`` batch writes, by kind.
+
+    Phase 12 retired the batch's ``user_email`` guard item: the identity tuple
+    is the only identity-side constraint a provisioning batch writes (plus the
+    organization slug and the ``mem_`` record-id guard).
+    """
     return {
-        ConstraintKind.USER_EMAIL.value: encode_constraint_key(
-            ConstraintKind.USER_EMAIL, user.email
-        ),
         ConstraintKind.EXTERNAL_IDENTITY.value: encode_constraint_key(
             ConstraintKind.EXTERNAL_IDENTITY,
             encode_external_identity_value(
@@ -216,9 +217,10 @@ def _assert_batch_absent(
     """Direct table scans: the rejected batch consumed none of its own ids.
 
     ``shared_kinds`` names constraint kinds whose PK is deliberately the same
-    as another batch's — the §6 race carries one email and identity tuple
-    across winner and loser, so those items must map to the *winner* (pinned
-    by the caller), not be absent.
+    as another batch's — the §6 race carries one identity tuple across winner
+    and loser, so that item must map to the *winner* (pinned by the caller),
+    not be absent. Phase 12 removed the email kind from this vocabulary: no
+    batch writes an email guard any more.
     """
     user, identity, organization, membership, events = batch
     assert ddb.tables.item("users", {"pk": str(user.id)}) is None
@@ -240,7 +242,7 @@ def _assert_batch_absent(
         )
     for event in events:
         assert ddb.tables.item("audit_events", {"pk": str(event.id)}) is None
-    for kind, pk in _constraint_pks(user, identity, organization, membership).items():
+    for kind, pk in _constraint_pks(identity, organization, membership).items():
         if ConstraintKind(kind) in shared_kinds:
             continue
         assert ddb.tables.item("unique_constraints", {"pk": pk}) is None
@@ -450,12 +452,10 @@ def test_provision_user_writes_every_component_atomically(ddb: _DynamoDb) -> Non
     assert raw_membership["g_org_created"] == encode_sort_key(
         organization.created_at, str(organization.id)
     )
-    # All four constraint items went in the same transaction; the email and
-    # identity-tuple items carry user_id — what race resolution reads.
-    pks = _constraint_pks(user, identity, organization, membership)
-    email_item = ddb.tables.item("unique_constraints", {"pk": pks["user_email"]})
-    assert email_item is not None
-    assert email_item["user_id"] == str(user.id)
+    # All three constraint items went in the same transaction; the identity-tuple
+    # item carries user_id — what race resolution reads (Phase 12 deleted the
+    # email guard, so the batch writes no user_email item at all).
+    pks = _constraint_pks(identity, organization, membership)
     identity_item = ddb.tables.item("unique_constraints", {"pk": pks["external_identity"]})
     assert identity_item is not None
     assert identity_item["user_id"] == str(user.id)
@@ -465,6 +465,13 @@ def test_provision_user_writes_every_component_atomically(ddb: _DynamoDb) -> Non
     membership_guard = ddb.tables.item("unique_constraints", {"pk": pks["membership_id"]})
     assert membership_guard is not None
     assert membership_guard["entity_id"] == str(membership.id)
+    assert len(ddb.tables.items("unique_constraints")) == 3
+    # The provisioned user item carries the Phase 12 attributes: the role the
+    # writer named and the by-email GSI key the lookup reads.
+    raw_user = ddb.tables.item("users", {"pk": str(user.id)})
+    assert raw_user is not None
+    assert raw_user["application_role"] == str(user.application_role)
+    assert raw_user["g_email"] == user.email
     # ...and audit rows are proven via the duplicate-append proof (the suite
     # has no audit read surface): re-appending a provisioned aud_ id is a
     # primary-key conflict, never a silent second insert.
@@ -475,17 +482,19 @@ def test_provision_user_writes_every_component_atomically(ddb: _DynamoDb) -> Non
 
 
 # ---------------------------------------------------------------------------
-# provision_user conflicts: §6 race converge (winner id resolved), email-only
-# collision, membership-pair plain conflict — every path zero-residue
+# provision_user conflicts: §6 race converge on the identity tuple (winner id
+# resolved), shared-email coexistence, membership-pair plain conflict — every
+# path zero-residue
 # ---------------------------------------------------------------------------
 
 
-def test_provision_race_loser_maps_email_conflict_with_winner_id(ddb: _DynamoDb) -> None:
+def test_provision_race_loser_maps_identity_conflict_with_winner_id(ddb: _DynamoDb) -> None:
     winner = _race_batch("0001", email="race@example.test", provider_subject="sub-race")
     _provision(ddb, winner)
-    # Loser: same email AND same identity tuple, distinct record ids. The
-    # users-email constraint fails first in submission order (SQLite statement
-    # order) and must still map to the race error, not a plain email conflict.
+    # Loser: same identity tuple (and, as §6's real race has it, the same
+    # address), distinct record ids. From Phase 12 the identity-tuple guard is
+    # the only race trigger — the email item it used to fail against first no
+    # longer exists.
     loser = _race_batch("0002", email="race@example.test", provider_subject="sub-race")
     with pytest.raises(DuplicateExternalIdentityError) as excinfo:
         _provision(ddb, loser)
@@ -493,14 +502,8 @@ def test_provision_race_loser_maps_email_conflict_with_winner_id(ddb: _DynamoDb)
     assert error.kind is DuplicateEntityKind.EXTERNAL_IDENTITY
     ddb.assert_no_leak(error)
     # existing_user_id resolved post-rollback by one GetItem on the winning
-    # email-constraint item — which still maps to the winner, untouched.
+    # identity-tuple constraint item — which still maps to the winner, untouched.
     assert error.existing_user_id == winner[0].id
-    constraint = ddb.tables.item(
-        "unique_constraints",
-        {"pk": encode_constraint_key(ConstraintKind.USER_EMAIL, "race@example.test")},
-    )
-    assert constraint is not None
-    assert constraint["user_id"] == str(winner[0].id)
     tuple_constraint = ddb.tables.item(
         "unique_constraints",
         {
@@ -514,13 +517,15 @@ def test_provision_race_loser_maps_email_conflict_with_winner_id(ddb: _DynamoDb)
     )
     assert tuple_constraint is not None
     assert tuple_constraint["user_id"] == str(winner[0].id)
+    # No email guard item was ever written, by either batch.
+    assert len(ddb.tables.items("unique_constraints")) == 3
     # Full rollback: the loser consumed none of its own ids (direct scans).
-    # The email and identity-tuple constraint PKs are shared with the winner
-    # (that is what the race carries), so they are pinned to the winner above.
+    # The identity-tuple constraint PK is shared with the winner (that is what
+    # the race carries), so it is pinned to the winner above.
     _assert_batch_absent(
         ddb,
         loser,
-        shared_kinds=(ConstraintKind.USER_EMAIL, ConstraintKind.EXTERNAL_IDENTITY),
+        shared_kinds=(ConstraintKind.EXTERNAL_IDENTITY,),
     )
     # ...including the audit id: appending it against the winner's (existing)
     # organization succeeds, proving the batch's audit row rolled back.
@@ -534,52 +539,48 @@ def test_provision_race_loser_maps_email_conflict_with_winner_id(ddb: _DynamoDb)
     assert ddb.storage.get_user(winner[0].id) == winner[0]
 
 
-def test_provision_email_collision_without_identity_resolves_by_email(ddb: _DynamoDb) -> None:
+def test_provision_same_email_without_identity_collision_creates_second_user(
+    ddb: _DynamoDb,
+) -> None:
     existing = make_user()
     ddb.storage.create_user(existing)
-    # Email-duplicate / identity-absent variant: the identity tuple is fresh,
-    # only the email constraint collides. Same pinned converge mapping, with
-    # existing_user_id resolved from the winning email-constraint item.
-    with pytest.raises(DuplicateExternalIdentityError) as excinfo:
-        ddb.storage.provision_user(
-            user=make_user(user_id="usr_test_0002", email=existing.email),
-            identity=make_identity(
-                identity_id="extid_test_0002",
-                user_id="usr_test_0002",
-                provider_subject="subject-unique-0002",
-            ),
-            organization=make_organization(organization_id="org_test_0002"),
-            membership=make_membership(
-                membership_id="mem_test_0002",
-                organization_id="org_test_0002",
-                user_id="usr_test_0002",
-            ),
-            audit_events=[
-                make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")
-            ],
-        )
-    assert excinfo.value.existing_user_id == existing.id
-    ddb.assert_no_leak(excinfo.value)
-    # Full rollback: nothing but the pre-existing user (and its email
-    # constraint) survived the batch — proven by direct scans, not the adapter.
-    assert len(ddb.tables.items("users")) == 1
-    assert ddb.tables.items("external_identities") == []
-    assert ddb.tables.items("organizations") == []
-    assert ddb.tables.items("memberships") == []
-    assert ddb.tables.items("audit_events") == []
-    assert len(ddb.tables.items("unique_constraints")) == 1
-    with pytest.raises(EntityNotFoundError):
+    # Email-duplicate / identity-fresh: Phase 12 retired the email guard, so
+    # this is not a conflict at all — the batch commits as a second,
+    # independent user with its own organization, membership, and audit row.
+    second = make_user(user_id="usr_test_0002", email=existing.email)
+    result = ddb.storage.provision_user(
+        user=second,
+        identity=make_identity(
+            identity_id="extid_test_0002",
+            user_id="usr_test_0002",
+            provider_subject="subject-unique-0002",
+        ),
+        organization=make_organization(organization_id="org_test_0002"),
+        membership=make_membership(
+            membership_id="mem_test_0002",
+            organization_id="org_test_0002",
+            user_id="usr_test_0002",
+        ),
+        audit_events=[make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")],
+    )
+    assert result.user == second
+    assert ddb.storage.get_user(second.id) == second
+    assert ddb.storage.get_user(existing.id) == existing
+    # The batch's own subject resolves to the new user only (no merge, no
+    # re-pointing)...
+    assert (
         ddb.storage.get_user_by_external_identity(
             provider=IdentityProvider.COGNITO,
             provider_subject="subject-unique-0002",
         )
-    # The rolled-back organization is genuinely absent: an audit append
-    # referencing it fails on the ConditionCheck (no partial org row survived).
-    with pytest.raises(ReferenceNotFoundError):
-        ddb.storage.append_audit_event(
-            make_audit_event(audit_id="aud_test_0003", organization_id="org_test_0002")
-        )
-    assert ddb.storage.get_user(existing.id) == existing
+        == second
+    )
+    # ...and the shared address is exactly what the by-email lookup returns,
+    # in contract (created_at, id) order.
+    assert ddb.storage.list_users_by_email(existing.email) == [existing, second]
+    # The batch wrote its own three constraint items (identity, slug, mem_
+    # guard) and no email guard for either user.
+    assert len(ddb.tables.items("unique_constraints")) == 3
 
 
 def test_provision_membership_conflict_rolls_back_whole_batch(ddb: _DynamoDb) -> None:
@@ -744,12 +745,12 @@ def test_concurrent_identical_provisions_yield_exactly_one_success(ddb: _DynamoD
     # Exactly one user/organization row exists: the winner's. The loser's
     # rollback is proven by direct table scans.
     loser_token = "late" if winner.user.id == batches["early"][0].id else "early"
-    # The shared email/identity-tuple constraint PKs belong to the winner (the
-    # race is on those values), so they are excluded from the absence scan.
+    # The shared identity-tuple constraint PK belongs to the winner (the race
+    # is on that value), so it is excluded from the absence scan.
     _assert_batch_absent(
         ddb,
         batches[loser_token],
-        shared_kinds=(ConstraintKind.USER_EMAIL, ConstraintKind.EXTERNAL_IDENTITY),
+        shared_kinds=(ConstraintKind.EXTERNAL_IDENTITY,),
     )
     assert ddb.storage.get_user(winner.user.id) == winner.user
 
@@ -1213,24 +1214,25 @@ def test_provision_organization_external_audit_org_enforced_by_condition_check(
             [make_audit_event(audit_id="aud_test_0002", organization_id="org_ghost_0001")],
         )
     ddb.assert_no_leak(excinfo.value)
-    # Zero residue from the batch: only the setup user (and its email
-    # constraint) remains.
+    # Zero residue from the batch: the setup user carries no constraint item
+    # at all now (Phase 12 retired the email guard), so the table stays empty.
     assert ddb.tables.items("organizations") == []
     assert ddb.tables.items("memberships") == []
     assert ddb.tables.items("audit_events") == []
-    assert len(ddb.tables.items("unique_constraints")) == 1
+    assert ddb.tables.items("unique_constraints") == []
 
 
 # ---------------------------------------------------------------------------
-# Contract surface: with the task-7 compound in place (and the four Phase 11
-# login-state/session operations) the adapter carries all 23 protocol methods,
+# Contract surface: with the task-7 compound in place, the four Phase 11
+# login-state/session operations, and the additive Phase 12
+# ``list_users_by_email``, the adapter carries all 24 protocol methods,
 # so the runtime-checkable isinstance proof passes.
 # ---------------------------------------------------------------------------
 
 
 def test_adapter_satisfies_the_runtime_checkable_storage_protocol(ddb: _DynamoDb) -> None:
     members = get_protocol_members(Storage)
-    assert len(members) == 23, members
+    assert len(members) == 24, members
     assert all(callable(getattr(DynamoDbStorage, name, None)) for name in members)
     # The same proof the SQLite adapter carries: a constructed adapter is an
     # instance of the protocol, not just a structural look-alike.

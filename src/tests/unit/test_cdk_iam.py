@@ -62,9 +62,11 @@ CALLBACK_URLS = ["https://app.example.invalid/oauth/callback"]
 
 #: The consolidated per-resource matrix, transcribed verbatim from
 #: docs/phases/06-dynamodb.md "Least-privilege IAM matrix" (keyed by the
-#: unsuffixed table name; physical names are ``feednow-auth-<env>-<name>``).
+#: unsuffixed table name; physical names are ``feednow-auth-<env>-<name>``),
+#: extended by the Phase 12 ``users`` ``Query`` (the ``by-email`` lookup, which
+#: DynamoDB also authorizes against the base-table ARN).
 TABLE_MATRIX: Mapping[str, frozenset[str]] = {
-    "users": frozenset({"GetItem", "PutItem", "ConditionCheckItem"}),
+    "users": frozenset({"GetItem", "PutItem", "Query", "ConditionCheckItem"}),
     "organizations": frozenset({"GetItem", "PutItem", "BatchGetItem", "ConditionCheckItem"}),
     "external_identities": frozenset({"PutItem"}),
     "audit_events": frozenset({"PutItem"}),
@@ -91,6 +93,8 @@ INDEX_MATRIX: Mapping[tuple[str, str], frozenset[str]] = {
     ("api_keys", "by-organization"): frozenset({"Query"}),
     ("memberships", "by-organization"): frozenset({"Query"}),
     ("memberships", "by-user"): frozenset({"Query"}),
+    # Phase 12: the users/by-email lookup path (Query only, like every GSI).
+    ("users", "by-email"): frozenset({"Query"}),
 }
 
 #: The adapter performs these only inside ``TransactWriteItems``, so every

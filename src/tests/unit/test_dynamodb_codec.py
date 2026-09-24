@@ -14,6 +14,9 @@ Verify lines covered:
   range mis-sorts).
 - Tenant ``None`` <-> ``""`` normalization is lossless.
 - Sort-key builders put the ``#``-separated id tiebreaker last.
+- The Phase 12 users item carries ``application_role``/``g_email``, an absent
+  role (pre-Phase-12 item) reads back as ``user``, and a present-but-invalid
+  role fails validation; no constraint kind or mapping names email any more.
 - Cursor garbage/tampered/foreign-scope -> ``InvalidCursorError`` with fixed
   messages and no echo of the cursor content.
 - The factory with an injected fake resource constructs without any network
@@ -26,11 +29,13 @@ import base64
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
+from pydantic import ValidationError
 
 import app.storage.contract as contract
-from app.models.enums import IdentityProvider
+from app.models.enums import ApplicationRole, IdentityProvider, UserStatus
 from app.models.ids import UserId
 from app.models.session import AppSession, OAuthLoginState
+from app.models.user import User
 from app.storage.dynamodb import (
     CURSOR_SCOPE_API_KEYS,
     CURSOR_SCOPE_MEMBERSHIPS,
@@ -53,6 +58,8 @@ from app.storage.dynamodb import (
     oauth_login_state_item,
     open_dynamodb_storage,
     ttl_epoch_seconds,
+    user_from_item,
+    user_item,
 )
 
 # ---------------------------------------------------------------------------
@@ -116,8 +123,25 @@ def test_tenant_normalization_round_trip_is_lossless() -> None:
 
 
 def test_constraint_key_puts_kind_first_hash_separator() -> None:
-    key = encode_constraint_key(ConstraintKind.USER_EMAIL, "test@example.com")
-    assert key == "user_email#test@example.com"
+    key = encode_constraint_key(ConstraintKind.ORGANIZATION_SLUG, "acme")
+    assert key == "organization_slug#acme"
+
+
+def test_no_constraint_kind_or_mapping_names_email() -> None:
+    # Phase 12: email is a lookup field, not a uniqueness constraint, so the
+    # adapter has no ``user_email`` guard item at all — the kind is gone from
+    # the enum and from the constraint->conflict mapping (the frozen
+    # ``DuplicateEntityKind.USER_EMAIL`` stays in the contract vocabulary but
+    # is never translated on this adapter).
+    assert "USER_EMAIL" not in {member.name for member in ConstraintKind}
+    assert "user_email" not in {str(kind) for kind in ConstraintKind}
+    assert DUPLICATE_KIND_BY_CONSTRAINT.keys() == set(ConstraintKind)
+    assert contract.DuplicateEntityKind.USER_EMAIL not in DUPLICATE_KIND_BY_CONSTRAINT.values()
+    # And the users table declares an index, not a constraint, for email.
+    users_spec = next(spec for spec in SCHEMA if spec.name == "users")
+    assert [(i.name, i.partition_key, i.sort_key) for i in users_spec.indexes] == [
+        ("by-email", "g_email", "pk")
+    ]
 
 
 def test_membership_id_guard_maps_to_entity_id_kind() -> None:
@@ -216,6 +240,59 @@ def test_invalid_cursor_messages_never_echo_the_cursor() -> None:
         message = str(excinfo.value)
         assert "usr_leakme" not in message
         assert bad[:6] not in message
+
+
+# -- users item codec (Phase 12: application role + email lookup key) ---------
+
+
+def _user(**overrides: object) -> User:
+    payload: dict[str, object] = {
+        "id": UserId("usr_test_0001"),
+        "display_name": "Test user",
+        "email": "test@example.test",
+        "status": UserStatus.ACTIVE,
+        "created_at": _T1,
+        "updated_at": _T1,
+    }
+    payload.update(overrides)
+    return User.model_validate(payload)
+
+
+def test_user_item_round_trips_role_and_email_lookup_key() -> None:
+    admin = _user(application_role=ApplicationRole.ADMIN)
+    item = user_item(admin)
+    # The role is written as its enum string on every path (the writer always
+    # names it), and g_email is the by-email GSI partition key: the exact
+    # stored address, unnormalized, matching the SQLite index predicate.
+    assert item["application_role"] == "admin"
+    assert item["g_email"] == admin.email == item["email"]
+    assert item["pk"] == "usr_test_0001"
+    assert user_from_item(item) == admin
+
+
+def test_user_item_writes_the_default_role_rather_than_omitting_it() -> None:
+    item = user_item(_user())
+    # Absence is reserved for pre-Phase-12 items; a fresh write always carries
+    # the attribute, so the old-data read rule below cannot mask a bug here.
+    assert item["application_role"] == "user"
+    assert user_from_item(item).application_role is ApplicationRole.USER
+
+
+def test_pre_phase_12_item_without_role_reads_back_as_user() -> None:
+    legacy = user_item(_user(application_role=ApplicationRole.ADMIN))
+    del legacy["application_role"]
+    # Documented old-data rule: an absent attribute is a pre-Phase-12 row and
+    # reads as the only role writers of that era could produce.
+    assert user_from_item(legacy).application_role is ApplicationRole.USER
+
+
+def test_present_but_invalid_stored_role_fails_validation() -> None:
+    corrupt = user_item(_user())
+    corrupt["application_role"] = "superuser"
+    # The corrupt-value tripwire survives the old-data rule: only *absence*
+    # defaults, a present-but-invalid value fails loudly.
+    with pytest.raises(ValidationError):
+        user_from_item(corrupt)
 
 
 # -- schema (single source) ---------------------------------------------------

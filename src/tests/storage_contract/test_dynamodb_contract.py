@@ -50,10 +50,11 @@ SUITE_PATH: Path = Path(__file__).resolve().parent / "suite.py"
 #: (email-uniqueness flip: the duplicate-email and email-fallback cases were
 #: replaced by coexistence/lookup cases; the Phase 11 task-6/7 baseline was
 #: ``f32efc6e...`` before that edit, and the Phase 06 one ``025c879c...``
-#: before it). The gated DynamoDB Local run is knowingly red on the flipped
-#: cases until Phase 12 task 4 lands the adapter side. AC 2: any drift here
-#: means the shared suite was edited to fit DynamoDB instead of the adapter
-#: changing — this pin fails loudly first.
+#: before it). Phase 12 task 2 landed the adapter side (role codec, the
+#: ``users/by-email`` GSI, ``list_users_by_email``, and the retired email
+#: constraint), so the gated DynamoDB Local run is green again. AC 2: any
+#: drift here means the shared suite was edited to fit DynamoDB instead of the
+#: adapter changing — this pin fails loudly first.
 SUITE_SHA256_AT_BASELINE = "14b1e04b9dac475d00436686658beef140b5bc232a2b0264864da763ad8ca300"
 
 

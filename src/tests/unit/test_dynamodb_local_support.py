@@ -207,9 +207,33 @@ def test_create_parameters_apply_prefix_string_keys_and_all_projection() -> None
 
 
 def test_create_parameters_omit_gsis_for_single_key_tables() -> None:
-    payload = _spec("users").create_parameters("pfx-")
+    # The still index-free single-key stores (Phase 12 gave ``users`` its
+    # by-email index, so ``organizations`` carries this proof now).
+    payload = _spec("organizations").create_parameters("pfx-")
     assert "GlobalSecondaryIndexes" not in payload
     assert payload["KeySchema"] == [{"AttributeName": "pk", "KeyType": "HASH"}]
+
+
+def test_create_parameters_declare_the_phase_12_by_email_gsi() -> None:
+    # The users table keeps its pk-only base key (every write is a point
+    # PutItem); the email access path is the additive GSI, whose sort key is
+    # the base ``pk`` so the index needs no extra attribute definition.
+    payload = _spec("users").create_parameters("pfx-")
+    assert payload["AttributeDefinitions"] == [
+        {"AttributeName": "pk", "AttributeType": "S"},
+        {"AttributeName": "g_email", "AttributeType": "S"},
+    ]
+    assert payload["KeySchema"] == [{"AttributeName": "pk", "KeyType": "HASH"}]
+    assert payload["GlobalSecondaryIndexes"] == [
+        {
+            "IndexName": "by-email",
+            "KeySchema": [
+                {"AttributeName": "g_email", "KeyType": "HASH"},
+                {"AttributeName": "pk", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        }
+    ]
 
 
 # -- prefix and name hygiene -----------------------------------------------------

@@ -178,6 +178,23 @@ def test_gsi_names_key_schemas_and_projection_match_runtime_schema() -> None:
                 assert index in indexes, f"{spec.name} missing GSI {index['IndexName']!r}"
 
 
+def test_users_table_carries_the_phase_12_by_email_gsi() -> None:
+    # Phase 12 task 2: the non-unique email lookup needs a real access path, so
+    # the users table (the only Phase 06 table with no index before this) now
+    # synthesizes exactly the by-email GSI with the runtime key attributes, and
+    # ``g_email`` joins the attribute definitions.
+    users_spec = next(spec for spec in SCHEMA if spec.name == "users")
+    assert [(i.name, i.partition_key, i.sort_key) for i in users_spec.indexes] == [
+        ("by-email", "g_email", "pk")
+    ]
+    for env_name in ENVIRONMENTS:
+        properties = _table_by_name(env_name, f"feednow-auth-{env_name}-users")
+        assert properties["GlobalSecondaryIndexes"] == _gsi_schema(users_spec.indexes)
+        assert {
+            definition["AttributeName"] for definition in properties["AttributeDefinitions"]
+        } == {"pk", "g_email"}
+
+
 # --- Billing, encryption, and capacity drift ---------------------------------
 
 

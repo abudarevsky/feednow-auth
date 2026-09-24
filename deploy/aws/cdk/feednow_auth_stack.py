@@ -139,13 +139,19 @@ class _TableSpec:
 
 #: The table schema, transcribed verbatim from ``SCHEMA`` in
 #: ``src/app/storage/dynamodb.py`` (docs/phases/06-dynamodb.md "Table and
-#: index schema"), plus the two additive Phase 11 session tables. Duplicated
+#: index schema"), plus the two additive Phase 11 session tables and the
+#: additive Phase 12 ``users/by-email`` GSI (an access path for the non-unique
+#: email lookup, never a constraint). Duplicated
 #: rather than imported on purpose: the synth path (``requirements.txt``)
 #: carries no boto3, so the CDK app must not import the runtime adapter
 #: module. ``test_cdk_dynamodb.py`` pins this copy against the runtime
 #: ``SCHEMA`` (name + key schema + indexes) so the two can never drift.
 _SCHEMA: Final[tuple[_TableSpec, ...]] = (
-    _TableSpec(name="users", partition_key="pk"),
+    _TableSpec(
+        name="users",
+        partition_key="pk",
+        indexes=(_IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),),
+    ),
     _TableSpec(name="organizations", partition_key="pk"),
     _TableSpec(name="external_identities", partition_key="pk"),
     _TableSpec(name="audit_events", partition_key="pk"),
@@ -189,14 +195,17 @@ _STANDALONE_WRITE_TABLES: Final[frozenset[str]] = frozenset({"oauth_login_states
 #: Consolidated per-resource least-privilege matrix, transcribed verbatim
 #: from the "Least-privilege IAM matrix" table in docs/phases/06-dynamodb.md
 #: (Phase 07 CDK input, AC 5), extended by the two Phase 11 session rows with
-#: exactly the actions the task-7 adapter calls. GSI ARNs are not rows here:
-#: they get ``dynamodb:Query`` only, and a GSI ``Query`` also needs
+#: exactly the actions the task-7 adapter calls, and by the Phase 12
+#: ``users`` ``Query`` the ``by-email`` lookup performs. GSI ARNs are not rows
+#: here: they get ``dynamodb:Query`` only, and a GSI ``Query`` also needs
 #: ``Query`` on the base table ARN (already covered by the table rows below).
 #: No ``Scan``, no table-admin actions (``CreateTable``/``DeleteTable``/
 #: ``DescribeTable`` belong to the CloudFormation deploy path, never the
 #: runtime role).
 _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
-    "users": frozenset({"GetItem", "PutItem", "ConditionCheckItem"}),
+    # Phase 12: ``Query`` is the ``users/by-email`` GSI read, which DynamoDB
+    # authorizes against the base-table ARN as well as the index ARN.
+    "users": frozenset({"GetItem", "PutItem", "Query", "ConditionCheckItem"}),
     "organizations": frozenset({"GetItem", "PutItem", "BatchGetItem", "ConditionCheckItem"}),
     "external_identities": frozenset({"PutItem"}),
     "audit_events": frozenset({"PutItem"}),

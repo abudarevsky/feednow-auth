@@ -6,12 +6,15 @@ suite stays green without Docker (``docs/operations.md`` carries the run
 command).
 
 These are **direct adapter calls**, not the conformance suite (task 8 runs the
-shared 60 cases unchanged): the point here is to pin the DynamoDB translation of
+shared 73 cases unchanged): the point here is to pin the DynamoDB translation of
 the 12 users/identity behaviors on the real transactional path — the
 ``TransactWriteItems`` atomicity, the positional conflict classification
-(decision 3), the key-only constraint lookups (decision 2), and the tenant
-normalization inside the constraint key (decision 6). Domain inputs come from the
-suite's own deterministic builders so the fixtures match the conformance cases
+(decision 3), the key-only constraint lookups (decision 2), the tenant
+normalization inside the constraint key (decision 6), and — from Phase 12 — the
+``application_role``/``g_email`` attributes on the stored item, the coexistence
+of two users sharing an address, and the ``by-email`` ``list_users_by_email``
+read. Domain inputs come from the suite's own deterministic builders so the
+fixtures match the conformance cases
 exactly. Every failure path asserts the domain error *class*, the conflict *kind*,
 an echo-free message, and — by scanning the tables directly — that the rejected
 batch left no residue.
@@ -23,7 +26,7 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from storage_contract.suite import make_identity, make_user
+from storage_contract.suite import T0, T1, make_identity, make_user
 
 from app.models.enums import IdentityProvider
 from app.models.ids import UserId
@@ -111,10 +114,6 @@ def ddb() -> Iterator[_DynamoDb]:
         local.delete_tables(prefix, resource=harness)
 
 
-def _email_constraint_pk(email: str) -> str:
-    return encode_constraint_key(ConstraintKind.USER_EMAIL, email)
-
-
 def _identity_constraint_pk(
     provider: IdentityProvider, provider_subject: str, provider_tenant: str | None
 ) -> str:
@@ -133,13 +132,16 @@ def test_create_user_returns_and_persists_the_domain_user(ddb: _DynamoDb) -> Non
     user = make_user()
     assert ddb.storage.create_user(user) == user
     assert ddb.storage.get_user(user.id) == user
-    # Both items landed: the base record and the email constraint guard.
+    # Phase 12: the base record is the whole write — the email constraint guard
+    # is gone, so no constraint item exists for a user creation at all.
     assert [item["pk"] for item in ddb.tables.items("users")] == [str(user.id)]
-    constraint = ddb.tables.item("unique_constraints", _email_constraint_pk(user.email))
-    assert constraint is not None
-    assert constraint["kind"] == ConstraintKind.USER_EMAIL.value
-    assert constraint["entity_id"] == str(user.id)
-    assert constraint["user_id"] == str(user.id)
+    assert ddb.tables.items("unique_constraints") == []
+    stored = ddb.tables.item("users", str(user.id))
+    assert stored is not None
+    # The role is written (never left to a read-side default) and the exact
+    # address is duplicated onto the by-email GSI partition attribute.
+    assert stored["application_role"] == "user"
+    assert stored["g_email"] == user.email
 
 
 def test_get_unknown_user_raises_entity_not_found(ddb: _DynamoDb) -> None:
@@ -148,36 +150,51 @@ def test_get_unknown_user_raises_entity_not_found(ddb: _DynamoDb) -> None:
     ddb.assert_no_leak(excinfo.value)
 
 
-def test_duplicate_email_raises_user_email_conflict(ddb: _DynamoDb) -> None:
+def test_duplicate_email_creates_two_coexisting_users(ddb: _DynamoDb) -> None:
     first = make_user()
     ddb.storage.create_user(first)
-    # Email is a constraint, never an identity: a different ``usr_`` id with a
-    # taken email is rejected as a domain conflict.
+    # Phase 12: email is a lookup field, not an identity or a constraint, so a
+    # different ``usr_`` id carrying the same address is a legal write.
     duplicate = make_user(user_id="usr_test_0002", email=first.email)
-    with pytest.raises(DuplicateEntityError) as excinfo:
-        ddb.storage.create_user(duplicate)
-    assert excinfo.value.kind is DuplicateEntityKind.USER_EMAIL
-    ddb.assert_no_leak(excinfo.value)
-    # The whole transaction rolled back: the winner is intact and the rejected
-    # id was never consumed, so a clean insert of it succeeds.
+    assert ddb.storage.create_user(duplicate) == duplicate
     assert ddb.storage.get_user(first.id) == first
-    ddb.storage.create_user(make_user(user_id="usr_test_0002"))
+    assert ddb.storage.get_user(duplicate.id) == duplicate
     assert len(ddb.tables.items("users")) == 2
-    assert len(ddb.tables.items("unique_constraints")) == 2
+    assert ddb.tables.items("unique_constraints") == []
+
+
+def test_list_users_by_email_returns_zero_one_many_in_contract_order(
+    ddb: _DynamoDb,
+) -> None:
+    # The by-email GSI read: an unknown address is an empty list (never
+    # EntityNotFoundError), a unique address one user, a shared address every
+    # carrier ordered by (created_at, id) — the index sorts by ``pk``, so the
+    # contract ordering is the adapter's job.
+    assert ddb.storage.list_users_by_email("nobody@example.test") == []
+    later = make_user(user_id="usr_test_0002", email="shared@example.test", created_at=T1)
+    earlier = make_user(user_id="usr_test_0001", email="shared@example.test", created_at=T0)
+    unrelated = make_user(user_id="usr_test_0003", email="other@example.test", created_at=T0)
+    # Insertion order is scrambled: the read, not the write sequence, orders.
+    ddb.storage.create_user(unrelated)
+    ddb.storage.create_user(later)
+    ddb.storage.create_user(earlier)
+    assert ddb.storage.list_users_by_email("shared@example.test") == [earlier, later]
+    assert ddb.storage.list_users_by_email(unrelated.email) == [unrelated]
 
 
 def test_duplicate_user_id_raises_entity_id_conflict(ddb: _DynamoDb) -> None:
     first = make_user()
     ddb.storage.create_user(first)
-    # Same ``usr_`` id, different email: the base put's condition fails first in
-    # submission order, so this is a record-id conflict, not an email one.
+    # Same ``usr_`` id, different email: the base put's condition fails, so this
+    # is a record-id conflict (the only one a user write can now raise).
     with pytest.raises(DuplicateEntityError) as excinfo:
         ddb.storage.create_user(make_user(email="other@example.test"))
     assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
     ddb.assert_no_leak(excinfo.value)
     assert ddb.storage.get_user(first.id) == first
-    # And the rejected email's constraint item was never written.
-    assert ddb.tables.item("unique_constraints", _email_constraint_pk("other@example.test")) is None
+    # And the rejected write left no trace anywhere else in the schema.
+    assert len(ddb.tables.items("users")) == 1
+    assert ddb.tables.items("unique_constraints") == []
 
 
 # ---------------------------------------------------------------------------
