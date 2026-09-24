@@ -1,11 +1,13 @@
 # Running feednow-auth with Cognito
 
 This guide covers the Cognito resources, the bearer-token contract that
-feednow-auth implements, and the local authorization-code + PKCE login flow
-(`run-dev.sh --cognito` plus `cognito-login.sh`). The browser-facing
-`/oauth/callback` capture page is local-only: the deployed runtime accepts
-Cognito access tokens on its `/v1/*` routes and never serves the callback
-itself.
+feednow-auth implements, the local authorization-code + PKCE login flow
+(`run-dev.sh --cognito` plus `cognito-login.sh`), and the deployed client
+settings verification runbook in section 7. The `/oauth/callback` capture page
+is a local-only development harness; the deployed runtime mounts
+`/oauth/login` and `/oauth/callback` only when the complete Phase 11 session
+configuration is present, and `/v1/*` routes keep using the bearer-token
+contract.
 
 ## Prerequisites
 
@@ -350,7 +352,7 @@ Phase 11 session set. The query returns only the seven named values:
 aws lambda get-function-configuration \
   --region "$AWS_REGION" \
   --function-name <dev-function-name> \
-  --query 'Configuration.Environment.Variables.{Authorize:FEEDNOW_COGNITO_AUTHORIZE_URL,Token:FEEDNOW_COGNITO_TOKEN_ENDPOINT,UserInfo:FEEDNOW_COGNITO_USERINFO_URL,Redirect:FEEDNOW_OAUTH_REDIRECT_URL,Origins:FEEDNOW_ALLOWED_RETURN_ORIGINS,SessionTTL:FEEDNOW_SESSION_TTL_SECONDS,CookieSecure:FEEDNOW_COOKIE_SECURE}' \
+  --query 'Environment.Variables.{Authorize:FEEDNOW_COGNITO_AUTHORIZE_URL,Token:FEEDNOW_COGNITO_TOKEN_ENDPOINT,UserInfo:FEEDNOW_COGNITO_USERINFO_URL,Redirect:FEEDNOW_OAUTH_REDIRECT_URL,Origins:FEEDNOW_ALLOWED_RETURN_ORIGINS,SessionTTL:FEEDNOW_SESSION_TTL_SECONDS,CookieSecure:FEEDNOW_COOKIE_SECURE}' \
   --output json
 ```
 
