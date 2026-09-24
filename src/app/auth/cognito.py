@@ -43,7 +43,8 @@ that never interpolates token, key, or claim material:
 5. **token_use** — must equal ``"access"`` (ID and refresh tokens rejected).
 6. **client_id** — exact set-membership against ``allowed_client_ids``.
 7. **Claim shape** — ``sub`` (non-empty, ≤255, the :data:`ProviderSubject`
-   bound), ``email`` (required, ≤320, the ``User.Email`` bound), ``username``
+   bound), optional ``email`` (≤320 when present; absent access-token email
+   becomes a deterministic subject-derived placeholder), ``username``
    (optional; absent/null/empty all normalize to ``None`` so the service can
    fall back to ``sub`` for the display name; ≤255, the ``DisplayText``
    bound), ``iss``/``client_id``/``exp`` re-checked, then a frozen
@@ -334,13 +335,18 @@ class CognitoAccessTokenVerifier:
             missing_reason="token is missing the sub claim",
             invalid_reason="token sub claim is invalid",
         )
-        email = self._require_str_claim(
-            payload,
-            "email",
-            max_length=_EMAIL_MAX_LENGTH,
-            missing_reason="token is missing the email claim",
-            invalid_reason="token email claim is invalid",
-        )
+        # Cognito's standard access-token payload does not include email even
+        # when the authorize request contains the ``email`` scope. Preserve
+        # access-token authentication and stable first-login provisioning by
+        # using a bounded, non-routable placeholder only when the claim is
+        # absent. A present-but-malformed claim remains a rejection.
+        raw_email = payload.get("email")
+        if raw_email is None:
+            email = f"{sub}@cognito.invalid"
+        elif not isinstance(raw_email, str) or not raw_email or len(raw_email) > _EMAIL_MAX_LENGTH:
+            raise TokenValidationError("token email claim is invalid")
+        else:
+            email = raw_email
         client_id = self._require_str_claim(
             payload,
             "client_id",

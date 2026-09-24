@@ -8,7 +8,7 @@ and covers the task's verify lines:
 - each rejection **individually**: wrong key, expired, iat/nbf beyond the
   60-second leeway, wrong issuer **plus the prefix-trap issuer** (an
   allowlisted iss as a strict prefix), wrong client_id, ``token_use=id``,
-  missing/empty ``sub``, missing ``email``, missing ``kid`` header, and
+  missing/empty ``sub``, optional access-token email handling, missing ``kid`` header, and
   ``alg=none`` / HS256 forgeries;
 - the pinned check order is proven observably: step-0 header rejections
   (``alg``, ``kid``), issuer/kid rejections assert the JWKS server was
@@ -368,19 +368,18 @@ def test_sub_shape_failures_rejected(key_a: TestKey, override: Any, reason: str)
         _expect_reject(verifier, token, reason)
 
 
-@pytest.mark.parametrize(
-    ("override", "reason"),
-    [
-        (None, "token is missing the email claim"),
-        ("", "token email claim is invalid"),
-    ],
-    ids=["missing", "empty"],
-)
-def test_email_required(key_a: TestKey, override: Any, reason: str) -> None:
+def test_missing_email_uses_a_subject_derived_placeholder(key_a: TestKey) -> None:
     with JwksTestServer({"pool-a": [key_a]}) as server:
         verifier = _verifier(server)
-        token = _sign(_access_claims(server.issuer("pool-a"), email=override), key_a)
-        _expect_reject(verifier, token, reason)
+        token = _sign(_access_claims(server.issuer("pool-a"), email=_DROP), key_a)
+        assert verifier.verify(token).email == f"{SUBJECT}@cognito.invalid"
+
+
+def test_empty_email_is_rejected_when_present(key_a: TestKey) -> None:
+    with JwksTestServer({"pool-a": [key_a]}) as server:
+        verifier = _verifier(server)
+        token = _sign(_access_claims(server.issuer("pool-a"), email=""), key_a)
+        _expect_reject(verifier, token, "token email claim is invalid")
 
 
 def test_exp_missing_rejected(key_a: TestKey) -> None:
@@ -493,7 +492,7 @@ def test_no_rejection_message_contains_token_bytes(key_a: TestKey, key_b: TestKe
             ),
             ("token is not an access token", _sign(_access_claims(issuer, token_use="id"), key_a)),
             ("token is missing the sub claim", _sign(_access_claims(issuer, sub=_DROP), key_a)),
-            ("token is missing the email claim", _sign(_access_claims(issuer, email=None), key_a)),
+            ("token email claim is invalid", _sign(_access_claims(issuer, email=""), key_a)),
             ("token header is missing the key id", _sign(_access_claims(issuer), key_a, kid=None)),
             (
                 "token algorithm is not allowed",
