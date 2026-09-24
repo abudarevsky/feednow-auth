@@ -24,11 +24,19 @@ this order before changing the service:
    table/index schema and least-privilege IAM matrix for Phase 07, and the
    conformance suite passing against DynamoDB Local.
 10. [Phase 07](phases/07-aws-infrastructure.md) — completed infrastructure
-   handoff: the environment-parameterized Python CDK stack (Cognito PKCE
-   pool, the seven Phase 06 tables, the generated pepper secret, the
-   least-privilege Lambda role, the HTTP API with redaction-safe access
-   logs), the import-safe cold-start composition root, and the
-   non-production deployed smoke procedure with its recorded evidence.
+    handoff: the environment-parameterized Python CDK stack (Cognito PKCE
+    pool, the seven Phase 06 tables, the generated pepper secret, the
+    least-privilege Lambda role, the HTTP API with redaction-safe access
+    logs), the import-safe cold-start composition root, and the
+    non-production deployed smoke procedure with its recorded evidence.
+11. [Phase 11](phases/11-cognito-authentication-profile-and-session-boundary.md)
+    — session-boundary handoff: the verified-profile provisioning gate
+    (placeholder email removed; first login requires a verified user-info
+    profile), the `feednow_session` application session, the
+    `/oauth/login` + `/oauth/callback` authorization-code + PKCE boundary
+    behind the all-or-nothing config gate with its rollback seam, and the
+    two new TTL-enabled storage tables — with the deployed-settings
+    operational proof recorded as pending operator execution.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

@@ -50,9 +50,18 @@ against DynamoDB Local through the marker-gated entry. Phase 07 adds the
 deployable AWS runtime — the Python CDK stack, the import-safe Lambda
 composition root, and the HTTP API (commands and evidence in
 [docs/phases/07-aws-infrastructure.md](phases/07-aws-infrastructure.md),
-operator summary below). The service still does not expose an audit read
-surface (Phase 08). Do not infer those capabilities from a passing health
-check or a green conformance run.
+operator summary below). Phase 11 adds the verified-profile provisioning
+gate (first login requires a verified user-info profile; the placeholder
+email is gone, so the local Cognito composition needs
+`FEEDNOW_COGNITO_USERINFO_URL` for first-login provisioning) and the
+`/oauth/login` + `/oauth/callback` session boundary, mounted in the
+deployed runtime only under the complete session configuration below
+(contract and evidence in
+[docs/phases/11-cognito-authentication-profile-and-session-boundary.md](phases/11-cognito-authentication-profile-and-session-boundary.md)).
+`/v1/*` routes still do not authenticate the `feednow_session` cookie —
+session verification is component-level only. The service still does not
+expose an audit read surface (Phase 08). Do not infer those capabilities
+from a passing health check or a green conformance run.
 
 ## Deployed runtime (Phase 07)
 
@@ -86,11 +95,43 @@ Operator summary:
   prod stack keeps the data, and losing the prod pepper invalidates every
   stored API-key digest (rotation is Phase 08).
 
+## Deployed session configuration (Phase 11)
+
+The session boundary is an **all-or-nothing runtime gate** of seven
+optional Lambda keys — the CDK stack deliberately does not set them; the
+operator supplies them (console or `aws lambda update-function-configuration`):
+`FEEDNOW_COGNITO_AUTHORIZE_URL`,
+`FEEDNOW_COGNITO_TOKEN_ENDPOINT`, `FEEDNOW_COGNITO_USERINFO_URL` (all
+HTTPS Cognito endpoints), `FEEDNOW_OAUTH_REDIRECT_URL` (the exact
+deployed `/oauth/callback` URL, matching the app-client registration in
+`COGNITO_CALLBACK_URLS`), `FEEDNOW_ALLOWED_RETURN_ORIGINS`
+(comma-separated bare HTTPS origins), `FEEDNOW_SESSION_TTL_SECONDS`
+(positive integer), and `FEEDNOW_COOKIE_SECURE` (`true`/`false`).
+
+- All seven present: `build_app` mounts `/oauth/login` +
+  `/oauth/callback` and wires the user-info profile source into the four
+  §14 routers.
+- None present: the deployed **route** surface is exactly the
+  pre-phase-11 app — **removing all seven keys is the rollback
+  procedure** (the next invocation cold-starts without the session
+  routes, and stored login states and sessions go unread while the gate
+  stays off, expiring on their own). The rollback restores routes, not
+  first-login behavior: with the gate off no profile source is wired, so
+  deployed bearer first-login provisioning fails 401.
+- A partial set fails cold start with a fixed message naming only the
+  missing keys — never a silent downgrade.
+
+The deployed-client settings proof (Hosted UI PKCE flow, `openid email
+profile` scopes, callback/logout registrations, native self-service
+email, Google IdP) and the two manual dev journeys are runbook §7 of
+[RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md): deployed settings,
+not source, are the operational proof.
+
 ## Verification
 
 ```bash
 uv run pytest -q --tb=short                       # default env: DynamoDB Local cases skip by name
-uv run pytest src/tests/storage_contract -q       # SQLite conformance entry (64)
+uv run pytest src/tests/storage_contract -q       # SQLite conformance entry (74)
 uv run ruff check .
 uv run ruff format --check .
 git diff --check
@@ -99,7 +140,7 @@ git diff --check
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
   uv run pytest -q                                # full suite, gated cases included
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest src/tests/storage_contract -q     # both adapter entries (64 + 63)
+  uv run pytest src/tests/storage_contract -q     # both adapter entries (74 + 73)
 ```
 
 Report test results, third-party warnings, environment blocks, and any

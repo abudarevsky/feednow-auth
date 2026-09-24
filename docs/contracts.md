@@ -15,7 +15,7 @@ when that behavior is actually implemented and verified.
 - Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
-- Storage is reached only through the 19-method `Storage` protocol and the
+- Storage is reached only through the 23-method `Storage` protocol and the
   documented factories `open_sqlite_storage(path: str | Path) -> Storage`
   and `open_dynamodb_storage(*, endpoint_url=None, region="us-east-1",
   table_prefix="", dynamodb_resource=None) -> DynamoDbStorage` (both with
@@ -48,9 +48,12 @@ Authentication boundary (Phase 03):
 - Access tokens only: `RS256` exact header match (checked before any claim
   extraction or network fetch), issuer by exact set membership against the
   configured allowlist (never prefix matching, never the library's `issuer=`
-  option), `client_id` set membership, `token_use == "access"`, required
-  non-empty `email`, 60-second leeway on `exp`/`iat`/`nbf`. Rejections carry
-  fixed safe reasons and never mutate storage.
+  option), `client_id` set membership, `token_use == "access"`, optional
+  `email` (bounded ≤320 when present; absent/null yields `None` — Phase 11
+  removed the `sub@cognito.invalid` synthesis; the authoritative email for
+  provisioning comes from the verified profile below), 60-second leeway on
+  `exp`/`iat`/`nbf`. Rejections carry fixed safe reasons and never mutate
+  storage.
 - `JwksSource.signing_key(issuer, kid)` is **issuer-bound**: a `kid` is
   resolved only from that issuer's key set; cross-issuer scanning is
   impossible through the interface.
@@ -59,8 +62,14 @@ Authentication boundary (Phase 03):
   `usr_`/`org_` ids flow onward.
 - First-login provisioning is exactly one `provision_user` batch (user,
   identity, personal org, owner membership, three creation audits) sharing
-  one clock read and one ID set. Race convergence happens **only** via the
-  identity-tuple re-read after `DuplicateExternalIdentityError`;
+  one clock read and one ID set. `User.email` comes only from a verified
+  provider profile (Phase 11): `require_provisioning_profile` demands
+  bounded non-empty `email`, `email_verified` exactly `True`, and a `sub`
+  equal to the validated token's, before any storage write; on the miss
+  path a missing `profile_provider` is the fixed 401 `"verified profile
+  required for provisioning"` and the hit path performs zero profile work
+  and never overwrites the stored email. Race convergence happens **only**
+  via the identity-tuple re-read after `DuplicateExternalIdentityError`;
   `existing_user_id` is an adapter email-fallback value — advisory
   cross-check, never the convergence signal. A re-read miss is a genuine
   email collision: `ProvisioningConflictError`, no partial rows.
@@ -183,6 +192,48 @@ Storage adapter parity (Phase 06):
 - Driver failures translate inside the adapter to fixed, echo-free domain
   text (no table names, driver messages, regions, or request ids escape).
 
+Session boundary (Phase 11):
+
+- `GET /oauth/login` and `GET /oauth/callback` (`src/app/api/oauth.py`)
+  are the authorization-code + PKCE session flow. Both routes are
+  `include_in_schema=False` and deliberately **outside** the frozen `/v1`
+  `ENDPOINTS` manifest (the health-route mounting precedent applies); the
+  manifest rule above is unchanged. Login initiation validates `next`
+  against an exact-origin allowlist plus same-origin relative paths
+  (credentials-in-URL, non-http(s) schemes, protocol-relative/backslash
+  smuggling, and foreign origins → 400 `validation_error`, the submitted
+  value never echoed), then stores a single-use `OAuthLoginState`
+  (600-second expiry) and 302s to the configured authorize URL with
+  `scope=openid email profile` and `code_challenge_method=S256`; the PKCE
+  verifier never leaves the server.
+- The callback's failure mapping is the contract (frozen Phase 01
+  envelope): provider `error` or missing `code`/`state` → 401;
+  unknown/expired/replayed state → 401; exchange failure → 503;
+  access-token validation failure → 401 with JWKS outage → 503 (all before
+  any profile or user storage touch); profile shape/subject failure → 401
+  with provider outage → 503; disabled user / no active org → 403;
+  provisioning conflict → 409; stored return URL no longer allow-listed →
+  400. Every message is a fixed constant or producer-pinned safe reason;
+  code, state, verifier, tokens, and email appear in no log record, error
+  envelope, or redirect target.
+- Success issues an opaque application session and sets the
+  `feednow_session` cookie: fixed `HttpOnly; SameSite=Lax; Path=/`,
+  `Max-Age` mirroring the configured TTL, `Secure` only when deployment
+  config says so. The session id is a lookup key that carries no claims
+  (`secrets.token_urlsafe(32)`); `SessionManager.verify` never raises for
+  caller-controlled input.
+- The storage contract gained four additive operations —
+  `save_oauth_login_state`, `consume_oauth_login_state` (atomic
+  get-and-delete: exactly one concurrent caller receives the record;
+  unknown/expired/replayed yields `None`, never `EntityNotFoundError`),
+  `create_app_session`, and `get_app_session` (reads at/past `expires_at`
+  behave as absent; reads are not writes). Both adapters implement them;
+  DynamoDB stores a numeric `expires_at_epoch` TTL attribute on the two
+  new tables.
+- **Cookie-based authentication of `/v1/*` routes is not enabled by this
+  phase.** Session verification is component-level only; `/v1/*` keeps the
+  bearer-token contract exactly as before.
+
 Canonical modules:
 
 - Domain: `src/app/models/`
@@ -198,6 +249,11 @@ Canonical modules:
   `src/tests/support/dynamodb_local.py`)
 - Token contract and verifier: `src/app/auth/cognito.py` (+ `errors.py`,
   `jwks.py`, `dependencies.py`)
+- Verified-profile seam (Phase 11): `CognitoProfile`,
+  `require_provisioning_profile`, `ProfileSource`, and
+  `CognitoUserInfoClient` in `src/app/auth/cognito.py`; token exchange in
+  `src/app/auth/token_exchange.py`; sessions and cookie policy in
+  `src/app/auth/session.py` over `src/app/models/session.py`
 - Credential primitives, pepper seam, and API-key verification:
   `src/app/auth/credentials.py`, `src/app/auth/pepper.py`,
   `src/app/auth/api_key_auth.py`, `src/app/auth/principal.py`
@@ -210,3 +266,4 @@ Canonical modules:
 - API-key service rules and router: `src/app/services/api_key_service.py`,
   `src/app/api/keys.py`
 - First mounted router: `src/app/api/me.py`
+- Session boundary router (outside the `/v1` manifest): `src/app/api/oauth.py`
