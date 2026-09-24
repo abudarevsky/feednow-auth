@@ -154,10 +154,13 @@ def _session_config(env: Mapping[str, str]) -> SessionRuntimeConfig | None:
         raise RuntimeError(f"missing required session configuration: {ALLOWED_RETURN_ORIGINS_ENV}")
     try:
         ttl_seconds = int(raw[SESSION_TTL_SECONDS_ENV])
-    except ValueError as exc:
+    except ValueError:
+        # ``from None``: the int() failure quotes the offending value, and
+        # the task-13 contract is key names only — never values (the same
+        # suppression secrets_pepper applies to payload documents).
         raise RuntimeError(
             f"invalid session configuration: {SESSION_TTL_SECONDS_ENV} must be a positive integer"
-        ) from exc
+        ) from None
     if ttl_seconds <= 0:
         raise RuntimeError(
             f"invalid session configuration: {SESSION_TTL_SECONDS_ENV} must be a positive integer"

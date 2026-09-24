@@ -9,7 +9,10 @@ Covers the task's verify lines:
    uncomposed.
 3. :class:`RuntimeConfig.from_environ` reads the five documented keys,
    normalizes the comma-separated Cognito allowlists, and fails naming only
-   the missing keys (never their values).
+   the missing keys (never their values). Every config-failure proof sweeps
+   the whole rendered exception chain — message, repr, and any
+   cause/context a cold-start traceback would print — against every
+   configured value.
 4. ``build_app()`` with injected fakes mounts exactly the frozen manifest
    routes (plus the Phase 01 ``/health``), forces the single pepper read at
    cold start, and never touches ``os.environ`` when a config is supplied.
@@ -35,7 +38,7 @@ import importlib.util
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -137,6 +140,47 @@ def _assert_no_value(rendered: str, value: bytes) -> None:
     assert repr(value) not in rendered
 
 
+def _rendered_failure(exc: BaseException) -> str:
+    """Every message a cold-start traceback would print for this failure.
+
+    Walks the explicit ``__cause__`` chain and — unless the raiser
+    suppressed it — the implicit ``__context__``: that chain is exactly what
+    lands in the Lambda log, so a chained exception smuggling a configured
+    value is a leak even when the top-level message is clean.
+    """
+    rendered: list[str] = []
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        rendered.append(str(current))
+        rendered.append(repr(current))
+        if current.__cause__ is not None:
+            stack.append(current.__cause__)
+        elif not current.__suppress_context__ and current.__context__ is not None:
+            stack.append(current.__context__)
+    return "\n".join(rendered)
+
+
+def _assert_config_failure_leaks_no_values(exc: BaseException, environ: Mapping[str, str]) -> None:
+    """Sweep every configured value out of a config failure's full rendering.
+
+    The composition-root contract: failures name the offending keys and
+    nothing else. Every comma-separated entry of every supplied value —
+    issuers, client ids, the Cognito authorize/token/userInfo URLs, the
+    redirect URI, return origins, the pepper secret id — must be absent from
+    the message, the repr, and any chained exception the traceback prints.
+    """
+    rendered = _rendered_failure(exc)
+    for value in environ.values():
+        for entry in (part.strip() for part in value.split(",")):
+            if entry:
+                assert entry not in rendered, f"configured value leaked into failure: {entry!r}"
+
+
 # --- 1. Lambda payload packaging ---------------------------------------------
 
 
@@ -232,15 +276,17 @@ def test_runtime_config_failure_names_only_the_missing_key(missing: str) -> None
     with pytest.raises(RuntimeError) as excinfo:
         RuntimeConfig.from_environ(environ)
     assert missing in str(excinfo.value)
-    assert "feednow-auth-dev-" not in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 @pytest.mark.parametrize("blank_key", ["FEEDNOW_COGNITO_ISSUERS", "FEEDNOW_COGNITO_CLIENT_IDS"])
 def test_runtime_config_rejects_a_blank_allowlist_value(blank_key: str) -> None:
     """A present-but-empty list fails here, not inside the JWKS source/verifier."""
+    environ = {**FAKE_ENV, blank_key: " , , "}
     with pytest.raises(RuntimeError) as excinfo:
-        RuntimeConfig.from_environ({**FAKE_ENV, blank_key: " , , "})
+        RuntimeConfig.from_environ(environ)
     assert blank_key in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 def test_runtime_config_defaults_to_the_process_environment(
@@ -286,30 +332,36 @@ def test_partial_session_gate_names_only_the_missing_key(missing: str) -> None:
     with pytest.raises(RuntimeError) as excinfo:
         RuntimeConfig.from_environ(environ)
     assert missing in str(excinfo.value)
-    assert "app.feednow.test" not in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 @pytest.mark.parametrize("blank_key", SESSION_KEYS)
 def test_blank_session_value_counts_as_missing_and_fails_the_gate(blank_key: str) -> None:
     """A present-but-blank key engages the gate and then names the key."""
+    environ = {**FAKE_ENV, **SESSION_ENV, blank_key: "  "}
     with pytest.raises(RuntimeError) as excinfo:
-        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, blank_key: "  "})
+        RuntimeConfig.from_environ(environ)
     assert blank_key in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 @pytest.mark.parametrize("ttl", ["not-a-number", "86400.5", "0", "-5"])
 def test_session_gate_rejects_a_non_positive_integer_ttl(ttl: str) -> None:
+    environ = {**FAKE_ENV, **SESSION_ENV, "FEEDNOW_SESSION_TTL_SECONDS": ttl}
     with pytest.raises(RuntimeError) as excinfo:
-        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, "FEEDNOW_SESSION_TTL_SECONDS": ttl})
+        RuntimeConfig.from_environ(environ)
     assert "FEEDNOW_SESSION_TTL_SECONDS" in str(excinfo.value)
     assert ttl not in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 @pytest.mark.parametrize("flag", ["maybe", "1", ""])
 def test_session_gate_rejects_a_non_boolean_cookie_secure(flag: str) -> None:
+    environ = {**FAKE_ENV, **SESSION_ENV, "FEEDNOW_COOKIE_SECURE": flag}
     with pytest.raises(RuntimeError) as excinfo:
-        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, "FEEDNOW_COOKIE_SECURE": flag})
+        RuntimeConfig.from_environ(environ)
     assert "FEEDNOW_COOKIE_SECURE" in str(excinfo.value)
+    _assert_config_failure_leaks_no_values(excinfo.value, environ)
 
 
 # --- 4. Composition root ------------------------------------------------------
