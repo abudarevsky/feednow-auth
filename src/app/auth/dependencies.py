@@ -42,6 +42,15 @@ Messages are the exceptions' fixed, safe reasons — never token, key, or
 email material (AGENTS.md). Verification failures raise *before* any storage
 touch, which is what makes the acceptance proof "rejected without storage
 mutation" hold structurally, not just by test.
+
+Phase 11 (task 4) adds the optional ``profile_source`` seam to both
+factories: when a :class:`~app.auth.cognito.ProfileSource` is configured, the
+**human** branch closes the raw bearer token and the verified ``claims.sub``
+into a ``profile_provider`` thunk handed to :func:`resolve_or_provision`, so
+first-login provisioning fetches the authoritative user-info profile. The
+thunk runs only on the identity-tuple miss path (a known user triggers zero
+user-info requests), and the API-key branch never touches it. With no source
+configured the chain behaves exactly as before Phase 11.
 """
 
 from __future__ import annotations
@@ -52,7 +61,7 @@ from typing import Final
 from fastapi import HTTPException, Request
 
 from app.auth.api_key_auth import ApiKeyAuthenticationError, verify_api_key
-from app.auth.cognito import AccessTokenVerifier, CognitoClaims
+from app.auth.cognito import AccessTokenVerifier, CognitoClaims, CognitoProfile, ProfileSource
 from app.auth.credentials import ENVIRONMENT_PREFIXES
 from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 from app.auth.pepper import PepperSource
@@ -107,33 +116,70 @@ def _verify_token(verifier: AccessTokenVerifier, token: str) -> CognitoClaims:
         raise HTTPException(status_code=401, detail=exc.reason) from exc
 
 
-def _resolve_identity(storage: Storage, claims: CognitoClaims) -> ResolvedIdentity:
-    """Resolve-or-provision with the published domain-error mapping (403/409)."""
+def _profile_provider_for(
+    profile_source: ProfileSource | None,
+    token: str,
+    claims: CognitoClaims,
+) -> Callable[[], CognitoProfile] | None:
+    """Close the verified token/subject into the miss-path profile thunk.
+
+    ``None`` (no source configured) keeps today's chain shape; the service
+    then refuses a first-login miss with its fixed 401-class error rather
+    than provisioning from access-token claims.
+    """
+    if profile_source is None:
+        return None
+    return lambda: profile_source.fetch(token, claims.sub)
+
+
+def _resolve_identity(
+    storage: Storage,
+    claims: CognitoClaims,
+    profile_provider: Callable[[], CognitoProfile] | None = None,
+) -> ResolvedIdentity:
+    """Resolve-or-provision with the published domain-error mapping (403/409).
+
+    The profile gate inside the service raises :class:`TokenValidationError`
+    (→ 401, fixed safe reason) and a configured ``profile_source`` fetch can
+    raise :class:`TokenProviderUnavailableError` (→ 503, the same outage
+    vocabulary as the verifier stage) — both are mapped here so a first-login
+    provider failure is never a bare 500.
+    """
     try:
-        return resolve_or_provision(storage, claims)
+        return resolve_or_provision(storage, claims, profile_provider=profile_provider)
     except DisabledUserError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except NoActiveOrganizationError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ProvisioningConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TokenProviderUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except TokenValidationError as exc:
+        raise HTTPException(status_code=401, detail=exc.reason) from exc
 
 
 def build_current_user(
     storage: Storage,
     verifier: AccessTokenVerifier,
+    profile_source: ProfileSource | None = None,
 ) -> Callable[..., ResolvedIdentity]:
     """Return the ``ResolvedIdentity`` dependency bound to ``storage``/``verifier``.
 
     The returned callable is the whole chain: bearer parse → verify →
-    resolve-or-provision → domain-error mapping. It is a pure wiring factory
-    (no I/O at construction), so routers built from it stay import-safe.
+    resolve-or-provision (with an optional Phase 11 ``profile_source`` for
+    first-login provisioning) → domain-error mapping. It is a pure wiring
+    factory (no I/O at construction), so routers built from it stay
+    import-safe.
     """
 
     def current_user(request: Request) -> ResolvedIdentity:
         """Execute the Phase 03 authentication chain for one request."""
-        claims = _verify_token(verifier, _extract_bearer_token(request))
-        return _resolve_identity(storage, claims)
+        token = _extract_bearer_token(request)
+        claims = _verify_token(verifier, token)
+        return _resolve_identity(
+            storage, claims, _profile_provider_for(profile_source, token, claims)
+        )
 
     return current_user
 
@@ -142,6 +188,7 @@ def build_current_principal(
     storage: Storage,
     verifier: AccessTokenVerifier,
     pepper_source: PepperSource,
+    profile_source: ProfileSource | None = None,
 ) -> Callable[..., Principal]:
     """Return the ``Principal`` dependency: prefix-dispatched human-or-key auth.
 
@@ -160,8 +207,10 @@ def build_current_principal(
     :data:`~app.auth.api_key_auth.API_KEY_AUTHENTICATION_MESSAGE` (no branch
     message, no credential fragment — decision 4); human-path and header
     failures keep the Phase 03 mapping exactly; any other ``StorageError``
-    on the key branch propagates untranslated → 500 (decision 11). Pure
-    wiring factory, like :func:`build_current_user`.
+    on the key branch propagates untranslated → 500 (decision 11). The
+    human branch alone consumes ``profile_source`` (Phase 11 task 4); the
+    API-key branch never fetches a profile. Pure wiring factory, like
+    :func:`build_current_user`.
     """
 
     def current_principal(request: Request) -> Principal:
@@ -170,7 +219,9 @@ def build_current_principal(
         if token.startswith(API_KEY_BEARER_PREFIXES):
             return _api_key_principal(token)
         claims = _verify_token(verifier, token)
-        identity = _resolve_identity(storage, claims)
+        identity = _resolve_identity(
+            storage, claims, _profile_provider_for(profile_source, token, claims)
+        )
         return Principal(user=identity.user, api_key=None, context=identity.context)
 
     def _api_key_principal(literal: str) -> Principal:

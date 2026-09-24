@@ -16,7 +16,7 @@ from app.api.keys import build_api_keys_router
 from app.api.me import build_me_router
 from app.api.members import build_members_router
 from app.api.organizations import build_organizations_router
-from app.auth.cognito import CognitoAccessTokenVerifier
+from app.auth.cognito import CognitoAccessTokenVerifier, CognitoUserInfoClient, ProfileSource
 from app.auth.jwks import CognitoJwksSource
 from app.auth.pepper import StaticPepper
 from app.main import create_app
@@ -28,7 +28,9 @@ def _values(*names: str) -> tuple[str, ...]:
     """Return the first non-empty comma-separated local setting."""
     for name in names:
         values = tuple(
-            dict.fromkeys(value.strip() for value in os.getenv(name, "").split(",") if value.strip())
+            dict.fromkeys(
+                value.strip() for value in os.getenv(name, "").split(",") if value.strip()
+            )
         )
         if values:
             return values
@@ -46,6 +48,18 @@ def _pepper() -> bytes:
         raise RuntimeError("FEEDNOW_PEPPER_SECRET must be valid base64") from exc
 
 
+def _profile_source() -> ProfileSource | None:
+    """Build the verified user-info client when the local endpoint is configured.
+
+    Phase 11 task 5: first-login provisioning reads the email from the
+    user-info profile, so ``cognito-login.sh`` needs
+    ``FEEDNOW_COGNITO_USERINFO_URL`` (a bearer-only first login without it
+    fails 401). Unset keeps the pre-Phase-11 composition shape.
+    """
+    url = os.getenv("FEEDNOW_COGNITO_USERINFO_URL", "").strip()
+    return CognitoUserInfoClient(url) if url else None
+
+
 def build_app() -> FastAPI:
     """Build the local authenticated API over SQLite and Cognito JWKS."""
     issuers = _values("FEEDNOW_COGNITO_ISSUERS", "FEEDNOW_COGNITO_ISSUER")
@@ -58,16 +72,16 @@ def build_app() -> FastAPI:
     storage = open_sqlite_storage(os.getenv("FEEDNOW_SQLITE_PATH", "/data/feednow-auth.db"))
     verifier = CognitoAccessTokenVerifier(CognitoJwksSource(issuers), issuers, client_ids)
     pepper = StaticPepper(_pepper())
+    profile_source = _profile_source()
     return create_app(
         routers=[
-            build_me_router(storage, verifier),
-            build_organizations_router(storage, verifier),
-            build_members_router(storage, verifier),
-            build_api_keys_router(storage, verifier, pepper),
+            build_me_router(storage, verifier, profile_source=profile_source),
+            build_organizations_router(storage, verifier, profile_source=profile_source),
+            build_members_router(storage, verifier, profile_source=profile_source),
+            build_api_keys_router(storage, verifier, pepper, profile_source=profile_source),
             build_oauth_callback_router(),
         ]
     )
 
 
 app = build_app()
-

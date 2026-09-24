@@ -368,11 +368,13 @@ def test_sub_shape_failures_rejected(key_a: TestKey, override: Any, reason: str)
         _expect_reject(verifier, token, reason)
 
 
-def test_missing_email_uses_a_subject_derived_placeholder(key_a: TestKey) -> None:
+def test_missing_email_yields_none(key_a: TestKey) -> None:
+    """Phase 11 task 5: no placeholder synthesis — the claims email is
+    optional and provisioning reads the verified user-info profile instead."""
     with JwksTestServer({"pool-a": [key_a]}) as server:
         verifier = _verifier(server)
         token = _sign(_access_claims(server.issuer("pool-a"), email=_DROP), key_a)
-        assert verifier.verify(token).email == f"{SUBJECT}@cognito.invalid"
+        assert verifier.verify(token).email is None
 
 
 def test_empty_email_is_rejected_when_present(key_a: TestKey) -> None:

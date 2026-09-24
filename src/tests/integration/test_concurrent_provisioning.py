@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile
 from app.models.enums import IdentityProvider
 from app.services.identity import (
     ProvisioningConflictError,
@@ -61,11 +61,22 @@ _COUNT_TABLES = (
 def _claims(sub: str = _SUB) -> CognitoClaims:
     return CognitoClaims(
         sub=sub,
-        email=_EMAIL,
+        email=None,
         username="Racer",
         client_id="race-client",
         iss="https://cognito.us-east-1.amazonaws.com/us-east-1_pool",
         exp=2000000000,
+    )
+
+
+def _profile(sub: str = _SUB) -> CognitoProfile:
+    """The verified user-info profile the provisioning path now requires
+    (Phase 11 task 5): the batch email comes from here, not from claims."""
+    return CognitoProfile(
+        sub=sub,
+        email=_EMAIL,
+        email_verified=True,
+        display_name="Racer",
     )
 
 
@@ -101,8 +112,11 @@ def _run_race_once(tmp_path: Path) -> None:
             barrier.wait()
             try:
                 # No injected ids/timestamps: every attempt mints its own
-                # batch, exactly like two real first-login requests.
-                outcome: BaseException | ResolvedIdentity = resolve_or_provision(storage, _claims())
+                # batch, exactly like two real first-login requests. Each
+                # carries its own fake profile provider (Phase 11 task 5).
+                outcome: BaseException | ResolvedIdentity = resolve_or_provision(
+                    storage, _claims(), profile_provider=lambda: _profile()
+                )
             except BaseException as exc:
                 outcome = exc
             with results_lock:
@@ -168,9 +182,15 @@ def test_distinct_subs_same_email_conflict_without_partial_rows(tmp_path: Path) 
     path = tmp_path / "collision.sqlite"
     storage = open_sqlite_storage(path)
     try:
-        first = resolve_or_provision(storage, _claims(sub="sub-owner"))
+        first = resolve_or_provision(
+            storage, _claims(sub="sub-owner"), profile_provider=lambda: _profile("sub-owner")
+        )
         with pytest.raises(ProvisioningConflictError):
-            resolve_or_provision(storage, _claims(sub="sub-stranger"))
+            resolve_or_provision(
+                storage,
+                _claims(sub="sub-stranger"),
+                profile_provider=lambda: _profile("sub-stranger"),
+            )
     finally:
         storage.close()
 

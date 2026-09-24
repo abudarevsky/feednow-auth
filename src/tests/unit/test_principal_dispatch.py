@@ -33,7 +33,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.auth.api_key_auth import API_KEY_AUTHENTICATION_MESSAGE
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile
 from app.auth.credentials import build_literal, hash_secret
 from app.auth.dependencies import API_KEY_BEARER_PREFIXES, build_current_principal
 from app.auth.errors import TokenValidationError
@@ -106,6 +106,23 @@ class RecordingVerifier:
             raise TokenValidationError("token failed verification") from exc
 
 
+class RecordingProfileSource:
+    """Phase 11 task-4 double: records ``(token, expected_sub)`` per fetch."""
+
+    def __init__(self, email: str = "first-login@example.test") -> None:
+        self.email = email
+        self.calls: list[tuple[str, str]] = []
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+        self.calls.append((access_token, expected_sub))
+        return CognitoProfile(
+            sub=expected_sub,
+            email=self.email,
+            email_verified=True,
+            display_name=None,
+        )
+
+
 class RecordingStorage:
     """Delegates everything to real SQLite; counts/fails the §8 point lookup."""
 
@@ -160,12 +177,15 @@ def _api_key(
 class DispatchEnv:
     """Real SQLite + recording seams + the built ``current_principal`` dependency."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, profile_source: Any = None) -> None:
         self.adapter = SQLiteStorage(db_path)
         self.storage = RecordingStorage(self.adapter)
         self.verifier = RecordingVerifier()
         self.pepper = StaticPepper(PEPPER)
-        self.current_principal = build_current_principal(self.storage, self.verifier, self.pepper)
+        self.profile_source = profile_source
+        self.current_principal = build_current_principal(
+            self.storage, self.verifier, self.pepper, profile_source
+        )
         self._seed()
 
     def _seed(self) -> None:
@@ -425,3 +445,55 @@ def test_disabled_user_still_maps_to_403(env: DispatchEnv) -> None:
         env.call(env.bearer("tok-disabled"))
     assert excinfo.value.status_code == 403
     assert env.storage.key_lookups == 0
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 task 4: profile_source forwarding on the human branch
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def profile_env(tmp_path: Path) -> Iterator[DispatchEnv]:
+    built = DispatchEnv(
+        tmp_path / "principal_profile.sqlite", profile_source=RecordingProfileSource()
+    )
+    yield built
+    built.close()
+
+
+def test_human_hit_path_never_calls_the_profile_source(profile_env: DispatchEnv) -> None:
+    """Already-provisioned user: zero user-info requests (miss-path-only rule)."""
+    source: RecordingProfileSource = profile_env.profile_source
+    principal = profile_env.call(profile_env.bearer(JWTISH_TOKEN))
+
+    assert principal.user is not None
+    assert principal.user.id == CALLER
+    assert source.calls == []
+
+
+def test_api_key_branch_never_calls_the_profile_source(profile_env: DispatchEnv) -> None:
+    source: RecordingProfileSource = profile_env.profile_source
+    principal = profile_env.call(profile_env.bearer(profile_env.live_literal()))
+
+    assert principal.api_key is not None
+    assert source.calls == []
+
+
+def test_first_login_human_fetches_profile_with_token_and_verified_sub(
+    profile_env: DispatchEnv,
+) -> None:
+    """A first-seen JWT subject provisions from the fetched profile: the
+    chain forwards the raw bearer token plus the verified ``claims.sub``,
+    and the stored email is the profile's, not the claims' one."""
+    profile_env.verifier.claims_by_token["tok-newcomer"] = _claims(
+        "newcomer-sub", "claims-only@example.test"
+    )
+    source: RecordingProfileSource = profile_env.profile_source
+
+    principal = profile_env.call(profile_env.bearer("tok-newcomer"))
+
+    assert source.calls == [("tok-newcomer", "newcomer-sub")]
+    assert principal.user is not None
+    assert principal.user.email == "first-login@example.test"
+    assert principal.user.display_name == "dispatch-user"  # profile name None → username
+    assert principal.context.actor_id == principal.user.id

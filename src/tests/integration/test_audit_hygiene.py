@@ -42,7 +42,7 @@ from app.api.keys import build_api_keys_router
 from app.api.me import build_me_router
 from app.api.members import build_members_router
 from app.api.organizations import build_organizations_router
-from app.auth.cognito import CognitoAccessTokenVerifier
+from app.auth.cognito import CognitoAccessTokenVerifier, CognitoProfile
 from app.auth.credentials import parse_literal
 from app.auth.jwks import CognitoJwksSource
 from app.auth.pepper import StaticPepper
@@ -165,6 +165,22 @@ def key() -> TestKey:
     return generate_test_key("hygiene-key-1")
 
 
+class FakeProfileSource:
+    """Phase 11 task-5 double: verified profile per subject from the emails
+    the env already signs into tokens (keeps stored rows identical)."""
+
+    def __init__(self) -> None:
+        self.emails: dict[str, str] = {}
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+        return CognitoProfile(
+            sub=expected_sub,
+            email=self.emails[expected_sub],
+            email_verified=True,
+            display_name=None,
+        )
+
+
 class _HygieneEnv:
     def __init__(
         self,
@@ -182,15 +198,20 @@ class _HygieneEnv:
             allowed_issuers=[issuer],
             allowed_client_ids=[_ALLOWED_CLIENT],
         )
+        self.profile_source = FakeProfileSource()
         routers: list[APIRouter] = [
-            build_me_router(self.storage, verifier),
-            build_organizations_router(self.storage, verifier),
-            build_members_router(self.storage, verifier),
+            build_me_router(self.storage, verifier, profile_source=self.profile_source),
+            build_organizations_router(self.storage, verifier, profile_source=self.profile_source),
+            build_members_router(self.storage, verifier, profile_source=self.profile_source),
         ]
         if pepper_source is not None:
             # Phase 05 task-7 extension: the keys router with the pepper wired,
             # so the key-refusal (``human_only``) branch is live on these routes.
-            routers.append(build_api_keys_router(self.storage, verifier, pepper_source))
+            routers.append(
+                build_api_keys_router(
+                    self.storage, verifier, pepper_source, profile_source=self.profile_source
+                )
+            )
         app = create_app(routers=routers)
         self.client = TestClient(app, raise_server_exceptions=False)
         self.issuer = issuer
@@ -198,6 +219,9 @@ class _HygieneEnv:
 
     def token(self, sub: str, email: str) -> str:
         now = int(time.time())
+        # Phase 11: provisioning reads the email from the user-info profile,
+        # so register the sub -> email pair the signed token also carries.
+        self.profile_source.emails[sub] = email
         return sign_token(
             {
                 "sub": sub,

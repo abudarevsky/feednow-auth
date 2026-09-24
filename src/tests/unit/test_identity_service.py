@@ -14,7 +14,10 @@ two acceptance-critical proofs live here:
 Per breakdown decision 7, the convergence test carries a *consistent*
 ``existing_user_id`` while the conflict test carries a **stranger's** id —
 proving the service ignores that field for convergence and re-reads the
-identity tuple instead. Real-SQLite behavior (row read-back, repeat-call
+identity tuple instead. Since Phase 11 task 5 every miss-path call carries a
+fake ``profile_provider``: account creation reads the email only from the
+gated :class:`~app.auth.cognito.CognitoProfile`, and a miss without one is
+refused before any write. Real-SQLite behavior (row read-back, repeat-call
 stability) is owned by ``test_identity_service_sqlite.py``.
 """
 
@@ -74,7 +77,7 @@ _ISSUER = "https://cognito.us-east-1.amazonaws.com/us-east-1_pool"
 def _claims(
     *,
     sub: str = "cognito-sub-1",
-    email: str = "dev@example.test",
+    email: str | None = "dev@example.test",
     username: str | None = "Dev",
 ) -> CognitoClaims:
     return CognitoClaims(
@@ -301,7 +304,9 @@ _IDS = ProvisioningIds(
 
 
 def test_batch_entities_match_pinned_values() -> None:
-    batch = build_provisioning_batch(_claims(), _NOW, _IDS)
+    batch = build_provisioning_batch(
+        _claims(), _NOW, _IDS, profile=_profile(email="dev@example.test", display_name="Dev")
+    )
 
     assert batch.user.id == _IDS.user_id
     assert batch.user.display_name == "Dev"
@@ -333,14 +338,16 @@ def test_batch_entities_match_pinned_values() -> None:
 
 def test_batch_display_name_falls_back_to_sub_and_never_email() -> None:
     claims = _claims(username=None, email="stranger@example.test")
-    batch = build_provisioning_batch(claims, _NOW, _IDS)
+    batch = build_provisioning_batch(claims, _NOW, _IDS, profile=_profile(display_name=None))
     assert batch.user.display_name == "cognito-sub-1"
     assert batch.organization.name == "cognito-sub-1's Workspace"
     assert "stranger" not in batch.organization.slug
+    # The claims email is advisory: the batch email comes from the profile.
+    assert batch.user.email == "verified@example.test"
 
 
 def test_batch_audits_exact_order_targets_and_metadata() -> None:
-    events = build_provisioning_batch(_claims(), _NOW, _IDS).audit_events
+    events = build_provisioning_batch(_claims(), _NOW, _IDS, profile=_profile()).audit_events
 
     assert [event.action for event in events] == [
         "user.created",
@@ -418,10 +425,12 @@ def test_identity_hit_makes_one_identity_read_and_zero_writes() -> None:
 def test_miss_provisions_exactly_once_with_fully_formed_batch() -> None:
     storage = StubStorage()
 
-    resolved = resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+    resolved = resolve_or_provision(
+        storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+    )
 
     assert len(storage.provision_calls) == 1
-    expected = build_provisioning_batch(_claims(), _NOW, _IDS)
+    expected = build_provisioning_batch(_claims(), _NOW, _IDS, profile=_profile())
     call = storage.provision_calls[0]
     assert call["user"] == expected.user
     assert call["identity"] == expected.identity
@@ -436,7 +445,9 @@ def test_miss_provisions_exactly_once_with_fully_formed_batch() -> None:
 
 def test_miss_without_injected_ids_mints_prefix_valid_ids() -> None:
     storage = StubStorage()
-    resolved = resolve_or_provision(storage, _claims(), now=_NOW)
+    resolved = resolve_or_provision(
+        storage, _claims(), now=_NOW, profile_provider=lambda: _profile()
+    )
 
     assert len(storage.provision_calls) == 1
     call = storage.provision_calls[0]
@@ -451,12 +462,14 @@ def test_miss_lookup_uses_pinned_cognito_tuple() -> None:
     """The lookup pins ``(cognito, sub, None)`` — Shopify-shaped reads can never
     collide with the Cognito seam (decision 4)."""
     storage = StubStorage()
-    resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+    resolve_or_provision(
+        storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+    )
     assert storage.identity_reads == [(str(IdentityProvider.COGNITO), "cognito-sub-1", None)]
 
 
 # ---------------------------------------------------------------------------
-# resolve_or_provision — Phase 11 verified-profile seam (miss path only)
+# resolve_or_provision — Phase 11 verified profile: required on the miss path
 # ---------------------------------------------------------------------------
 
 
@@ -512,7 +525,7 @@ def test_miss_with_profile_provisions_from_profile_values() -> None:
     storage = StubStorage()
     resolved = resolve_or_provision(
         storage,
-        _claims(email="placeholder@cognito.invalid"),
+        _claims(email=None),
         now=_NOW,
         ids=_IDS,
         profile_provider=lambda: _profile(),
@@ -542,6 +555,17 @@ def test_profile_gate_failure_raises_before_any_provision() -> None:
     assert storage.write_calls == 0
 
 
+def test_miss_without_profile_provider_raises_before_any_write() -> None:
+    """Task 5: the claims-only fallback is gone. A first-login miss with no
+    profile provider is a 401-class refusal with zero storage mutation."""
+    storage = StubStorage()
+    with pytest.raises(TokenValidationError, match="verified profile required for provisioning"):
+        resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+    assert storage.provision_calls == []
+    assert storage.write_calls == 0
+    assert storage.identity_reads == [(str(IdentityProvider.COGNITO), "cognito-sub-1", None)]
+
+
 # ---------------------------------------------------------------------------
 # Race convergence vs. email collision (decision 7)
 # ---------------------------------------------------------------------------
@@ -556,7 +580,9 @@ def test_race_converges_on_re_read_with_no_second_provision() -> None:
     storage.miss_first_identity_read = True  # winner committed after our read
     storage.provision_error = DuplicateExternalIdentityError(existing_user_id=UserId("usr_winner"))
 
-    resolved = resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+    resolved = resolve_or_provision(
+        storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+    )
 
     assert len(storage.provision_calls) == 1  # the failed attempt; never a retry
     assert resolved.user is winner
@@ -571,7 +597,9 @@ def test_race_convergence_ignores_existing_user_id_when_none() -> None:
     storage.miss_first_identity_read = True
     storage.provision_error = DuplicateExternalIdentityError(existing_user_id=None)
 
-    resolved = resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+    resolved = resolve_or_provision(
+        storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+    )
 
     assert resolved.user is winner
 
@@ -589,7 +617,9 @@ def test_email_collision_raises_conflict_and_ignores_stranger_id() -> None:
     )
 
     with pytest.raises(ProvisioningConflictError):
-        resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+        resolve_or_provision(
+            storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+        )
 
     assert len(storage.provision_calls) == 1  # no second attempt
     assert len(storage.identity_reads) == 2  # lookup + re-read (the only convergence signal)
@@ -606,7 +636,9 @@ def test_convergence_cross_check_refuses_inconsistent_winner() -> None:
     storage.provision_error = DuplicateExternalIdentityError(existing_user_id=UserId("usr_other"))
 
     with pytest.raises(ProvisioningConflictError):
-        resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
+        resolve_or_provision(
+            storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
+        )
 
 
 # ---------------------------------------------------------------------------

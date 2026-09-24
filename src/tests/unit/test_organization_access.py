@@ -43,7 +43,7 @@ import pytest
 from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile
 from app.auth.credentials import build_literal, hash_secret
 from app.auth.errors import TokenValidationError
 from app.auth.organization_access import (
@@ -162,6 +162,23 @@ class FakeVerifier:
             raise TokenValidationError("token failed verification") from exc
 
 
+class FakeProfileSource:
+    """Phase 11 task-5 double: verified profile per subject from the emails
+    ``Env.login`` signed (first-login provisioning reads the profile, not
+    the claims)."""
+
+    def __init__(self) -> None:
+        self.emails: dict[str, str] = {}
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+        return CognitoProfile(
+            sub=expected_sub,
+            email=self.emails[expected_sub],
+            email_verified=True,
+            display_name=None,
+        )
+
+
 class FailingAuditStorage:
     """Delegates everything but ``append_audit_event`` (raises StorageError)."""
 
@@ -182,12 +199,15 @@ class Env:
         self.db_path = db_path
         self.storage = storage
         self.verifier = FakeVerifier()
+        self.profile_source = FakeProfileSource()
         self.handler_calls: list[tuple[str, str]] = []
         self._next_token = 0
         member_dep = build_organization_member_dependency(
-            storage, self.verifier, "get_organization"
+            storage, self.verifier, "get_organization", profile_source=self.profile_source
         )
-        admin_dep = build_organization_admin_dependency(storage, self.verifier, "create_member")
+        admin_dep = build_organization_admin_dependency(
+            storage, self.verifier, "create_member", profile_source=self.profile_source
+        )
 
         router = APIRouter()
 
@@ -219,6 +239,7 @@ class Env:
     def login(self, sub: str, email: str) -> str:
         self._next_token += 1
         token = f"tok-{self._next_token}"
+        self.profile_source.emails[sub] = email
         self.claims = CognitoClaims(
             sub=sub,
             email=email,

@@ -43,8 +43,9 @@ that never interpolates token, key, or claim material:
 5. **token_use** — must equal ``"access"`` (ID and refresh tokens rejected).
 6. **client_id** — exact set-membership against ``allowed_client_ids``.
 7. **Claim shape** — ``sub`` (non-empty, ≤255, the :data:`ProviderSubject`
-   bound), optional ``email`` (≤320 when present; absent access-token email
-   becomes a deterministic subject-derived placeholder), ``username``
+    bound), optional ``email`` (≤320 when present; absent/null yields
+    ``None`` — the access-token email is advisory and provisioning reads the
+    verified user-info profile instead), ``username``
    (optional; absent/null/empty all normalize to ``None`` so the service can
    fall back to ``sub`` for the display name; ≤255, the ``DisplayText``
    bound), ``iss``/``client_id``/``exp`` re-checked, then a frozen
@@ -143,11 +144,14 @@ class CognitoClaims:
 
     Immutable value object; field names match the Cognito claim names so the
     task-4 mapping to ``ExternalIdentity``/``User`` stays mechanical. No raw
-    token material is retained.
+    token material is retained. ``email`` is ``None`` when the token carries
+    no email claim: Cognito access tokens routinely omit it, and the
+    authoritative email for provisioning comes from the verified
+    :class:`CognitoProfile` (Phase 11), never from a synthesized stand-in.
     """
 
     sub: str
-    email: str
+    email: str | None
     username: str | None
     client_id: str
     iss: str
@@ -371,13 +375,14 @@ class CognitoAccessTokenVerifier:
             invalid_reason="token sub claim is invalid",
         )
         # Cognito's standard access-token payload does not include email even
-        # when the authorize request contains the ``email`` scope. Preserve
-        # access-token authentication and stable first-login provisioning by
-        # using a bounded, non-routable placeholder only when the claim is
-        # absent. A present-but-malformed claim remains a rejection.
+        # when the authorize request contains the ``email`` scope. Absent or
+        # null yields ``None`` (Phase 11 task 5): the claims email is
+        # advisory only, and first-login provisioning must go through the
+        # verified user-info profile instead. A present-but-malformed claim
+        # remains a rejection.
         raw_email = payload.get("email")
         if raw_email is None:
-            email = f"{sub}@cognito.invalid"
+            email = None
         elif not isinstance(raw_email, str) or not raw_email or len(raw_email) > _EMAIL_MAX_LENGTH:
             raise TokenValidationError("token email claim is invalid")
         else:

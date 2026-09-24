@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.schemas.manifest import endpoint_for
 from app.api.schemas.organizations import OrganizationCreateRequest, OrganizationResponse
-from app.auth.cognito import AccessTokenVerifier
+from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_user
 from app.auth.organization_access import OrganizationAccess, build_organization_member_dependency
 from app.models.organization import Organization
@@ -73,11 +73,22 @@ def _to_response(organization: Organization) -> OrganizationResponse:
     )
 
 
-def build_organizations_router(storage: Storage, verifier: AccessTokenVerifier) -> APIRouter:
-    """Build the organization routers bound to ``storage`` and ``verifier``."""
+def build_organizations_router(
+    storage: Storage,
+    verifier: AccessTokenVerifier,
+    *,
+    profile_source: ProfileSource | None = None,
+) -> APIRouter:
+    """Build the organization routers bound to ``storage`` and ``verifier``.
+
+    ``profile_source`` (Phase 11 task 4) is forwarded to both auth chains so
+    a first-login human miss provisions from the verified user-info profile.
+    """
     router = APIRouter(tags=["organizations"])
-    current_user = build_current_user(storage, verifier)
-    get_access = build_organization_member_dependency(storage, verifier, "get_organization")
+    current_user = build_current_user(storage, verifier, profile_source)
+    get_access = build_organization_member_dependency(
+        storage, verifier, "get_organization", profile_source=profile_source
+    )
 
     def list_organizations(
         identity: Annotated[ResolvedIdentity, Depends(current_user)],

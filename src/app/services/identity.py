@@ -13,12 +13,17 @@ Flow (spec §6, breakdown decisions 4—9):
    (decision 4 — cognito carries no tenant dimension; the storage contract
    normalizes ``None`` internally) and performs the §6 lookup.
 2. A lookup miss builds one fully formed batch with
-   :func:`build_provisioning_batch` — pure in ``(claims, now, ids)`` so every
-   value is deterministic under test — and hands it to the single atomic
-   ``provision_user`` call (User ``active``, ExternalIdentity, personal
+   :func:`build_provisioning_batch` — pure in ``(claims, profile, now, ids)``
+   so every value is deterministic under test — and hands it to the single
+   atomic ``provision_user`` call (User ``active``, ExternalIdentity, personal
    ``active`` organization, ``owner`` ``active`` membership, and the three
    creation audits ``user.created`` / ``organization.created`` /
-   ``membership.created``).
+   ``membership.created``). The batch's ``User.email`` comes **only** from a
+   :class:`~app.auth.cognito.CognitoProfile` that passed
+   :func:`~app.auth.cognito.require_provisioning_profile` (Phase 11): the
+   access-token ``email`` claim is advisory and a miss without a profile
+   provider is refused with :class:`~app.auth.errors.TokenValidationError`
+   before any storage write.
 3. A :class:`~app.storage.contract.DuplicateExternalIdentityError` is spec §6's
    concurrent-first-login race *or* a genuine email collision. The service
    re-reads the identity tuple: found → converge on the winner's user; absent
@@ -62,6 +67,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app.auth.cognito import CognitoClaims, CognitoProfile, require_provisioning_profile
+from app.auth.errors import TokenValidationError
 from app.models.audit_event import AuditEvent
 from app.models.authorization_context import AuthorizationContext
 from app.models.enums import (
@@ -213,17 +219,19 @@ def build_provisioning_batch(
     now: datetime,
     ids: ProvisioningIds,
     *,
-    profile: CognitoProfile | None = None,
+    profile: CognitoProfile,
 ) -> ProvisioningBatch:
     """Build the atomic first-login batch — **pure** (no clock, no entropy).
 
-    Values are pinned by breakdown decisions 5—8: display name is the
-    profile's ``display_name`` when a profile is present, else the
-    ``username`` claim when non-empty, else ``sub`` (the verifier normalizes
-    empty/absent to ``None``); ``User.email`` comes from the verified
-    ``profile.email`` when present, falling back to the claims email when
-    ``profile`` is ``None`` (the pre-Phase-11 behavior, removed by a later
-    task). The default workspace is
+    ``profile`` is a **required** keyword and must already have passed
+    :func:`~app.auth.cognito.require_provisioning_profile` (the gate runs in
+    :func:`_provision_or_converge` before this builder is reached), so
+    ``profile.email`` is present, verified, and subject-matched. Values are
+    pinned by breakdown decisions 5—8 and Phase 11: display name is the
+    profile's ``display_name`` when present, else the ``username`` claim when
+    non-empty, else ``sub`` (the verifier normalizes empty/absent to ``None``);
+    ``User.email`` comes from the verified ``profile.email`` — never from the
+    claims. The default workspace is
     ``"{display_name}'s Workspace"`` with the unique-by-construction slug
     ``personal-{user_id}`` (decision 6 — never derived from email); all five
     entities and three audits share the single injected ``now``; audit
@@ -231,13 +239,11 @@ def build_provisioning_batch(
     / ``{"role": "owner"}`` with targets and self-provisioning actor pinned
     per decision 8; event order is the spec §6 creation order.
     """
-    display_name = (
-        (profile.display_name if profile is not None else None) or claims.username or claims.sub
-    )
+    display_name = profile.display_name or claims.username or claims.sub
     user = User(
         id=ids.user_id,
         display_name=display_name,
-        email=profile.email if profile is not None else claims.email,
+        email=profile.email,
         status=UserStatus.ACTIVE,
         created_at=now,
         updated_at=now,
@@ -328,11 +334,13 @@ def resolve_or_provision(
 
     ``profile_provider`` (Phase 11) is invoked **only** on the identity-tuple
     miss path: the hit path performs zero profile work and never overwrites
-    the stored user's email. When present, its profile is gated through
+    the stored user's email. Its profile is gated through
     :func:`~app.auth.cognito.require_provisioning_profile` **before** any
     storage write, so a bad profile raises :class:`TokenValidationError`
-    (401-mapped) with the store untouched. ``None`` keeps today's
-    claims-only behavior (placeholder removal is a later task).
+    (401-mapped) with the store untouched. A **missing** provider on the miss
+    path is likewise refused with :class:`TokenValidationError`
+    (``"verified profile required for provisioning"``) before any write:
+    account creation never falls back to access-token claims (task 5).
 
     Raises:
         DisabledUserError: the resolved user is not ``active`` (no mutation).
@@ -341,7 +349,8 @@ def resolve_or_provision(
         NoActiveOrganizationError: the user has no usable organization
             (unreachable right after provisioning; reachable once Phase 04
             can disable orgs).
-        TokenValidationError: the provisioning profile failed the gate.
+        TokenValidationError: the provisioning profile failed the gate, or
+            no profile provider was supplied for a first-login miss.
     """
     try:
         user = _lookup_external_identity(storage, claims)
@@ -372,13 +381,13 @@ def _provision_or_converge(
     winner — a disagreement means storage told us two different users and is
     refused as a conflict rather than silently trusted.
 
-    The profile gate runs before the batch is built, so a gate failure
-    leaves zero storage mutation (the no-mutation rule extends to bad
-    provider profiles).
+    The profile gate runs before the batch is built, so a gate failure — or
+    a missing provider on this miss path — leaves zero storage mutation (the
+    no-mutation rule extends to absent and bad provider profiles alike).
     """
-    profile: CognitoProfile | None = None
-    if profile_provider is not None:
-        profile = require_provisioning_profile(profile_provider(), token_sub=claims.sub)
+    if profile_provider is None:
+        raise TokenValidationError("verified profile required for provisioning")
+    profile = require_provisioning_profile(profile_provider(), token_sub=claims.sub)
     batch = build_provisioning_batch(
         claims,
         now if now is not None else utc_now(),

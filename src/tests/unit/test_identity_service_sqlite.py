@@ -16,10 +16,11 @@ decision. Acceptance mapping:
   :class:`~app.services.identity.ProvisioningConflictError` and leaves **no
   partial rows** — the real-storage counterpart of decision 7's stranger-id
   trap, exercising the adapter's email-fallback resolution;
-- Phase 11's verified-profile seam: the miss path provisions from the
-  :class:`~app.auth.cognito.CognitoProfile` (email and display name), the
-  hit path performs zero profile work and never overwrites the stored
-  email, and a profile failing
+- Phase 11's verified profile (task 5): the miss path provisions **only**
+  from a gated :class:`~app.auth.cognito.CognitoProfile` (email and display
+  name), a miss without a profile provider raises ``TokenValidationError``
+  with no rows written, the hit path performs zero profile work and never
+  overwrites the stored email, and a profile failing
   :func:`~app.auth.cognito.require_provisioning_profile` raises
   ``TokenValidationError`` with **no rows written**.
 """
@@ -61,7 +62,7 @@ _NOW = datetime(2026, 9, 13, 8, 30, 0, tzinfo=UTC)
 def _claims(
     *,
     sub: str = "cognito-sub-sqlite",
-    email: str = "dev@example.test",
+    email: str | None = "dev@example.test",
     username: str | None = "Dev",
 ) -> CognitoClaims:
     return CognitoClaims(
@@ -108,7 +109,12 @@ def _counts(path: Path) -> dict[str, int]:
 def test_first_call_stores_the_complete_batch(db_path: Path) -> None:
     storage: Storage = open_sqlite_storage(db_path)
     try:
-        resolved = resolve_or_provision(storage, _claims(), now=_NOW)
+        resolved = resolve_or_provision(
+            storage,
+            _claims(),
+            now=_NOW,
+            profile_provider=lambda: _profile(email="dev@example.test", display_name="Dev"),
+        )
     finally:
         storage.close()
 
@@ -169,7 +175,10 @@ def test_first_call_stores_the_complete_batch(db_path: Path) -> None:
 def test_repeated_calls_resolve_same_identity_without_duplicates(db_path: Path) -> None:
     storage: Storage = open_sqlite_storage(db_path)
     try:
-        first = resolve_or_provision(storage, _claims(), now=_NOW)
+        first = resolve_or_provision(
+            storage, _claims(), now=_NOW, profile_provider=lambda: _profile()
+        )
+        # The second call is a hit: it needs no provider at all (task 5).
         second = resolve_or_provision(storage, _claims(), now=_NOW)
     finally:
         storage.close()
@@ -228,10 +237,11 @@ def test_disabled_user_raises_without_mutation(db_path: Path) -> None:
 
 
 def test_email_collision_conflicts_and_leaves_no_partial_rows(db_path: Path) -> None:
-    """A *different* sub with a stranger's email: provision_user raises the
-    race error (email UNIQUE), the identity re-read misses, and the service
-    refuses to converge on the stranger (decision 7) — the adapter's
-    ``existing_user_id`` email fallback names ``usr_stranger`` here."""
+    """A *different* sub whose verified profile carries a stranger's email:
+    provision_user raises the race error (email UNIQUE), the identity re-read
+    misses, and the service refuses to converge on the stranger (decision 7) —
+    the adapter's ``existing_user_id`` email fallback names ``usr_stranger``
+    here."""
     storage: Storage = open_sqlite_storage(db_path)
     try:
         storage.create_user(
@@ -245,7 +255,14 @@ def test_email_collision_conflicts_and_leaves_no_partial_rows(db_path: Path) -> 
             )
         )
         with pytest.raises(ProvisioningConflictError):
-            resolve_or_provision(storage, _claims(sub="brand-new-sub"), now=_NOW)
+            resolve_or_provision(
+                storage,
+                _claims(sub="brand-new-sub", email=None),
+                now=_NOW,
+                # The profile email is the stranger's: the batch races the
+                # users.email UNIQUE (the claims email is no longer read).
+                profile_provider=lambda: _profile(sub="brand-new-sub", email="dev@example.test"),
+            )
     finally:
         storage.close()
 
@@ -287,7 +304,7 @@ def test_first_login_with_profile_stores_profile_email_and_display_name(
     try:
         resolved = resolve_or_provision(
             storage,
-            _claims(email="placeholder@cognito.invalid", username="Dev"),
+            _claims(email=None, username="Dev"),
             now=_NOW,
             profile_provider=lambda: _profile(),
         )
@@ -400,6 +417,28 @@ def test_profile_subject_mismatch_provisions_nothing(db_path: Path) -> None:
             )
         assert "someone-else" not in str(excinfo.value)
         assert "verified@example.test" not in str(excinfo.value)
+        assert _counts(db_path) == {
+            "users": 0,
+            "external_identities": 0,
+            "organizations": 0,
+            "memberships": 0,
+            "api_keys": 0,
+            "audit_events": 0,
+        }
+    finally:
+        storage.close()
+
+
+def test_miss_without_profile_provider_provisions_nothing(db_path: Path) -> None:
+    """Task 5: the claims-only fallback is gone — a first-login miss with no
+    provider is a 401-class refusal (email-carrying claims included) and the
+    store stays empty."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        with pytest.raises(
+            TokenValidationError, match="verified profile required for provisioning"
+        ):
+            resolve_or_provision(storage, _claims(), now=_NOW)
         assert _counts(db_path) == {
             "users": 0,
             "external_identities": 0,

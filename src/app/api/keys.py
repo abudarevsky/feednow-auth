@@ -58,7 +58,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.schemas.api_keys import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeySummary
 from app.api.schemas.manifest import endpoint_for
-from app.auth.cognito import AccessTokenVerifier
+from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.organization_access import (
     OrganizationAccess,
     build_organization_admin_dependency,
@@ -107,19 +107,37 @@ def build_api_keys_router(
     storage: Storage,
     verifier: AccessTokenVerifier,
     pepper_source: PepperSource,
+    *,
+    profile_source: ProfileSource | None = None,
 ) -> APIRouter:
-    """Build the API-key routers bound to ``storage``, ``verifier``, and ``pepper_source``."""
+    """Build the API-key routers bound to ``storage``, ``verifier``, and ``pepper_source``.
+
+    ``profile_source`` (Phase 11 task 4) is forwarded to every access
+    dependency's human auth chain; the API-key branch never fetches a profile.
+    """
     router = APIRouter(tags=["api-keys"])
     # Decision 8: list is member-rank, create/revoke are admin-rank; the
     # pepper wiring makes the ``human_only`` key-refusal branch live.
     list_access = build_organization_member_dependency(
-        storage, verifier, "list_api_keys", pepper_source=pepper_source
+        storage,
+        verifier,
+        "list_api_keys",
+        pepper_source=pepper_source,
+        profile_source=profile_source,
     )
     create_access = build_organization_admin_dependency(
-        storage, verifier, "create_api_key", pepper_source=pepper_source
+        storage,
+        verifier,
+        "create_api_key",
+        pepper_source=pepper_source,
+        profile_source=profile_source,
     )
     revoke_access = build_organization_admin_dependency(
-        storage, verifier, "revoke_api_key", pepper_source=pepper_source
+        storage,
+        verifier,
+        "revoke_api_key",
+        pepper_source=pepper_source,
+        profile_source=profile_source,
     )
 
     def list_api_keys(

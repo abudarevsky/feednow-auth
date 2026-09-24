@@ -64,7 +64,7 @@ from typing import Annotated, Final, NoReturn
 from fastapi import Depends, HTTPException
 
 from app.auth.api_key_auth import key_has_scope
-from app.auth.cognito import AccessTokenVerifier
+from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_principal, build_current_user
 from app.auth.pepper import PepperSource
 from app.auth.principal import Principal
@@ -225,6 +225,7 @@ def _build_organization_access_dependency(
     operation_id: str,
     min_role: MembershipRole,
     pepper_source: PepperSource | None,
+    profile_source: ProfileSource | None,
 ) -> Callable[..., OrganizationAccess]:
     """Return the access dependency enforcing ``min_role`` (decision 3 rank).
 
@@ -236,9 +237,11 @@ def _build_organization_access_dependency(
     chain (byte-stable regression); with one provided it composes
     :func:`~app.auth.dependencies.build_current_principal` and API-key
     bearers are refused with the audited ``human_only`` denial.
+    ``profile_source`` (Phase 11 task 4) is forwarded to whichever chain is
+    composed; it only ever matters for a first-login human miss.
     """
     if pepper_source is None:
-        current_user = build_current_user(storage, verifier)
+        current_user = build_current_user(storage, verifier, profile_source)
 
         def human_only_route_access(
             organization_id: OrganizationId,
@@ -250,7 +253,7 @@ def _build_organization_access_dependency(
 
         return human_only_route_access
 
-    current_principal = build_current_principal(storage, verifier, pepper_source)
+    current_principal = build_current_principal(storage, verifier, pepper_source, profile_source)
 
     def principal_route_access(
         organization_id: OrganizationId,
@@ -268,15 +271,18 @@ def build_organization_member_dependency(
     operation_id: str,
     *,
     pepper_source: PepperSource | None = None,
+    profile_source: ProfileSource | None = None,
 ) -> Callable[..., OrganizationAccess]:
     """Read access: any **active** membership (rank >= ``viewer``).
 
     ``pepper_source`` (decision 6): ``None`` keeps the exact Phase 03/04
     chain; wiring one makes API-key bearers answer the uniform 403 audited
     ``human_only`` (management routes are human-only, decision 8).
+    ``profile_source`` (Phase 11 task 4) forwards the verified user-info
+    seam to the human authentication chain.
     """
     return _build_organization_access_dependency(
-        storage, verifier, operation_id, MembershipRole.VIEWER, pepper_source
+        storage, verifier, operation_id, MembershipRole.VIEWER, pepper_source, profile_source
     )
 
 
@@ -286,14 +292,15 @@ def build_organization_admin_dependency(
     operation_id: str,
     *,
     pepper_source: PepperSource | None = None,
+    profile_source: ProfileSource | None = None,
 ) -> Callable[..., OrganizationAccess]:
     """Mutation access: rank >= ``admin`` (owner or admin only, decision 3).
 
-    ``pepper_source`` behaves exactly as in
+    ``pepper_source`` and ``profile_source`` behave exactly as in
     :func:`build_organization_member_dependency`.
     """
     return _build_organization_access_dependency(
-        storage, verifier, operation_id, MembershipRole.ADMIN, pepper_source
+        storage, verifier, operation_id, MembershipRole.ADMIN, pepper_source, profile_source
     )
 
 

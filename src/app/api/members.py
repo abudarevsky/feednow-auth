@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.schemas.manifest import endpoint_for
 from app.api.schemas.members import MemberCreateRequest, MemberResponse
-from app.auth.cognito import AccessTokenVerifier
+from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.organization_access import (
     OrganizationAccess,
     build_organization_admin_dependency,
@@ -68,12 +68,27 @@ def _to_response(membership: Membership) -> MemberResponse:
     )
 
 
-def build_members_router(storage: Storage, verifier: AccessTokenVerifier) -> APIRouter:
-    """Build the member routers bound to ``storage`` and ``verifier``."""
+def build_members_router(
+    storage: Storage,
+    verifier: AccessTokenVerifier,
+    *,
+    profile_source: ProfileSource | None = None,
+) -> APIRouter:
+    """Build the member routers bound to ``storage`` and ``verifier``.
+
+    ``profile_source`` (Phase 11 task 4) is forwarded to every access
+    dependency's human auth chain.
+    """
     router = APIRouter(tags=["members"])
-    list_access = build_organization_member_dependency(storage, verifier, "list_members")
-    create_access = build_organization_admin_dependency(storage, verifier, "create_member")
-    remove_access = build_organization_admin_dependency(storage, verifier, "remove_member")
+    list_access = build_organization_member_dependency(
+        storage, verifier, "list_members", profile_source=profile_source
+    )
+    create_access = build_organization_admin_dependency(
+        storage, verifier, "create_member", profile_source=profile_source
+    )
+    remove_access = build_organization_admin_dependency(
+        storage, verifier, "remove_member", profile_source=profile_source
+    )
 
     def list_members(
         access: Annotated[OrganizationAccess, Depends(list_access)],

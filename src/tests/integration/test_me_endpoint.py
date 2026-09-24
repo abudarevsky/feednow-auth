@@ -13,6 +13,13 @@ the frozen Phase 01 envelope. Acceptance mapping:
 - the happy path returns ``usr_``/profile fields and the body carries no
   ``sub``, no ``client_id``, no token bytes; repeated requests provision
   exactly once; every error body validates against the frozen ``Error`` model.
+
+Phase 11 (tasks 4/5): first-login provisioning reads the email from the
+verified user-info profile, so the environment wires a fake
+:class:`~app.auth.cognito.ProfileSource`; named tests prove the hit path
+makes **zero** user-info requests, the profile email (not the claims email)
+lands on the created user, and a bearer-only first login with no profile
+source is refused 401 without touching storage.
 """
 
 from __future__ import annotations
@@ -28,7 +35,8 @@ from fastapi.testclient import TestClient
 from support.cognito import JwksTestServer, TestKey, generate_test_key, sign_token
 
 from app.api.me import build_me_router
-from app.auth.cognito import CognitoAccessTokenVerifier
+from app.auth.cognito import CognitoAccessTokenVerifier, CognitoProfile
+from app.auth.errors import TokenProviderUnavailableError
 from app.auth.jwks import CognitoJwksSource
 from app.main import create_app
 from app.models.enums import IdentityProvider, UserStatus
@@ -68,6 +76,28 @@ class RecordingStorage:
         return len(self.calls)
 
 
+class FakeProfileSource:
+    """In-process user-info double: canned verified profile per subject.
+
+    Records only the ``expected_sub`` of each fetch (never token material),
+    so tests can prove the hit path performs zero user-info requests.
+    """
+
+    def __init__(self, emails: dict[str, str]) -> None:
+        self.emails = emails
+        self.fetched_subjects: list[str] = []
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+        assert access_token  # the chain must forward the raw bearer token
+        self.fetched_subjects.append(expected_sub)
+        return CognitoProfile(
+            sub=expected_sub,
+            email=self.emails[expected_sub],
+            email_verified=True,
+            display_name=None,
+        )
+
+
 @pytest.fixture(scope="module")
 def key() -> TestKey:
     return generate_test_key("me-pool-key-1")
@@ -82,11 +112,13 @@ class _Env:
         storage: RecordingStorage,
         client: TestClient,
         key: TestKey,
+        profile_source: FakeProfileSource,
     ) -> None:
         self.server = server
         self.storage = storage
         self.client = client
         self.key = key
+        self.profile_source = profile_source
 
     @property
     def issuer(self) -> str:
@@ -127,8 +159,10 @@ def _build_env(tmp_path: Path, key: TestKey, server: JwksTestServer) -> _Env:
         allowed_client_ids=[ALLOWED_CLIENT],
     )
     storage = RecordingStorage(open_sqlite_storage(tmp_path / "me.sqlite"))
-    app = create_app(routers=[build_me_router(storage, verifier)])
-    return _Env(server, storage, TestClient(app, raise_server_exceptions=False), key)
+    profile_source = FakeProfileSource({SUBJECT: EMAIL})
+    router = build_me_router(storage, verifier, profile_source=profile_source)
+    client = TestClient(create_app(routers=[router]), raise_server_exceptions=False)
+    return _Env(server, storage, client, key, profile_source)
 
 
 @pytest.fixture
@@ -162,11 +196,113 @@ def test_me_provisions_once_and_returns_internal_identity(env: _Env) -> None:
 
     # Exactly one provisioning write; repeat requests converge on the same user.
     assert env.storage.calls.count("provision_user") == 1
+    assert env.profile_source.fetched_subjects == [SUBJECT]  # one user-info fetch
     second = env.client.get("/v1/me", headers=env.auth(env.token()))
     assert second.status_code == 200
     assert second.json()["id"] == body["id"]
     assert env.storage.calls.count("provision_user") == 1  # still exactly once
     assert env.storage.calls.count("get_user_by_external_identity") == 2  # hit path
+    assert env.profile_source.fetched_subjects == [SUBJECT]  # zero fetches on the hit
+
+
+def test_first_login_provisions_with_profile_email_not_claims_email(env: _Env) -> None:
+    """Phase 11 task 4/5: the stored email comes from the verified user-info
+    profile; the access-token ``email`` claim is never used for creation."""
+    env.profile_source.emails["profile-wins-sub"] = "profile@example.test"
+    token = env.token(sub="profile-wins-sub", email="claims-only@example.test")
+
+    response = env.client.get("/v1/me", headers=env.auth(token))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["email"] == "profile@example.test"
+    # display_name: profile has none → falls back to the claims username.
+    assert body["display_name"] == "me-user"
+    assert env.profile_source.fetched_subjects == ["profile-wins-sub"]
+
+
+def test_first_login_user_info_outage_is_503_without_provisioning(
+    tmp_path: Path, key: TestKey
+) -> None:
+    """A provider outage on the miss path is the published **503** (same
+    vocabulary as a JWKS outage), never a bare 500, and never a write."""
+
+    class _DownProfileSource:
+        def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+            raise TokenProviderUnavailableError("profile endpoint could not be reached")
+
+    with JwksTestServer({"pool-a": [key]}) as server:
+        issuer = server.issuer("pool-a")
+        verifier = CognitoAccessTokenVerifier(
+            CognitoJwksSource([issuer]),
+            allowed_issuers=[issuer],
+            allowed_client_ids=[ALLOWED_CLIENT],
+        )
+        storage = RecordingStorage(open_sqlite_storage(tmp_path / "outage.sqlite"))
+        router = build_me_router(storage, verifier, profile_source=_DownProfileSource())
+        client = TestClient(create_app(routers=[router]), raise_server_exceptions=False)
+        now = int(time.time())
+        token = sign_token(
+            {
+                "sub": SUBJECT,
+                "username": "me-user",
+                "client_id": ALLOWED_CLIENT,
+                "iss": issuer,
+                "token_use": "access",
+                "exp": now + 3600,
+                "iat": now,
+            },
+            kid=key.kid,
+            key=key,
+        )
+
+        response = client.get("/v1/me", headers={"Authorization": f"Bearer {token}"})
+
+        assert response.status_code == 503
+        assert Error.model_validate(response.json()).code == "internal_error"
+        assert storage.calls.count("provision_user") == 0  # outage never writes
+        assert token not in response.text
+
+
+def test_first_login_without_profile_source_is_401(tmp_path: Path, key: TestKey) -> None:
+    """Task 5's rollback shape: with no user-info configuration a bearer-only
+    first login is refused 401 with zero writes (never provisioned from
+    claims)."""
+    with JwksTestServer({"pool-a": [key]}) as server:
+        issuer = server.issuer("pool-a")
+        verifier = CognitoAccessTokenVerifier(
+            CognitoJwksSource([issuer]),
+            allowed_issuers=[issuer],
+            allowed_client_ids=[ALLOWED_CLIENT],
+        )
+        storage = RecordingStorage(open_sqlite_storage(tmp_path / "no-source.sqlite"))
+        client = TestClient(
+            create_app(routers=[build_me_router(storage, verifier)]),
+            raise_server_exceptions=False,
+        )
+        now = int(time.time())
+        token = sign_token(
+            {
+                "sub": SUBJECT,
+                "username": "me-user",
+                "client_id": ALLOWED_CLIENT,
+                "iss": issuer,
+                "token_use": "access",
+                "exp": now + 3600,
+                "iat": now,
+            },
+            kid=key.kid,
+            key=key,
+        )
+
+        response = client.get("/v1/me", headers={"Authorization": f"Bearer {token}"})
+
+        assert response.status_code == 401
+        assert Error.model_validate(response.json()).code == "unauthenticated"
+        # The refusal happens on the miss path: one identity read, zero writes.
+        assert storage.calls.count("get_user_by_external_identity") == 1
+        assert storage.calls.count("provision_user") == 0
+        assert "cognito.invalid" not in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +413,7 @@ def test_disabled_user_403(env: _Env) -> None:
     assert response.status_code == 403
     assert Error.model_validate(response.json()).code == "forbidden"
     assert env.storage.calls.count("provision_user") == 0  # never mutates on rejection
+    assert env.profile_source.fetched_subjects == []  # hit path: zero user-info requests
 
 
 def test_email_collision_409(env: _Env) -> None:
