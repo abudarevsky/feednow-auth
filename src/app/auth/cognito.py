@@ -60,14 +60,37 @@ with a 500 instead of a clean 401.
 Phase 05's API-key path and future providers feed the same verification
 seam. This module knows nothing about storage or users — resolution and
 provisioning (task 4) consume :class:`CognitoClaims`.
+
+Phase 11 (profile and session boundary) extends this module with the
+**verified-profile seam** used by first-login provisioning:
+
+- :class:`CognitoProfile` — the frozen profile value object (subject, email,
+  email-verification flag, display name) that the identity service consumes
+  instead of trusting access-token claims for the user's email.
+- :class:`ProfileSource` — the published fetch interface, mirroring
+  :class:`AccessTokenVerifier`'s handoff role.
+- :class:`CognitoUserInfoClient` — the narrow Cognito ``/oauth2/userInfo``
+  HTTP client. The endpoint is fixed approved configuration validated to be
+  absolute HTTPS at construction (no per-call URL selection, so a verified
+  token can never steer a fetch); redirects are rejected rather than
+  followed; the response body is size-capped and fail-closed parsed. Field
+  shape failures raise :class:`TokenValidationError` (401-mapped) with fixed
+  safe reasons, and transport/non-JSON failures raise
+  :class:`TokenProviderUnavailableError` (503-mapped) — the same vocabulary
+  and reason-hygiene rules as the verifier: no token, email, subject, or
+  payload material is ever interpolated into exception text or logged (this
+  module imports no logging).
 """
 
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.request
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 import jwt
 from jwt import PyJWK
@@ -82,7 +105,7 @@ from jwt.exceptions import (
 )
 from jwt.utils import base64url_decode
 
-from app.auth.errors import TokenValidationError
+from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 from app.auth.jwks import JwksSource
 
 #: The single allowed JOSE algorithm: exact, case-sensitive header match
@@ -100,6 +123,11 @@ _USERNAME_MAX_LENGTH: Final = 255
 
 #: Generic bound for the ``iss``/``client_id`` string claims.
 _ID_CLAIM_MAX_LENGTH: Final = 255
+
+#: Hard cap on the user-info response body. A Cognito profile is roughly a
+#: kilobyte; anything larger is a hostile or misconfigured endpoint and is
+#: rejected fail-closed instead of being buffered without limit.
+_MAX_PROFILE_BODY_BYTES: Final = 65_536
 
 
 @dataclass(frozen=True)
@@ -404,4 +432,227 @@ class CognitoAccessTokenVerifier:
         return value
 
 
-__all__ = ["AccessTokenVerifier", "CognitoAccessTokenVerifier", "CognitoClaims"]
+# -- Phase 11: verified-profile seam ------------------------------------------
+
+
+@dataclass(frozen=True)
+class CognitoProfile:
+    """Verified identity-provider profile — the user-info fetch's only output.
+
+    Immutable value object mirroring :class:`CognitoClaims`'s hygiene rules:
+    no raw token, HTTP response, or provider payload material is retained,
+    and the field bounds are enforced by the producing client (plain
+    integers, no ``app.models`` imports — the same breakdown decision 4 that
+    keeps the verifier free of domain types). ``email`` and ``display_name``
+    are optional at the *transport* layer; the provisioning-profile gate
+    decides which absences are acceptable before any user is created.
+    """
+
+    sub: str
+    email: str | None
+    email_verified: bool
+    display_name: str | None
+
+
+@runtime_checkable
+class ProfileSource(Protocol):
+    """The published profile-fetch interface (Phase 11 breakdown task 2).
+
+    Implementations exchange a **verified** bearer access token for the
+    provider's authoritative profile, side-effect-free from the caller's
+    point of view. ``expected_sub`` is the subject of the already-verified
+    token: a profile for any other subject is a provider contract violation
+    and must be rejected, never adopted.
+
+    :raises TokenValidationError: profile shape/subject failure (401-mapped).
+    :raises TokenProviderUnavailableError: the provider could not deliver a
+        parseable profile (503-mapped).
+    """
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile: ...
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Turn every 3xx into an ``HTTPError`` instead of a second request.
+
+    Overriding ``redirect_request`` to return ``None`` is the documented
+    urllib way to decline a redirect: the opener then raises ``HTTPError``
+    for the 3xx status. Following redirects from a fixed approved endpoint
+    would let a compromised or misconfigured server move the bearer token to
+    another origin, so no redirect target is ever fetched.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
+
+
+class CognitoUserInfoClient:
+    """Fetches Cognito user-info profiles over HTTPS for verified tokens.
+
+    The URL is constructor-pinned approved configuration (absolute HTTPS,
+    no query/fragment), never derived from token claims or per-call input,
+    so this client adds no SSRF surface: the only caller-controlled data on
+    the wire is the bearer token itself, sent over a single fixed GET. The
+    opener is built once with :class:`_RejectRedirectHandler` and reused
+    (urllib openers are thread-safe for independent requests); timeouts are
+    enforced per request.
+    """
+
+    def __init__(self, userinfo_url: str, timeout_seconds: float = 5.0) -> None:
+        self._userinfo_url = self._validate_userinfo_url(userinfo_url)
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._timeout_seconds = timeout_seconds
+        self._opener = urllib.request.build_opener(_RejectRedirectHandler())
+
+    @property
+    def userinfo_url(self) -> str:
+        """The fixed HTTPS user-info endpoint this client will call."""
+        return self._userinfo_url
+
+    def fetch(self, access_token: str, expected_sub: str) -> CognitoProfile:
+        """GET the profile bound to ``access_token`` and validate its shape.
+
+        :raises TokenValidationError: missing/empty access token, a profile
+            whose ``sub`` is malformed or differs from ``expected_sub``, or
+            an invalid ``email``/``email_verified``/``name`` member (fixed
+            safe reasons; see the helpers below).
+        :raises TokenProviderUnavailableError: transport failure, timeout,
+            any non-2xx (redirects included), an over-cap body, or a body
+            that is not a JSON object.
+        """
+        if not isinstance(access_token, str) or not access_token:
+            raise TokenValidationError("profile request requires an access token")
+        request = urllib.request.Request(
+            self._userinfo_url,
+            method="GET",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+        )
+        # HTTPError is a URLError subclass and URLError an OSError subclass:
+        # the order below keeps "endpoint answered badly" distinct from
+        # "endpoint unreachable" (which covers DNS, TLS, and read timeouts).
+        try:
+            with self._opener.open(request, timeout=self._timeout_seconds) as response:
+                body: bytes = response.read(_MAX_PROFILE_BODY_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            raise TokenProviderUnavailableError(
+                "profile endpoint returned an error response"
+            ) from exc
+        except OSError as exc:
+            raise TokenProviderUnavailableError("profile endpoint could not be reached") from exc
+        if len(body) > _MAX_PROFILE_BODY_BYTES:
+            raise TokenProviderUnavailableError("profile response is too large")
+        return self._build_profile(self._parse_json_object(body), expected_sub)
+
+    @staticmethod
+    def _validate_userinfo_url(userinfo_url: str) -> str:
+        """Pin approved configuration: absolute HTTPS, no query or fragment.
+
+        A per-request URL selection point or an http:// endpoint would let
+        the bearer token travel in cleartext or to an unapproved host; a
+        query/fragment would smuggle parameters into the fixed request.
+        """
+        parsed = urlparse(userinfo_url)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise ValueError("userinfo_url must be an absolute HTTPS URL")
+        if parsed.query or parsed.fragment:
+            raise ValueError("userinfo_url must not contain a query or fragment")
+        return userinfo_url
+
+    @staticmethod
+    def _parse_json_object(body: bytes) -> Mapping[str, Any]:
+        """Decode the response body fail-closed; parse failures are provider faults."""
+        try:
+            payload = json.loads(body)
+        except ValueError as exc:  # json.JSONDecodeError subclasses ValueError
+            raise TokenProviderUnavailableError(
+                "profile response is not a valid JSON document"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise TokenProviderUnavailableError("profile response is not a JSON object")
+        return payload
+
+    @staticmethod
+    def _build_profile(payload: Mapping[str, Any], expected_sub: str) -> CognitoProfile:
+        """Validate the four profile members and build the frozen value object.
+
+        ``email`` absent/null maps to ``None`` (the provisioning gate, not
+        this client, decides whether a profile without email may create a
+        user); ``name`` absent, null, and empty all map to ``None`` exactly
+        like the verifier's ``username`` normalization. A present-but-
+        malformed member is always a rejection, never a silent default.
+        """
+        sub = _require_profile_str(
+            payload,
+            "sub",
+            max_length=_SUB_MAX_LENGTH,
+            invalid_reason="profile sub claim is invalid",
+        )
+        if sub != expected_sub:
+            raise TokenValidationError("profile subject does not match the token")
+
+        raw_email = payload.get("email")
+        if raw_email is None:
+            email = None
+        elif not isinstance(raw_email, str) or not raw_email or len(raw_email) > _EMAIL_MAX_LENGTH:
+            raise TokenValidationError("profile email claim is invalid")
+        else:
+            email = raw_email
+
+        if "email_verified" not in payload or payload["email_verified"] is None:
+            raise TokenValidationError("profile is missing the email_verified claim")
+        email_verified = payload["email_verified"]
+        if not isinstance(email_verified, bool):
+            raise TokenValidationError("profile email_verified claim is invalid")
+
+        raw_name = payload.get("name")
+        if raw_name is None:
+            display_name = None
+        elif not isinstance(raw_name, str) or len(raw_name) > _USERNAME_MAX_LENGTH:
+            raise TokenValidationError("profile name claim is invalid")
+        else:
+            display_name = raw_name or None
+
+        return CognitoProfile(
+            sub=sub,
+            email=email,
+            email_verified=email_verified,
+            display_name=display_name,
+        )
+
+
+def _require_profile_str(
+    payload: Mapping[str, Any],
+    name: str,
+    *,
+    max_length: int,
+    invalid_reason: str,
+) -> str:
+    """Return a non-empty, length-bounded profile member or raise a fixed reason."""
+    if name not in payload or payload[name] is None:
+        raise TokenValidationError(f"profile is missing the {name} claim")
+    value = payload[name]
+    if not isinstance(value, str) or not value or len(value) > max_length:
+        raise TokenValidationError(invalid_reason)
+    return value
+
+
+__all__ = [
+    "AccessTokenVerifier",
+    "CognitoAccessTokenVerifier",
+    "CognitoClaims",
+    "CognitoProfile",
+    "CognitoUserInfoClient",
+    "ProfileSource",
+]
