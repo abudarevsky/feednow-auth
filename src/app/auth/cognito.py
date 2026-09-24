@@ -67,6 +67,13 @@ Phase 11 (profile and session boundary) extends this module with the
 - :class:`CognitoProfile` — the frozen profile value object (subject, email,
   email-verification flag, display name) that the identity service consumes
   instead of trusting access-token claims for the user's email.
+- :func:`require_provisioning_profile` — the provisioning-profile gate: the
+  single place that decides whether a fetched profile may create a user
+  (subject must equal the verified token's, email present and bounded,
+  ``email_verified`` exactly ``True``, display name bounded or ``None``).
+  Every rejection is a :class:`TokenValidationError` with a fixed safe
+  reason; the gate uses plain integer bounds and imports no ``app.models``
+  types (the same decision-4 rule as the verifier and the client).
 - :class:`ProfileSource` — the published fetch interface, mirroring
   :class:`AccessTokenVerifier`'s handoff role.
 - :class:`CognitoUserInfoClient` — the narrow Cognito ``/oauth2/userInfo``
@@ -445,13 +452,60 @@ class CognitoProfile:
     integers, no ``app.models`` imports — the same breakdown decision 4 that
     keeps the verifier free of domain types). ``email`` and ``display_name``
     are optional at the *transport* layer; the provisioning-profile gate
-    decides which absences are acceptable before any user is created.
+    (:func:`require_provisioning_profile`) decides which absences are
+    acceptable before any user is created.
     """
 
     sub: str
     email: str | None
     email_verified: bool
     display_name: str | None
+
+
+def require_provisioning_profile(profile: CognitoProfile, *, token_sub: str) -> CognitoProfile:
+    """Gate a fetched profile against the verified token before provisioning.
+
+    The transport layer tolerates absent ``email``/``name``; account creation
+    must not. This is the single decision point: ``sub`` must be a valid,
+    bounded subject **equal to** the already-verified token's ``sub`` (a
+    profile for anyone else is a provider contract violation, never a
+    provisioning input), ``email`` must be present, non-empty, and within
+    the model bound, ``email_verified`` must be exactly ``True``, and
+    ``display_name`` must be ``None`` or a bounded non-empty string.
+
+    Returns ``profile`` unchanged on success (callers chain it into the
+    provisioning batch). Every failure raises
+    :class:`~app.auth.errors.TokenValidationError` (401-mapped) with a fixed
+    safe reason — no email, subject, or profile value is ever interpolated
+    into the message.
+    """
+    if not isinstance(profile.sub, str) or not profile.sub or len(profile.sub) > _SUB_MAX_LENGTH:
+        raise TokenValidationError("profile sub claim is invalid")
+    if profile.sub != token_sub:
+        raise TokenValidationError("profile subject does not match the token")
+
+    if profile.email is None:
+        raise TokenValidationError("profile is missing the email claim")
+    if (
+        not isinstance(profile.email, str)
+        or not profile.email
+        or len(profile.email) > _EMAIL_MAX_LENGTH
+    ):
+        raise TokenValidationError("profile email claim is invalid")
+
+    if not isinstance(profile.email_verified, bool):
+        raise TokenValidationError("profile email_verified claim is invalid")
+    if profile.email_verified is not True:
+        raise TokenValidationError("profile email is not verified")
+
+    if profile.display_name is not None and (
+        not isinstance(profile.display_name, str)
+        or not profile.display_name
+        or len(profile.display_name) > _USERNAME_MAX_LENGTH
+    ):
+        raise TokenValidationError("profile display name is invalid")
+
+    return profile
 
 
 @runtime_checkable
@@ -655,4 +709,5 @@ __all__ = [
     "CognitoProfile",
     "CognitoUserInfoClient",
     "ProfileSource",
+    "require_provisioning_profile",
 ]

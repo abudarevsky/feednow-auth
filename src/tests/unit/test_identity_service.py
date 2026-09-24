@@ -25,7 +25,8 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile
+from app.auth.errors import TokenValidationError
 from app.models.audit_event import AuditEvent
 from app.models.authorization_context import AuthorizationContext
 from app.models.enums import (
@@ -452,6 +453,93 @@ def test_miss_lookup_uses_pinned_cognito_tuple() -> None:
     storage = StubStorage()
     resolve_or_provision(storage, _claims(), now=_NOW, ids=_IDS)
     assert storage.identity_reads == [(str(IdentityProvider.COGNITO), "cognito-sub-1", None)]
+
+
+# ---------------------------------------------------------------------------
+# resolve_or_provision — Phase 11 verified-profile seam (miss path only)
+# ---------------------------------------------------------------------------
+
+
+def _profile(
+    *,
+    sub: str = "cognito-sub-1",
+    email: str | None = "verified@example.test",
+    email_verified: bool = True,
+    display_name: str | None = "Verified Person",
+) -> CognitoProfile:
+    return CognitoProfile(
+        sub=sub,
+        email=email,
+        email_verified=email_verified,
+        display_name=display_name,
+    )
+
+
+def test_batch_with_profile_uses_profile_email_and_display_name_fallback() -> None:
+    """Pure-batch seam: profile email wins; display name falls back to
+    claims.username then sub when the profile carries none."""
+    batch = build_provisioning_batch(
+        _claims(username=None),
+        _NOW,
+        _IDS,
+        profile=_profile(display_name=None),
+    )
+    assert batch.user.email == "verified@example.test"
+    assert batch.user.display_name == "cognito-sub-1"
+    assert batch.organization.name == "cognito-sub-1's Workspace"
+
+
+def test_hit_path_never_invokes_profile_provider() -> None:
+    """Zero profile work on the hit path: the provider is never called."""
+    storage = StubStorage()
+    existing = _user()
+    _seed_known_user(storage, existing, _organization())
+    calls = 0
+
+    def provider() -> CognitoProfile:
+        nonlocal calls
+        calls += 1
+        return _profile(email="someone-else@example.test")
+
+    resolved = resolve_or_provision(storage, _claims(), profile_provider=provider)
+
+    assert calls == 0
+    assert resolved.user is existing
+    assert storage.write_calls == 0
+
+
+def test_miss_with_profile_provisions_from_profile_values() -> None:
+    storage = StubStorage()
+    resolved = resolve_or_provision(
+        storage,
+        _claims(email="placeholder@cognito.invalid"),
+        now=_NOW,
+        ids=_IDS,
+        profile_provider=lambda: _profile(),
+    )
+
+    assert len(storage.provision_calls) == 1
+    created_user = storage.provision_calls[0]["user"]
+    assert isinstance(created_user, User)
+    assert created_user.email == "verified@example.test"
+    assert created_user.display_name == "Verified Person"
+    assert resolved.user.email == "verified@example.test"
+
+
+def test_profile_gate_failure_raises_before_any_provision() -> None:
+    """A profile failing the gate is a 401-class rejection with zero writes:
+    the batch is never built and ``provision_user`` is never invoked."""
+    storage = StubStorage()
+    with pytest.raises(TokenValidationError, match="email is not verified"):
+        resolve_or_provision(
+            storage,
+            _claims(),
+            now=_NOW,
+            ids=_IDS,
+            profile_provider=lambda: _profile(email_verified=False),
+        )
+    assert storage.provision_calls == []
+    assert storage.write_calls == 0
 
 
 # ---------------------------------------------------------------------------

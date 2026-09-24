@@ -57,10 +57,11 @@ mapping (401/403/409/503) is task 5's job in ``app/api``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile, require_provisioning_profile
 from app.models.audit_event import AuditEvent
 from app.models.authorization_context import AuthorizationContext
 from app.models.enums import (
@@ -211,12 +212,18 @@ def build_provisioning_batch(
     claims: CognitoClaims,
     now: datetime,
     ids: ProvisioningIds,
+    *,
+    profile: CognitoProfile | None = None,
 ) -> ProvisioningBatch:
     """Build the atomic first-login batch — **pure** (no clock, no entropy).
 
     Values are pinned by breakdown decisions 5—8: display name is the
-    ``username`` claim when non-empty else ``sub`` (the verifier normalizes
-    empty/absent to ``None``); the default workspace is
+    profile's ``display_name`` when a profile is present, else the
+    ``username`` claim when non-empty, else ``sub`` (the verifier normalizes
+    empty/absent to ``None``); ``User.email`` comes from the verified
+    ``profile.email`` when present, falling back to the claims email when
+    ``profile`` is ``None`` (the pre-Phase-11 behavior, removed by a later
+    task). The default workspace is
     ``"{display_name}'s Workspace"`` with the unique-by-construction slug
     ``personal-{user_id}`` (decision 6 — never derived from email); all five
     entities and three audits share the single injected ``now``; audit
@@ -224,11 +231,13 @@ def build_provisioning_batch(
     / ``{"role": "owner"}`` with targets and self-provisioning actor pinned
     per decision 8; event order is the spec §6 creation order.
     """
-    display_name = claims.username or claims.sub
+    display_name = (
+        (profile.display_name if profile is not None else None) or claims.username or claims.sub
+    )
     user = User(
         id=ids.user_id,
         display_name=display_name,
-        email=claims.email,
+        email=profile.email if profile is not None else claims.email,
         status=UserStatus.ACTIVE,
         created_at=now,
         updated_at=now,
@@ -308,6 +317,7 @@ def resolve_or_provision(
     *,
     now: datetime | None = None,
     ids: ProvisioningIds | None = None,
+    profile_provider: Callable[[], CognitoProfile] | None = None,
 ) -> ResolvedIdentity:
     """Resolve ``claims`` to an active user + §10 context, provisioning on first sight.
 
@@ -316,6 +326,14 @@ def resolve_or_provision(
     re-read). ``now``/``ids`` are injectable for deterministic tests and
     default to one clock read and one ID mint per request (decision 5).
 
+    ``profile_provider`` (Phase 11) is invoked **only** on the identity-tuple
+    miss path: the hit path performs zero profile work and never overwrites
+    the stored user's email. When present, its profile is gated through
+    :func:`~app.auth.cognito.require_provisioning_profile` **before** any
+    storage write, so a bad profile raises :class:`TokenValidationError`
+    (401-mapped) with the store untouched. ``None`` keeps today's
+    claims-only behavior (placeholder removal is a later task).
+
     Raises:
         DisabledUserError: the resolved user is not ``active`` (no mutation).
         ProvisioningConflictError: the race re-read found no identity — a
@@ -323,11 +341,14 @@ def resolve_or_provision(
         NoActiveOrganizationError: the user has no usable organization
             (unreachable right after provisioning; reachable once Phase 04
             can disable orgs).
+        TokenValidationError: the provisioning profile failed the gate.
     """
     try:
         user = _lookup_external_identity(storage, claims)
     except EntityNotFoundError:
-        user = _provision_or_converge(storage, claims, now=now, ids=ids)
+        user = _provision_or_converge(
+            storage, claims, now=now, ids=ids, profile_provider=profile_provider
+        )
     if user.status is not UserStatus.ACTIVE:
         raise DisabledUserError()
     context = build_user_context(storage, user)
@@ -340,6 +361,7 @@ def _provision_or_converge(
     *,
     now: datetime | None,
     ids: ProvisioningIds | None,
+    profile_provider: Callable[[], CognitoProfile] | None = None,
 ) -> User:
     """Run the single atomic batch, converging on the race winner if there was one.
 
@@ -349,11 +371,19 @@ def _provision_or_converge(
     so after a successful re-read it is consulted only to cross-check the
     winner — a disagreement means storage told us two different users and is
     refused as a conflict rather than silently trusted.
+
+    The profile gate runs before the batch is built, so a gate failure
+    leaves zero storage mutation (the no-mutation rule extends to bad
+    provider profiles).
     """
+    profile: CognitoProfile | None = None
+    if profile_provider is not None:
+        profile = require_provisioning_profile(profile_provider(), token_sub=claims.sub)
     batch = build_provisioning_batch(
         claims,
         now if now is not None else utc_now(),
         ids if ids is not None else new_provisioning_ids(),
+        profile=profile,
     )
     try:
         stored = storage.provision_user(

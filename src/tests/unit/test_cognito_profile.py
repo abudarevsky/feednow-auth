@@ -1,7 +1,8 @@
 """Unit tests for the Phase 11 profile seam added to ``app.auth.cognito``.
 
-Covers the frozen :class:`CognitoProfile` value object and the narrow
-:class:`CognitoUserInfoClient` per the Phase 11 breakdown task-2 rules:
+Covers the frozen :class:`CognitoProfile` value object, the provisioning
+gate :func:`require_provisioning_profile` (task-1 rules), and the narrow
+:class:`CognitoUserInfoClient` (task-2 rules):
 
 - constructor configuration: absolute HTTPS only, no query/fragment,
   positive timeout;
@@ -37,6 +38,7 @@ from app.auth.cognito import (
     CognitoUserInfoClient,
     ProfileSource,
     _RejectRedirectHandler,
+    require_provisioning_profile,
 )
 from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 
@@ -352,3 +354,93 @@ def test_redirect_handler_declines_every_redirect() -> None:
             request, None, code, "moved", None, "https://evil.example/redirect"
         )
         assert declined is None
+
+
+# -- provisioning-profile gate (task-1 rules) ------------------------------------------------
+
+
+def _gate_profile(
+    *,
+    sub: Any = SUBJECT,
+    email: Any = "verified@example.com",
+    email_verified: Any = True,
+    display_name: Any = "Verified Person",
+) -> CognitoProfile:
+    return CognitoProfile(
+        sub=sub,
+        email=email,
+        email_verified=email_verified,
+        display_name=display_name,
+    )
+
+
+def test_gate_accepts_valid_profile_and_returns_it_unchanged() -> None:
+    profile = _gate_profile()
+    assert require_provisioning_profile(profile, token_sub=SUBJECT) is profile
+    assert (
+        require_provisioning_profile(
+            _gate_profile(display_name=None), token_sub=SUBJECT
+        ).display_name
+        is None
+    )
+
+
+@pytest.mark.parametrize("sub", ["", 123, "x" * 256], ids=["empty", "non-string", "oversized"])
+def test_gate_rejects_invalid_sub(sub: Any) -> None:
+    with pytest.raises(TokenValidationError, match="sub claim is invalid"):
+        require_provisioning_profile(_gate_profile(sub=sub), token_sub=SUBJECT)
+
+
+def test_gate_rejects_subject_mismatch() -> None:
+    with pytest.raises(TokenValidationError, match="subject does not match"):
+        require_provisioning_profile(_gate_profile(sub="someone-else"), token_sub=SUBJECT)
+
+
+def test_gate_requires_email_present() -> None:
+    with pytest.raises(TokenValidationError, match="missing the email claim"):
+        require_provisioning_profile(_gate_profile(email=None), token_sub=SUBJECT)
+
+
+@pytest.mark.parametrize("email", ["", 123, "x" * 321], ids=["empty", "non-string", "oversized"])
+def test_gate_rejects_invalid_email(email: Any) -> None:
+    with pytest.raises(TokenValidationError, match="email claim is invalid"):
+        require_provisioning_profile(_gate_profile(email=email), token_sub=SUBJECT)
+
+
+@pytest.mark.parametrize("verified", [1, "true", None], ids=["int-true", "string", "null"])
+def test_gate_rejects_non_boolean_email_verified(verified: Any) -> None:
+    with pytest.raises(TokenValidationError, match="email_verified claim is invalid"):
+        require_provisioning_profile(_gate_profile(email_verified=verified), token_sub=SUBJECT)
+
+
+def test_gate_rejects_unverified_email() -> None:
+    with pytest.raises(TokenValidationError, match="email is not verified"):
+        require_provisioning_profile(_gate_profile(email_verified=False), token_sub=SUBJECT)
+
+
+@pytest.mark.parametrize(
+    "display_name", ["", 123, "x" * 256], ids=["empty", "non-string", "oversized"]
+)
+def test_gate_rejects_invalid_display_name(display_name: Any) -> None:
+    with pytest.raises(TokenValidationError, match="display name is invalid"):
+        require_provisioning_profile(_gate_profile(display_name=display_name), token_sub=SUBJECT)
+
+
+def test_gate_reasons_never_carry_email_or_subject_values() -> None:
+    failures: list[Callable[[], Any]] = [
+        lambda: require_provisioning_profile(_gate_profile(sub=""), token_sub=SUBJECT),
+        lambda: require_provisioning_profile(_gate_profile(sub="other"), token_sub=SUBJECT),
+        lambda: require_provisioning_profile(_gate_profile(email=None), token_sub=SUBJECT),
+        lambda: require_provisioning_profile(_gate_profile(email=""), token_sub=SUBJECT),
+        lambda: require_provisioning_profile(
+            _gate_profile(email_verified=False), token_sub=SUBJECT
+        ),
+        lambda: require_provisioning_profile(_gate_profile(display_name=""), token_sub=SUBJECT),
+    ]
+    for call in failures:
+        with pytest.raises(TokenValidationError) as excinfo:
+            call()
+        text = str(excinfo.value)
+        assert SUBJECT not in text
+        assert "other" not in text
+        assert "verified@example.com" not in text

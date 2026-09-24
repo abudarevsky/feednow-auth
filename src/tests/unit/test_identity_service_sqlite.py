@@ -15,7 +15,13 @@ decision. Acceptance mapping:
 - a genuine email collision (different ``sub``, same email) surfaces as
   :class:`~app.services.identity.ProvisioningConflictError` and leaves **no
   partial rows** — the real-storage counterpart of decision 7's stranger-id
-  trap, exercising the adapter's email-fallback resolution.
+  trap, exercising the adapter's email-fallback resolution;
+- Phase 11's verified-profile seam: the miss path provisions from the
+  :class:`~app.auth.cognito.CognitoProfile` (email and display name), the
+  hit path performs zero profile work and never overwrites the stored
+  email, and a profile failing
+  :func:`~app.auth.cognito.require_provisioning_profile` raises
+  ``TokenValidationError`` with **no rows written**.
 """
 
 from __future__ import annotations
@@ -28,7 +34,8 @@ from pathlib import Path
 
 import pytest
 
-from app.auth.cognito import CognitoClaims
+from app.auth.cognito import CognitoClaims, CognitoProfile
+from app.auth.errors import TokenValidationError
 from app.models.enums import (
     IdentityProvider,
     MembershipRole,
@@ -250,3 +257,156 @@ def test_email_collision_conflicts_and_leaves_no_partial_rows(db_path: Path) -> 
         "api_keys": 0,
         "audit_events": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 11: verified-profile seam on the provisioning path
+# ---------------------------------------------------------------------------
+
+
+def _profile(
+    *,
+    sub: str = "cognito-sub-sqlite",
+    email: str | None = "verified@example.test",
+    email_verified: bool = True,
+    display_name: str | None = "Verified Person",
+) -> CognitoProfile:
+    return CognitoProfile(
+        sub=sub,
+        email=email,
+        email_verified=email_verified,
+        display_name=display_name,
+    )
+
+
+def test_first_login_with_profile_stores_profile_email_and_display_name(
+    db_path: Path,
+) -> None:
+    """Miss path with a provider: profile wins for email and display name."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        resolved = resolve_or_provision(
+            storage,
+            _claims(email="placeholder@cognito.invalid", username="Dev"),
+            now=_NOW,
+            profile_provider=lambda: _profile(),
+        )
+    finally:
+        storage.close()
+
+    users = _rows(db_path, "users")
+    assert len(users) == 1
+    assert str(users[0]["id"]) == str(resolved.user.id)
+    assert users[0]["email"] == "verified@example.test"
+    assert users[0]["display_name"] == "Verified Person"
+    organizations = _rows(db_path, "organizations")
+    assert organizations[0]["name"] == "Verified Person's Workspace"
+
+
+def test_profile_display_name_falls_back_to_username_then_sub(db_path: Path) -> None:
+    """Profile display_name None → claims.username; both None → claims.sub."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        resolve_or_provision(
+            storage,
+            _claims(sub="fallback-username", username="Dev"),
+            now=_NOW,
+            profile_provider=lambda: _profile(
+                sub="fallback-username",
+                email="fb-username@example.test",
+                display_name=None,
+            ),
+        )
+        resolve_or_provision(
+            storage,
+            _claims(sub="fallback-sub", username=None),
+            now=_NOW,
+            profile_provider=lambda: _profile(
+                sub="fallback-sub",
+                email="fb-sub@example.test",
+                display_name=None,
+            ),
+        )
+    finally:
+        storage.close()
+
+    users = {row["id"]: row["display_name"] for row in _rows(db_path, "users")}
+    display_names = {
+        row["provider_subject"]: users[row["user_id"]]
+        for row in _rows(db_path, "external_identities")
+    }
+    assert display_names == {"fallback-username": "Dev", "fallback-sub": "fallback-sub"}
+
+
+def test_hit_path_never_calls_profile_provider_and_keeps_stored_email(
+    db_path: Path,
+) -> None:
+    """Second login: zero profile work, stored email untouched (no overwrite)."""
+    storage: Storage = open_sqlite_storage(db_path)
+    calls = 0
+    try:
+        resolve_or_provision(storage, _claims(), now=_NOW, profile_provider=lambda: _profile())
+
+        def counting_provider() -> CognitoProfile:
+            nonlocal calls
+            calls += 1
+            return _profile(email="someone-else@example.test")
+
+        resolve_or_provision(storage, _claims(), now=_NOW, profile_provider=counting_provider)
+    finally:
+        storage.close()
+
+    assert calls == 0
+    users = _rows(db_path, "users")
+    assert len(users) == 1
+    assert users[0]["email"] == "verified@example.test"
+    assert _counts(db_path) == {
+        "users": 1,
+        "external_identities": 1,
+        "organizations": 1,
+        "memberships": 1,
+        "api_keys": 0,
+        "audit_events": 3,
+    }
+
+
+def test_unverified_profile_gate_failure_provisions_nothing(db_path: Path) -> None:
+    """email_verified False fails the gate before provision_user: zero rows."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        before = _counts(db_path)
+        with pytest.raises(TokenValidationError, match="email is not verified"):
+            resolve_or_provision(
+                storage,
+                _claims(),
+                now=_NOW,
+                profile_provider=lambda: _profile(email_verified=False),
+            )
+        assert _counts(db_path) == before  # gate ran before any write
+    finally:
+        storage.close()
+
+
+def test_profile_subject_mismatch_provisions_nothing(db_path: Path) -> None:
+    """A profile for another subject is refused; the email is never interpolated."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        with pytest.raises(TokenValidationError, match="subject does not match") as excinfo:
+            resolve_or_provision(
+                storage,
+                _claims(sub="cognito-sub-sqlite"),
+                now=_NOW,
+                profile_provider=lambda: _profile(sub="someone-else"),
+            )
+        assert "someone-else" not in str(excinfo.value)
+        assert "verified@example.test" not in str(excinfo.value)
+        assert _counts(db_path) == {
+            "users": 0,
+            "external_identities": 0,
+            "organizations": 0,
+            "memberships": 0,
+            "api_keys": 0,
+            "audit_events": 0,
+        }
+    finally:
+        storage.close()
