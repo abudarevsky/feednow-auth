@@ -16,6 +16,11 @@ Covers the task's verify lines:
 5. :class:`SecretsManagerPepper` fetches ``GetSecretValue`` exactly once,
    parses the ``pepper`` JSON field, enforces the ≥ 32-byte floor, and never
    renders the value in ``repr``/``str`` or in any error message.
+6. Phase 11 task 13: the seven session keys are an all-or-nothing gate —
+   fully present mounts ``/oauth/login`` + ``/oauth/callback`` and passes a
+   ``CognitoUserInfoClient`` to the four §14 routers, fully absent keeps the
+   exact pre-phase-11 surface (rollback seam), and a partial or malformed
+   set fails cold start naming only the offending keys.
 
 The deploy modules are loaded with importlib (they live outside the ``app``
 package); ``secrets_pepper`` is registered under its own name first so
@@ -37,12 +42,15 @@ from typing import Any
 
 import boto3
 import pytest
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
 from mangum import Mangum
 
 from app.api.schemas.manifest import ENDPOINTS
+from app.auth.cognito import CognitoUserInfoClient
 from app.auth.pepper import MIN_PEPPER_BYTES, PepperSource, StaticPepper
+from app.auth.session import SessionManager
+from app.auth.token_exchange import CognitoTokenEndpoint
 
 RUNTIME_DIR = Path(__file__).resolve().parents[3] / "deploy" / "aws" / "runtime"
 LAMBDA_REQUIREMENTS = RUNTIME_DIR.parent / "lambda-requirements.txt"
@@ -54,7 +62,7 @@ PEPPER = b"a" * 48
 #: 40 bytes: it must clear the 32-byte floor to be accepted at all.
 MARKED_PEPPER = b"leak-check-marked-pepper-value-40-bytes!!"
 
-#: Every ``FEEDNOW_*`` key the composition root is allowed to read.
+#: Every ``FEEDNOW_*`` core key the composition root is allowed to read.
 CONFIG_KEYS = (
     "FEEDNOW_DYNAMODB_REGION",
     "FEEDNOW_TABLE_PREFIX",
@@ -71,6 +79,24 @@ FAKE_ENV: dict[str, str] = {
     "FEEDNOW_COGNITO_ISSUERS": ISSUER,
     "FEEDNOW_COGNITO_CLIENT_IDS": "devclient1",
     "FEEDNOW_PEPPER_SECRET_ID": "feednow-auth/dev/api-pepper",
+}
+
+#: A fully configured session gate: the deployed surface gains the two
+#: /oauth routes and the four §14 routers receive a user-info client.
+SESSION_ENV: dict[str, str] = {
+    "FEEDNOW_COGNITO_AUTHORIZE_URL": (
+        "https://eu-north-1aaaaaaa.auth.eu-north-1.amazoncognito.com/oauth2/authorize"
+    ),
+    "FEEDNOW_COGNITO_TOKEN_ENDPOINT": (
+        "https://eu-north-1aaaaaaa.auth.eu-north-1.amazoncognito.com/oauth2/token"
+    ),
+    "FEEDNOW_COGNITO_USERINFO_URL": (
+        "https://eu-north-1aaaaaaa.auth.eu-north-1.amazoncognito.com/oauth2/userInfo"
+    ),
+    "FEEDNOW_OAUTH_REDIRECT_URL": "https://api.feednow.test/oauth/callback",
+    "FEEDNOW_ALLOWED_RETURN_ORIGINS": "https://app.feednow.test,https://admin.feednow.test",
+    "FEEDNOW_SESSION_TTL_SECONDS": "86400",
+    "FEEDNOW_COOKIE_SECURE": "true",
 }
 
 SECRET_ID = FAKE_ENV["FEEDNOW_PEPPER_SECRET_ID"]
@@ -92,11 +118,15 @@ runtime_handler = _load_module("feednow_runtime_handler", RUNTIME_DIR / "handler
 SecretsManagerPepper = secrets_pepper.SecretsManagerPepper
 RuntimeConfig = runtime_handler.RuntimeConfig
 
+#: The Phase 11 task-13 session-gate keys (all-or-nothing), pinned to the
+#: composition root so the two can never drift.
+SESSION_KEYS = tuple(runtime_handler.SESSION_ENV_KEYS)
+
 
 @pytest.fixture(autouse=True)
 def _clean_runtime_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Never inherit a developer's shell values for the runtime inputs."""
-    for name in CONFIG_KEYS:
+    for name in (*CONFIG_KEYS, *SESSION_KEYS):
         monkeypatch.delenv(name, raising=False)
     yield
 
@@ -221,6 +251,67 @@ def test_runtime_config_defaults_to_the_process_environment(
     assert RuntimeConfig.from_environ().table_prefix == "feednow-auth-dev-"
 
 
+# --- 3b. Session gate (Phase 11 task 13) --------------------------------------
+
+
+def test_session_gate_is_absent_by_default() -> None:
+    """No session keys: the rollback seam — config carries no session at all."""
+    assert RuntimeConfig.from_environ(FAKE_ENV).session is None
+
+
+def test_session_gate_parses_every_key() -> None:
+    session = RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV}).session
+    assert session is not None
+    assert session.authorize_url == SESSION_ENV["FEEDNOW_COGNITO_AUTHORIZE_URL"]
+    assert session.token_endpoint_url == SESSION_ENV["FEEDNOW_COGNITO_TOKEN_ENDPOINT"]
+    assert session.userinfo_url == SESSION_ENV["FEEDNOW_COGNITO_USERINFO_URL"]
+    assert session.redirect_uri == SESSION_ENV["FEEDNOW_OAUTH_REDIRECT_URL"]
+    assert session.allowed_return_origins == (
+        "https://app.feednow.test",
+        "https://admin.feednow.test",
+    )
+    assert session.session_ttl_seconds == 86400
+    assert session.cookie_secure is True
+
+
+def test_session_gate_accepts_an_insecure_cookie_flag() -> None:
+    environ = {**FAKE_ENV, **SESSION_ENV, "FEEDNOW_COOKIE_SECURE": "False"}
+    session = RuntimeConfig.from_environ(environ).session
+    assert session is not None and session.cookie_secure is False
+
+
+@pytest.mark.parametrize("missing", SESSION_KEYS)
+def test_partial_session_gate_names_only_the_missing_key(missing: str) -> None:
+    environ = {key: value for key, value in {**FAKE_ENV, **SESSION_ENV}.items() if key != missing}
+    with pytest.raises(RuntimeError) as excinfo:
+        RuntimeConfig.from_environ(environ)
+    assert missing in str(excinfo.value)
+    assert "app.feednow.test" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("blank_key", SESSION_KEYS)
+def test_blank_session_value_counts_as_missing_and_fails_the_gate(blank_key: str) -> None:
+    """A present-but-blank key engages the gate and then names the key."""
+    with pytest.raises(RuntimeError) as excinfo:
+        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, blank_key: "  "})
+    assert blank_key in str(excinfo.value)
+
+
+@pytest.mark.parametrize("ttl", ["not-a-number", "86400.5", "0", "-5"])
+def test_session_gate_rejects_a_non_positive_integer_ttl(ttl: str) -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, "FEEDNOW_SESSION_TTL_SECONDS": ttl})
+    assert "FEEDNOW_SESSION_TTL_SECONDS" in str(excinfo.value)
+    assert ttl not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("flag", ["maybe", "1", ""])
+def test_session_gate_rejects_a_non_boolean_cookie_secure(flag: str) -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        RuntimeConfig.from_environ({**FAKE_ENV, **SESSION_ENV, "FEEDNOW_COOKIE_SECURE": flag})
+    assert "FEEDNOW_COOKIE_SECURE" in str(excinfo.value)
+
+
 # --- 4. Composition root ------------------------------------------------------
 
 
@@ -314,6 +405,102 @@ def test_build_app_with_config_injected_never_touches_environ(
     monkeypatch.setattr(os, "environ", guard)  # type: ignore[arg-type]
     _build_with_fakes(config=RuntimeConfig.from_environ(FAKE_ENV), environ=None)
     assert guard.reads == []
+
+
+class _SpyRouterFactory:
+    """Records one ``build_*_router`` invocation and returns an empty router."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> APIRouter:
+        self.calls.append((args, kwargs))
+        return APIRouter()
+
+
+def _spy_routers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _SpyRouterFactory]:
+    """Replace all five router factories in the composition root."""
+    spies = {
+        name: _SpyRouterFactory()
+        for name in (
+            "build_me_router",
+            "build_organizations_router",
+            "build_members_router",
+            "build_api_keys_router",
+            "build_oauth_router",
+        )
+    }
+    for name, spy in spies.items():
+        monkeypatch.setattr(runtime_handler, name, spy)
+    return spies
+
+
+def test_build_app_mounts_the_session_flow_when_the_gate_is_on() -> None:
+    app = _build_with_fakes(environ={**FAKE_ENV, **SESSION_ENV})
+    expected = {(spec.method, spec.path) for spec in ENDPOINTS} | {
+        ("GET", "/health"),
+        ("GET", "/oauth/login"),
+        ("GET", "/oauth/callback"),
+    }
+    assert _mounted_routes(app) == expected
+
+
+def test_build_app_gate_off_keeps_the_pre_phase11_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _spy_routers(monkeypatch)
+    _build_with_fakes()
+    for name in (
+        "build_me_router",
+        "build_organizations_router",
+        "build_members_router",
+        "build_api_keys_router",
+    ):
+        assert len(spies[name].calls) == 1
+        assert spies[name].calls[0][1]["profile_source"] is None
+    assert spies["build_oauth_router"].calls == []
+
+
+def test_build_app_gate_on_wires_userinfo_token_endpoint_and_session_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _spy_routers(monkeypatch)
+    _build_with_fakes(environ={**FAKE_ENV, **SESSION_ENV})
+    for name in (
+        "build_me_router",
+        "build_organizations_router",
+        "build_members_router",
+        "build_api_keys_router",
+    ):
+        assert len(spies[name].calls) == 1
+        source = spies[name].calls[0][1]["profile_source"]
+        assert isinstance(source, CognitoUserInfoClient)
+        assert source.userinfo_url == SESSION_ENV["FEEDNOW_COGNITO_USERINFO_URL"]
+    oauth_calls = spies["build_oauth_router"].calls
+    assert len(oauth_calls) == 1
+    args, kwargs = oauth_calls[0]
+    token_endpoint = args[2]
+    assert isinstance(token_endpoint, CognitoTokenEndpoint)
+    assert token_endpoint.token_endpoint_url == SESSION_ENV["FEEDNOW_COGNITO_TOKEN_ENDPOINT"]
+    assert token_endpoint.client_id == "devclient1"
+    session_manager = args[4]
+    assert isinstance(session_manager, SessionManager)
+    assert session_manager.ttl_seconds == 86400
+    assert kwargs == {
+        "authorize_url": SESSION_ENV["FEEDNOW_COGNITO_AUTHORIZE_URL"],
+        "client_id": "devclient1",
+        "redirect_uri": SESSION_ENV["FEEDNOW_OAUTH_REDIRECT_URL"],
+        # First allowed origin is the documented default landing target.
+        "landing_url": "https://app.feednow.test",
+        "allowed_return_origins": ("https://app.feednow.test", "https://admin.feednow.test"),
+        "cookie_secure": True,
+    }
+
+
+def test_build_app_reads_the_pepper_once_with_the_gate_on() -> None:
+    pepper = _CountingPepper()
+    _build_with_fakes(pepper_factory=lambda _config: pepper, environ={**FAKE_ENV, **SESSION_ENV})
+    assert pepper.calls == 1
 
 
 def test_default_verifier_factory_builds_a_cognito_verifier() -> None:
