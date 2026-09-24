@@ -21,6 +21,12 @@ actor — the same vocabulary/metadata/no-secrets sweep must hold when both
 actor kinds write to one database (the other two new denial reasons,
 ``organization_mismatch`` and ``insufficient_scope``, need the scope probe
 and are pinned by ``test_api_key_secrecy.py`` and ``test_api_key_auth_matrix.py``).
+
+The Phase 11 extension (task 12) drives the full ``/oauth/login`` →
+``/oauth/callback`` journey and re-runs the sweep: provisioning audits stay
+in vocabulary, and the authorization code, login state, PKCE verifier, and
+access token appear in no audit row (the login state is consumed and the
+session row carries only opaque ids).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from fastapi import APIRouter
@@ -41,11 +48,13 @@ from support.cognito import JwksTestServer, TestKey, generate_test_key, sign_tok
 from app.api.keys import build_api_keys_router
 from app.api.me import build_me_router
 from app.api.members import build_members_router
+from app.api.oauth import build_oauth_router
 from app.api.organizations import build_organizations_router
 from app.auth.cognito import CognitoAccessTokenVerifier, CognitoProfile
 from app.auth.credentials import parse_literal
 from app.auth.jwks import CognitoJwksSource
 from app.auth.pepper import StaticPepper
+from app.auth.session import SessionManager
 from app.main import create_app
 from app.models.enums import (
     IdentityProvider,
@@ -513,3 +522,120 @@ def test_mixed_actor_battery_stays_in_vocabulary_and_secret_free(
     assert "@" not in serialized
     assert "bearer" not in serialized.lower()
     assert "eyJ" not in serialized
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 task-12 extension: the OAuth session journey audits the same way
+# ---------------------------------------------------------------------------
+
+_FLOW_CODE = "oauth-flow-code-NEVER-AUDIT"
+
+
+class _FlowTokenEndpoint:
+    """Token-exchange double: answers with the one canned signed token."""
+
+    def __init__(self) -> None:
+        self.token: str = ""
+
+    def exchange(self, code: str, redirect_uri: str, code_verifier: str) -> str:
+        assert code and redirect_uri and code_verifier
+        return self.token
+
+
+def test_oauth_session_flow_audits_stay_in_vocabulary_and_secret_free(
+    tmp_path: Path, key: TestKey
+) -> None:
+    """The login/callback provisioning path writes exactly the §6 creation
+    trio — and no flow material (code, state, verifier, token, email) ever
+    reaches an audit row, the login-state table, or the session row."""
+    db_path = tmp_path / "hygiene_oauth.sqlite"
+    with JwksTestServer({"pool-a": [key]}) as server:
+        issuer = server.issuer("pool-a")
+        verifier = CognitoAccessTokenVerifier(
+            CognitoJwksSource([issuer]),
+            allowed_issuers=[issuer],
+            allowed_client_ids=[_ALLOWED_CLIENT],
+        )
+        storage = SQLiteStorage(db_path)
+        profile_source = FakeProfileSource()
+        profile_source.emails[_SENTINEL_SUB] = _SENTINEL_EMAIL
+        token_endpoint = _FlowTokenEndpoint()
+        now = int(time.time())
+        token_endpoint.token = sign_token(
+            {
+                "sub": _SENTINEL_SUB,
+                "username": "flow-user",
+                "client_id": _ALLOWED_CLIENT,
+                "iss": issuer,
+                "token_use": "access",
+                "exp": now + 3600,
+                "iat": now,
+            },
+            kid=key.kid,
+            key=key,
+        )
+        router = build_oauth_router(
+            storage,
+            verifier,
+            token_endpoint,
+            profile_source,
+            SessionManager(storage),
+            authorize_url="https://auth.example.test/oauth2/authorize",
+            client_id=_ALLOWED_CLIENT,
+            redirect_uri="https://app.example.test/oauth/callback",
+            landing_url="https://app.example.test/home",
+            allowed_return_origins=("https://app.example.test",),
+        )
+        client = TestClient(create_app(routers=[router]), raise_server_exceptions=False)
+
+        login = client.get("/oauth/login?next=/home", follow_redirects=False)
+        assert login.status_code == 302
+        state = parse_qs(urlsplit(login.headers["location"]).query)["state"][0]
+        callback = client.get(
+            f"/oauth/callback?code={_FLOW_CODE}&state={state}", follow_redirects=False
+        )
+        assert callback.status_code == 302
+        assert callback.headers["location"] == "/home"
+        session_value = callback.headers["set-cookie"].split(";")[0].split("=", 1)[1]
+        storage.close()
+
+    rows = _all_audit_rows(db_path)
+    actions = {row["action"] for row in rows}
+    assert actions <= _SPEC_16_ACTIONS, f"off-vocabulary actions: {actions - _SPEC_16_ACTIONS}"
+    assert actions == {"user.created", "organization.created", "membership.created"}
+    for row in rows:
+        metadata = json.loads(row["metadata"])
+        assert set(metadata) == _PINNED_METADATA_KEYS[row["action"]], row
+        assert row["actor_type"] == "user"
+        assert str(row["actor_id"]).startswith("usr_")
+    serialized = json.dumps(rows)
+    # No secret/PII/flow material in any audit row (AGENTS.md).
+    for material in (
+        _SENTINEL_SUB,
+        _SENTINEL_EMAIL,
+        token_endpoint.token,
+        _FLOW_CODE,
+        state,
+        session_value,
+    ):
+        assert material not in serialized
+    assert "@" not in serialized
+    assert "bearer" not in serialized.lower()
+    assert "eyJ" not in serialized
+    assert _ALLOWED_CLIENT not in serialized
+
+    # The login state was consumed; the session row carries only opaque ids.
+    conn = sqlite3.connect(db_path)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM oauth_login_states").fetchone()[0] == 0
+        session_rows = conn.execute("SELECT session_id, user_id FROM app_sessions").fetchall()
+    finally:
+        conn.close()
+    assert len(session_rows) == 1
+    assert session_rows[0][0] == session_value
+    assert str(session_rows[0][1]).startswith("usr_")
+    assert session_rows[0][0] == session_value
+    assert session_rows[0][1].startswith("usr_")
+    session_blob = json.dumps([list(row) for row in session_rows])
+    for material in (_SENTINEL_EMAIL, token_endpoint.token, _FLOW_CODE, state):
+        assert material not in session_blob
