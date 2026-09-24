@@ -23,11 +23,11 @@ breakdown pins it:
   repeated 20 times for stability.
 
 Second case (sequential, not a race): two distinct ``sub``s deliberately
-sharing one email — the collision *is* the subject under test here, so the
-email is named explicitly (``_COLLISION_EMAIL``) instead of being derived.
-The first provisions, the second gets
-:class:`~app.services.identity.ProvisioningConflictError`, and the adapter's
-rollback leaves **no partial rows**.
+sharing one email — the shared address *is* the subject under test here, so
+the email is named explicitly (``_COLLISION_EMAIL``) instead of being
+derived. Phase 12 made equal emails valid separate users: both logins
+provision in full (two users, two personal orgs, identity tuple as the only
+convergence key) and neither batch leaves **partial rows**.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from app.auth.cognito import CognitoClaims, CognitoProfile
 from app.models.enums import IdentityProvider
 from app.models.user import User
 from app.services.identity import (
-    ProvisioningConflictError,
     ResolvedIdentity,
     resolve_or_provision,
 )
@@ -54,10 +53,11 @@ _REPEATS = 20
 _THREADS = 8
 _SUB = "raced-sub-0123456789"
 
-#: The email two *different* subjects collide on in the collision case. This
-#: is the fixture under test, not a placeholder: the provisioning path takes
-#: the batch email from the verified profile only, and the shared value is
-#: what drives the ``users.email`` UNIQUE violation.
+#: The email two *different* subjects share in the coexistence case (Phase 12:
+#: equal emails are valid separate users). This is the fixture under test, not
+#: a placeholder: the provisioning path takes the batch email from the
+#: verified profile only, and the shared value is what the old ``users.email``
+#: UNIQUE used to reject — now it must simply persist.
 _COLLISION_EMAIL = "collision@example.test"
 
 #: Domain of every derived verified email, so per-attempt variants can stay
@@ -244,10 +244,12 @@ def test_concurrent_race_converges_regardless_of_batch_email(tmp_path: Path) -> 
     assert winner.email in {email_for(attempt) for attempt in range(_THREADS)}
 
 
-def test_distinct_subs_same_email_conflict_without_partial_rows(tmp_path: Path) -> None:
-    """Not a race: a genuine email collision. First provisions, second gets
-    ProvisioningConflictError (decision 7), and nothing partial is left."""
-    path = tmp_path / "collision.sqlite"
+def test_distinct_subs_same_email_coexist_without_partial_rows(tmp_path: Path) -> None:
+    """Not a race: two distinct ``sub``s sharing one email. Phase 12 flipped
+    this from a conflict to coexistence — both logins provision in full
+    (own user, own personal org, owner membership, own audits), the identity
+    tuple is the only convergence key, and nothing partial is left."""
+    path = tmp_path / "coexistence.sqlite"
     storage = open_sqlite_storage(path)
     try:
         first = resolve_or_provision(
@@ -255,37 +257,46 @@ def test_distinct_subs_same_email_conflict_without_partial_rows(tmp_path: Path) 
             _claims(sub="sub-owner"),
             profile_provider=lambda: _profile("sub-owner", email=_COLLISION_EMAIL),
         )
-        with pytest.raises(ProvisioningConflictError):
-            resolve_or_provision(
-                storage,
-                _claims(sub="sub-stranger"),
-                profile_provider=lambda: _profile("sub-stranger", email=_COLLISION_EMAIL),
-            )
+        second = resolve_or_provision(
+            storage,
+            _claims(sub="sub-stranger"),
+            profile_provider=lambda: _profile("sub-stranger", email=_COLLISION_EMAIL),
+        )
     finally:
         storage.close()
 
+    assert first.user.id != second.user.id
+    assert first.context.organization_id != second.context.organization_id
     assert _table_counts(path) == {
-        "users": 1,  # only the first user; the stranger's batch rolled back fully
-        "external_identities": 1,
-        "organizations": 1,
-        "memberships": 1,
+        "users": 2,  # both batches committed in full — no partial rows
+        "external_identities": 2,
+        "organizations": 2,  # each user owns its own personal org
+        "memberships": 2,
         "api_keys": 0,
-        "audit_events": 3,
+        "audit_events": 6,
     }
     storage2 = open_sqlite_storage(path)
     try:
-        stored = storage2.get_user_by_external_identity(
+        # Each subject resolves to its own user, never merged (invariant 4).
+        stored_owner = storage2.get_user_by_external_identity(
             provider=IdentityProvider.COGNITO,
             provider_subject="sub-owner",
             provider_tenant=None,
         )
-        assert str(stored.id) == str(first.user.id)
-        assert stored.email == _COLLISION_EMAIL  # the batch email is the profile's
-        with pytest.raises(EntityNotFoundError):
-            storage2.get_user_by_external_identity(
-                provider=IdentityProvider.COGNITO,
-                provider_subject="sub-stranger",
-                provider_tenant=None,
-            )
+        assert str(stored_owner.id) == str(first.user.id)
+        assert stored_owner.email == _COLLISION_EMAIL  # the batch email is the profile's
+        stored_stranger = storage2.get_user_by_external_identity(
+            provider=IdentityProvider.COGNITO,
+            provider_subject="sub-stranger",
+            provider_tenant=None,
+        )
+        assert str(stored_stranger.id) == str(second.user.id)
+        assert stored_stranger.email == _COLLISION_EMAIL
+        # The shared address is an exact lookup returning both users;
+        # sequential provisioning makes the (created_at, id) order stable.
+        assert {user.id for user in storage2.list_users_by_email(_COLLISION_EMAIL)} == {
+            first.user.id,
+            second.user.id,
+        }
     finally:
         storage2.close()

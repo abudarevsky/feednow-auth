@@ -7,9 +7,10 @@ Covers the task's verify lines:
 2. ``ProvisionedUser`` is frozen and is a pure caller-echo bundle.
 3. A minimal stub class satisfies ``isinstance`` under ``runtime_checkable``;
    a partial stub does not.
-4. The protocol exposes exactly the 23 §11/§12 + Phase 11 methods (18 Phase 02
-   operations plus the Phase 04 ``provision_organization`` compound plus the
-   four additive Phase 11 login-state/session operations), all synchronous,
+4. The protocol exposes exactly the 24 §11/§12 + Phase 11/12 methods (18
+   Phase 02 operations plus the Phase 04 ``provision_organization`` compound
+   plus the four additive Phase 11 login-state/session operations plus the
+   additive Phase 12 ``list_users_by_email`` exact-lookup), all synchronous,
    with signatures that reference only domain/typing types (no driver types).
 5. Subprocess-isolated import check (fresh interpreter, Phase 01 task-6
    precedent): importing ``app.storage.contract`` and ``app.storage`` pulls in
@@ -63,15 +64,17 @@ from app.models.ids import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 
-#: The 23 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
+#: The 24 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
 #: ``provision_user`` compound), the Phase 04 ``provision_organization``
 #: compound (breakdown decision 2 — an explicit addition to the current
-#: phase's contract), and the four additive Phase 11 login-state/session
-#: operations.
+#: phase's contract), the four additive Phase 11 login-state/session
+#: operations, and the additive Phase 12 ``list_users_by_email`` exact
+#: lookup.
 CONTRACT_METHODS = frozenset(
     {
         "create_user",
         "get_user",
+        "list_users_by_email",
         "create_external_identity",
         "get_user_by_external_identity",
         "create_organization",
@@ -452,14 +455,14 @@ def test_plain_object_does_not_satisfy_isinstance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Protocol surface: 23 methods, sync, domain-only types
+# 4. Protocol surface: 24 methods, sync, domain-only types
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_exposes_exactly_the_23_contract_methods() -> None:
+def test_protocol_exposes_exactly_the_24_contract_methods() -> None:
     members = typing.get_protocol_members(contract.Storage)
     assert members == set(CONTRACT_METHODS)
-    assert len(members) == 23
+    assert len(members) == 24
 
 
 @pytest.mark.parametrize("name", sorted(CONTRACT_METHODS))

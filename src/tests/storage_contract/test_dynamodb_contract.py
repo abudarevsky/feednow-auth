@@ -5,7 +5,7 @@ the second adapter (Phase 06, AC 2): it provides the ``storage`` fixture
 required by ``suite.py``'s fixture contract — an initialized adapter with all
 tables empty, **per test** — by creating the seven adapter tables under a
 fresh random prefix (harness decision 8) and deleting them on teardown, and
-it re-exports every suite case unchanged so pytest collects the same 60
+it re-exports every suite case unchanged so pytest collects the same 73
 adapter-neutral behaviors that SQLite runs. ``suite.py`` is consumed as a
 frozen oracle: if a case fails here, the **adapter** changes (the entry-local
 hash pin below proves the bytes never drift).
@@ -46,12 +46,15 @@ pytestmark = pytest.mark.dynamodb_local
 
 SUITE_PATH: Path = Path(__file__).resolve().parent / "suite.py"
 
-#: sha256 of ``suite.py``'s exact bytes at the Phase 11 task-6/7 baseline
-#: (when the four login-state/session conformance cases were added; the
-#: Phase 06 baseline was ``025c879c...`` before that additive edit). AC 2:
-#: any drift here means the shared suite was edited to fit DynamoDB instead
-#: of the adapter changing — this pin fails loudly first.
-SUITE_SHA256_AT_BASELINE = "f32efc6e9e28312a4ec836a1978291cb9a13ffd425bca4d26ce014e8fe86122f"
+#: sha256 of ``suite.py``'s exact bytes at the Phase 12 task-2 baseline
+#: (email-uniqueness flip: the duplicate-email and email-fallback cases were
+#: replaced by coexistence/lookup cases; the Phase 11 task-6/7 baseline was
+#: ``f32efc6e...`` before that edit, and the Phase 06 one ``025c879c...``
+#: before it). The gated DynamoDB Local run is knowingly red on the flipped
+#: cases until Phase 12 task 4 lands the adapter side. AC 2: any drift here
+#: means the shared suite was edited to fit DynamoDB instead of the adapter
+#: changing — this pin fails loudly first.
+SUITE_SHA256_AT_BASELINE = "14b1e04b9dac475d00436686658beef140b5bc232a2b0264864da763ad8ca300"
 
 
 @pytest.fixture

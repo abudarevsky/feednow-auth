@@ -8,8 +8,10 @@ deliberately no behavior tests here.
 
 Verify lines covered:
 
-1. Schema init is idempotent on the same file (plus the five unique indexes
-   and ``user_version`` stamp; an unknown stamped version is rejected).
+1. Schema init is idempotent on the same file (plus the four unique indexes
+   and ``user_version`` stamp; an unknown stamped version is rejected, and
+   the Phase 12 ``1 → 2`` migration brings a hand-built v1 file forward with
+   data retained and the email constraint retired).
 2. FK enforcement is live even after prior DML on the connection — a raw
    FK-violating insert raises, proving the PRAGMA was not no-oped.
 3. Timestamp round-trip preserves microseconds and zero-µs values stay
@@ -30,6 +32,7 @@ import inspect
 import sqlite3
 import threading
 from datetime import UTC, datetime, timedelta, timezone
+from pathlib import Path
 from typing import get_protocol_members
 
 import pytest
@@ -52,6 +55,7 @@ from app.models import (
     User,
     UserStatus,
 )
+from app.models.enums import ApplicationRole
 from app.models.ids import (
     ApiKeyId,
     AuditEventId,
@@ -325,7 +329,7 @@ def test_schema_init_is_idempotent_on_the_same_file(tmp_path) -> None:  # type: 
     second.close()
 
 
-def test_schema_creates_eight_tables_and_five_unique_indexes(storage: SQLiteStorage) -> None:
+def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStorage) -> None:
     conn = storage._connection()
     objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
     names = {(row["type"], row["name"]) for row in objects}
@@ -342,7 +346,12 @@ def test_schema_creates_eight_tables_and_five_unique_indexes(storage: SQLiteStor
         assert ("table", table) in names, table
     for index in sqlite_adapter.UNIQUE_INDEX_NAMES:
         assert ("index", index) in names, index
-    assert len(sqlite_adapter.UNIQUE_INDEX_NAMES) == 5
+    # Phase 12: users_email_unique is gone (email is non-unique); the
+    # remaining four unique indexes still exist, and the plain
+    # users_email_lookup index backs the exact-lookup read.
+    assert len(sqlite_adapter.UNIQUE_INDEX_NAMES) == 4
+    assert ("index", "users_email_lookup") in names
+    assert ("index", "users_email_unique") not in names
     assert len(sqlite_adapter.TABLE_NAMES) == 8
 
 
@@ -398,6 +407,203 @@ def test_unknown_stamped_schema_version_is_rejected(tmp_path) -> None:  # type: 
     path = tmp_path / "future.sqlite"
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA user_version = 42")
+    conn.commit()
+    conn.close()
+    with pytest.raises(contract.StorageError, match="unsupported schema version"):
+        SQLiteStorage(path)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Phase 12: the ordered 1→2 migration of a hand-built v1 file
+# ---------------------------------------------------------------------------
+
+#: The exact pre-Phase-12 (v1) base DDL: six tables, no ``application_role``
+#: column, and the unique email index. Pinned here as a test fixture (not
+#: imported from the adapter, which now carries the v2 shape) so the
+#: migration is proven against the real historical file layout.
+_V1_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id           TEXT PRIMARY KEY,
+        display_name TEXT NOT NULL,
+        email        TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)",
+    """
+    CREATE TABLE IF NOT EXISTS external_identities (
+        id               TEXT PRIMARY KEY,
+        user_id          TEXT NOT NULL REFERENCES users (id),
+        provider         TEXT NOT NULL,
+        provider_subject TEXT NOT NULL,
+        provider_tenant  TEXT NOT NULL,
+        created_at       TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS external_identities_tuple_unique "
+    "ON external_identities (provider, provider_subject, provider_tenant)",
+    """
+    CREATE TABLE IF NOT EXISTS organizations (
+        id         TEXT PRIMARY KEY,
+        name       TEXT NOT NULL,
+        slug       TEXT NOT NULL,
+        type       TEXT NOT NULL,
+        status     TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS organizations_slug_unique ON organizations (slug)",
+    """
+    CREATE TABLE IF NOT EXISTS memberships (
+        id              TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations (id),
+        user_id         TEXT NOT NULL REFERENCES users (id),
+        role            TEXT NOT NULL,
+        status          TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS memberships_pair_unique "
+    "ON memberships (organization_id, user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS api_keys (
+        id                 TEXT PRIMARY KEY,
+        organization_id    TEXT NOT NULL REFERENCES organizations (id),
+        created_by_user_id TEXT NOT NULL REFERENCES users (id),
+        name               TEXT NOT NULL,
+        key_id             TEXT NOT NULL,
+        key_prefix         TEXT NOT NULL,
+        secret_hash        TEXT NOT NULL,
+        environment        TEXT NOT NULL,
+        scopes             TEXT NOT NULL,
+        status             TEXT NOT NULL,
+        created_at         TEXT NOT NULL,
+        last_used_at       TEXT,
+        expires_at         TEXT,
+        revoked_at         TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS api_keys_key_id_unique ON api_keys (key_id)",
+    """
+    CREATE TABLE IF NOT EXISTS audit_events (
+        id              TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations (id),
+        actor_type      TEXT NOT NULL,
+        actor_id        TEXT NOT NULL,
+        action          TEXT NOT NULL,
+        target_type     TEXT,
+        target_id       TEXT,
+        metadata        TEXT NOT NULL,
+        created_at      TEXT NOT NULL
+    )
+    """,
+)
+
+_V1_SEED_USERS = (
+    ("usr_test_0001", "first@example.test"),
+    ("usr_test_0002", "second@example.test"),
+)
+
+
+def _build_v1_file(path: Path, users: tuple[tuple[str, str], ...]) -> None:
+    """Hand-build a stamped v1 database (old DDL, unique email index, seed
+    rows written through the v1 column list — no ``application_role``)."""
+    conn = sqlite3.connect(path)
+    for statement in _V1_SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    for user_id, email in users:
+        conn.execute(
+            "INSERT INTO users (id, display_name, email, status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                f"Seeded {user_id}",
+                email,
+                "active",
+                encode_timestamp(_T0),
+                encode_timestamp(_T0),
+            ),
+        )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+
+def test_v1_file_migrates_to_v2_at_open_backfilling_roles(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "v1-migration.sqlite"
+    _build_v1_file(path, _V1_SEED_USERS)
+
+    storage = SQLiteStorage(path)
+    try:
+        conn = storage._connection()
+        # Reopened at the current stamp.
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
+        # Roles backfilled to 'user' by the ALTER TABLE column default...
+        assert [row["application_role"] for row in rows] == ["user", "user"]
+        # ...and the pre-existing data survived the ALTER/DROP/CREATE intact.
+        assert [(row["id"], row["email"], row["display_name"]) for row in rows] == [
+            ("usr_test_0001", "first@example.test", "Seeded usr_test_0001"),
+            ("usr_test_0002", "second@example.test", "Seeded usr_test_0002"),
+        ]
+        assert [row["created_at"] for row in rows] == [encode_timestamp(_T0)] * 2
+        # Index swap: the non-unique lookup exists, the unique constraint is gone.
+        indexes = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "users_email_lookup" in indexes
+        assert "users_email_unique" not in indexes
+        # Migrated rows read back as domain objects with the default role,
+        # and the flipped constraint holds on a migrated file: a second user
+        # may share an address.
+        assert storage.get_user(UserId("usr_test_0001")).application_role is ApplicationRole.USER
+        storage.create_user(
+            User(
+                id=UserId("usr_test_0003"),
+                display_name="Shadow",
+                email="first@example.test",
+                status=UserStatus.ACTIVE,
+                created_at=_T0,
+                updated_at=_T0,
+            )
+        )
+        assert [user.id for user in storage.list_users_by_email("first@example.test")] == [
+            UserId("usr_test_0001"),
+            UserId("usr_test_0003"),
+        ]
+    finally:
+        storage.close()
+
+    # Second open is a no-op: nothing left to migrate, no error, data kept.
+    reopened = SQLiteStorage(path)
+    try:
+        conn = reopened._connection()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 3
+        indexes = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "users_email_lookup" in indexes
+        assert "users_email_unique" not in indexes
+    finally:
+        reopened.close()
+
+
+@pytest.mark.parametrize("stamped", [3, 7, 42])
+def test_stamps_outside_the_known_set_are_rejected(tmp_path, stamped: int) -> None:  # type: ignore[no-untyped-def]
+    # Only 0 (fresh init), 1 (the single known migration), and 2 (current)
+    # are accepted; anything else still fails loudly, never reinterpreted.
+    path = tmp_path / f"stamp-{stamped}.sqlite"
+    conn = sqlite3.connect(path)
+    for statement in _V1_SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    conn.execute(f"PRAGMA user_version = {stamped}")
     conn.commit()
     conn.close()
     with pytest.raises(contract.StorageError, match="unsupported schema version"):
@@ -718,13 +924,14 @@ def test_closed_instance_is_not_reusable(tmp_path) -> None:  # type: ignore[no-u
 def test_contract_surface_has_no_remaining_stubs() -> None:
     # The task-2 skeleton existed so a forgotten method failed loudly with
     # NotImplementedError; task 7 completed the surface with provision_user,
-    # Phase 04 task 1 added provision_organization, and Phase 11 task 6 added
-    # the four login-state/session operations (all implemented).
+    # Phase 04 task 1 added provision_organization, Phase 11 task 6 added
+    # the four login-state/session operations, and Phase 12 task 2 added
+    # list_users_by_email (all implemented).
     # Definition-of-done tripwire (acceptance: "all contract methods
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 23, members
+    assert len(members) == 24, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

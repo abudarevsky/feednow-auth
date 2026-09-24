@@ -7,11 +7,13 @@ of a batch write (shared-helper encoding: normalized ``''`` tenant,
 fixed-width timestamps, compact metadata JSON), the transaction discipline
 around ``BEGIN IMMEDIATE`` (a failed batch never leaves the thread-local
 connection inside an open transaction and never persists a partial row), the
-provision-scoped race error mapping (the same UNIQUE that stays a plain
-``user_email`` conflict on ``create_user`` maps to
-``DuplicateExternalIdentityError`` only inside ``provision_user``), the
-winner-resolution precedence (identity-tuple read first, users-by-email
-fallback), and the mid-batch non-integrity driver-error path.
+provision-scoped race error mapping (the identity-tuple UNIQUE that stays a
+plain ``external_identity`` conflict on ``create_external_identity`` maps to
+``DuplicateExternalIdentityError`` only inside ``provision_user``; Phase 12
+narrowed this to the identity tuple alone — email is no longer a conflict on
+either path), winner resolution (the identity-tuple read is the sole key;
+the users-by-email fallback is gone), and the mid-batch non-integrity
+driver-error path.
 """
 
 from __future__ import annotations
@@ -199,8 +201,11 @@ def test_provision_batch_stores_rows_exactly_like_standalone_paths(
     # batch path exactly as to create_external_identity.
     assert identity_row["provider_tenant"] == ""
     assert identity_row["created_at"] == "2026-09-12T10:00:00.000000Z"
-    user_row = conn.execute("SELECT created_at, updated_at FROM users").fetchone()
+    user_row = conn.execute("SELECT created_at, updated_at, application_role FROM users").fetchone()
     assert user_row["created_at"] == user_row["updated_at"] == "2026-09-12T10:00:00.000000Z"
+    # Phase 12: the global role is stored as its enum string on the batch
+    # path too (the model default 'user' is what this caller never named).
+    assert user_row["application_role"] == "user"
     audit_rows = conn.execute("SELECT metadata FROM audit_events ORDER BY id").fetchall()
     # Both events landed, metadata through the exact JSON codec (same helper
     # as the standalone append path).
@@ -244,42 +249,51 @@ def test_provision_accepts_explicit_empty_audit_batch(storage: SQLiteStorage) ->
 
 
 # ---------------------------------------------------------------------------
-# 2. Race mapping is provision-scoped: the same users.email UNIQUE is a
-#    plain user_email conflict on create_user and the race error inside
-#    provision_user, with winner resolution precedence pinned.
+# 2. Race mapping is provision-scoped and identity-tuple-only (Phase 12):
+#    the identity-tuple UNIQUE is a plain external_identity conflict on the
+#    standalone path and the race error inside provision_user, winner
+#    resolution reads the identity tuple alone, and a shared email is not a
+#    conflict on either path.
 # ---------------------------------------------------------------------------
 
 
-def test_email_conflict_stays_plain_duplicate_outside_provision(storage: SQLiteStorage) -> None:
+def test_duplicate_email_is_not_a_conflict_on_either_path(storage: SQLiteStorage) -> None:
     first = make_user()
     storage.create_user(first)
-    with pytest.raises(contract.DuplicateEntityError) as excinfo:
-        storage.create_user(make_user(user_id="usr_test_0002", email=first.email))
-    assert excinfo.value.kind is contract.DuplicateEntityKind.USER_EMAIL
-    assert not isinstance(excinfo.value, contract.DuplicateExternalIdentityError)
-    # Inside provision_user the same violation is §6's race (kind pinned to
-    # external_identity), resolved to the winner via the email fallback
-    # (this batch's identity tuple is fresh).
-    with pytest.raises(contract.DuplicateExternalIdentityError) as excinfo:
-        storage.provision_user(
-            **_batch(
-                user=make_user(user_id="usr_test_0002", email=first.email),
-                organization_id="org_test_0002",
-                identity=make_identity(
-                    identity_id="extid_test_0002",
-                    user_id="usr_test_0002",
-                    provider_subject="subject-unique-0002",
-                ),
-            )
+    # Phase 12: email is no longer a uniqueness constraint, so the
+    # standalone path stores a second user with the same address...
+    second = make_user(user_id="usr_test_0002", email=first.email)
+    assert storage.create_user(second) == second
+    # ...and a provisioning batch sharing the address but carrying a fresh
+    # identity tuple commits as a third, independent user (the old race
+    # mapping's email trigger no longer exists).
+    third = make_user(user_id="usr_test_0003", email=first.email)
+    result = storage.provision_user(
+        **_batch(
+            user=third,
+            organization_id="org_test_0002",
+            identity=make_identity(
+                identity_id="extid_test_0002",
+                user_id="usr_test_0003",
+                provider_subject="subject-unique-0002",
+            ),
         )
-    error = excinfo.value
-    assert error.kind is contract.DuplicateEntityKind.EXTERNAL_IDENTITY
-    assert error.existing_user_id == first.id
+    )
+    assert result.user == third
+    assert storage.get_user(third.id) == third
+    # Contract ordering (created_at, id) with the id tiebreaker doing the
+    # work: all three share created_at _T0.
+    assert [user.id for user in storage.list_users_by_email(first.email)] == [
+        first.id,
+        second.id,
+        third.id,
+    ]
 
 
-def test_race_resolution_prefers_identity_tuple_over_email(storage: SQLiteStorage) -> None:
-    # Winner owns the identity tuple; the loser carries the *same tuple* but
-    # a fresh email, so the identity UNIQUE (not users.email) fires first.
+def test_race_resolution_reads_the_identity_tuple(storage: SQLiteStorage) -> None:
+    # Winner owns the identity tuple; the loser carries the *same tuple*.
+    # From Phase 12 on the identity UNIQUE is the only race trigger (the
+    # email constraint it once raced against no longer exists).
     winner = make_user()
     storage.create_user(winner)
     storage.create_external_identity(make_identity(user_id="usr_test_0001"))
@@ -306,28 +320,25 @@ def test_race_existing_user_id_is_none_when_nothing_resolves(
     storage: SQLiteStorage,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The email UNIQUE can only fire when some row holds the email; the
-    # adapter's post-rollback resolution is best-effort by contract. Inject
-    # a driver-real email UNIQUE failure while guaranteeing both resolution
-    # reads miss, pinning the ``existing_user_id=None`` fallback shape.
+    # The identity-tuple UNIQUE can only fire when some row holds the tuple;
+    # the adapter's post-rollback resolution is best-effort by contract.
+    # Seed the winner's tuple, then inject a resolution that misses, pinning
+    # the ``existing_user_id=None`` fallback shape on the sole race trigger.
     def fake_resolve(
         _self: SQLiteStorage, _conn: sqlite3.Connection, **_kwargs: object
     ) -> UserId | None:
         return None
 
     monkeypatch.setattr(SQLiteStorage, "_resolve_provision_race_user_id", fake_resolve)
-    first = make_user()
-    storage.create_user(first)
+    winner = make_user()
+    storage.create_user(winner)
+    storage.create_external_identity(make_identity(user_id="usr_test_0001"))
     with pytest.raises(contract.DuplicateExternalIdentityError) as excinfo:
         storage.provision_user(
             **_batch(
-                user=make_user(user_id="usr_test_0002", email=first.email),
+                user=make_user(user_id="usr_test_0002"),
                 organization_id="org_test_0002",
-                identity=make_identity(
-                    identity_id="extid_test_0002",
-                    user_id="usr_test_0002",
-                    provider_subject="subject-unique-0002",
-                ),
+                identity=make_identity(identity_id="extid_test_0002", user_id="usr_test_0002"),
             )
         )
     assert excinfo.value.existing_user_id is None
@@ -406,11 +417,13 @@ def test_provision_conflicts_do_not_poison_standalone_writes(storage: SQLiteStor
     # provision-scoped, connection state is clean).
     first = make_user()
     storage.create_user(first)
+    storage.create_external_identity(make_identity(user_id="usr_test_0001"))
     with pytest.raises(contract.DuplicateExternalIdentityError):
         storage.provision_user(
             **_batch(
-                user=make_user(user_id="usr_test_0002", email=first.email),
+                user=make_user(user_id="usr_test_0002"),
                 organization_id="org_test_0002",
+                identity=make_identity(identity_id="extid_test_0002", user_id="usr_test_0002"),
             )
         )
     organization = make_organization("org_test_0003")

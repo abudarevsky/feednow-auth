@@ -107,7 +107,7 @@ def storage(tmp_path) -> SQLiteStorage:  # type: ignore[no-untyped-def]
 
 
 # ---------------------------------------------------------------------------
-# 1. The translation table covers every unique constraint in the task-2 DDL
+# 1. The translation table covers every unique constraint in the v2 DDL
 # ---------------------------------------------------------------------------
 
 
@@ -126,10 +126,12 @@ def test_translation_table_covers_all_ddl_unique_constraints() -> None:
         ("organizations", ("id",)),
         ("organizations", ("slug",)),
         ("users", ("id",)),
-        ("users", ("email",)),
     }
     kinds = set(sqlite_adapter._UNIQUE_KIND_BY_COLUMNS.values())
-    assert kinds == set(contract.DuplicateEntityKind)
+    # Phase 12 removed the ("users", ("email",)) entry: the email UNIQUE
+    # index no longer exists, so USER_EMAIL stays in the frozen vocabulary
+    # but is no longer a translatable constraint.
+    assert kinds == set(contract.DuplicateEntityKind) - {contract.DuplicateEntityKind.USER_EMAIL}
 
 
 # ---------------------------------------------------------------------------
@@ -160,26 +162,22 @@ def test_users_primary_key_violation_translates_to_entity_id(storage: SQLiteStor
     assert translated.kind is contract.DuplicateEntityKind.ENTITY_ID
 
 
-def test_users_email_violation_translates_to_user_email(storage: SQLiteStorage) -> None:
+def test_duplicate_email_raw_insert_is_accepted_without_constraint(
+    storage: SQLiteStorage,
+) -> None:
+    # Phase 12: the users_email_unique index is gone, so a duplicate email
+    # is no longer an integrity failure at all — the raw insert succeeds and
+    # both rows coexist (the adapter-level proof behind the contract's
+    # "never raises a user_email conflict" rule).
     conn = storage._connection()
     _insert_user(conn, make_user())
+    _insert_user(conn, make_user(user_id="usr_test_0002", email="test@example.com"))
     conn.commit()
-    exc = _capture_integrity_error(
-        conn,
-        "INSERT INTO users (id, display_name, email, status, created_at, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?)",
-        (
-            "usr_test_0002",
-            "Other",
-            "test@example.com",
-            "active",
-            encode_timestamp(_T0),
-            encode_timestamp(_T0),
-        ),
-    )
-    translated = sqlite_adapter._translate_integrity_error(exc)
-    assert isinstance(translated, contract.DuplicateEntityError)
-    assert translated.kind is contract.DuplicateEntityKind.USER_EMAIL
+    emails = conn.execute("SELECT id, email FROM users ORDER BY id").fetchall()
+    assert [(row["id"], row["email"]) for row in emails] == [
+        ("usr_test_0001", "test@example.com"),
+        ("usr_test_0002", "test@example.com"),
+    ]
 
 
 def test_identity_tuple_violation_translates_to_external_identity(
@@ -296,12 +294,22 @@ def test_non_integrity_driver_errors_translate_to_generic_storage_error() -> Non
         (contract.DuplicateEntityError, contract.ReferenceNotFoundError),
     )
     assert "locked" not in str(translated)
-    # Integrity failures keep their precise mapping through the generic path.
+    # Integrity failures on *mapped* constraints keep their precise
+    # translation through the generic path.
     exact = sqlite_adapter._translate_driver_error(
-        sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+        sqlite3.IntegrityError("UNIQUE constraint failed: organizations.slug")
     )
     assert isinstance(exact, contract.DuplicateEntityError)
-    assert exact.kind is contract.DuplicateEntityKind.USER_EMAIL
+    assert exact.kind is contract.DuplicateEntityKind.ORGANIZATION_SLUG
+    # Phase 12: a synthetic users.email UNIQUE (which the v2 DDL can no
+    # longer emit) is an unmapped constraint and falls through to the
+    # generic StorageError — the USER_EMAIL mapping is gone, so nothing can
+    # resurrect a user_email conflict from a driver message.
+    unmapped = sqlite_adapter._translate_driver_error(
+        sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+    )
+    assert isinstance(unmapped, contract.StorageError)
+    assert not isinstance(unmapped, contract.DuplicateEntityError)
 
 
 @pytest.mark.parametrize(

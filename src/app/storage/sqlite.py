@@ -15,7 +15,10 @@ Design pinned by the Phase 02 breakdown:
   statements after ``connect()`` on every connection (``PRAGMA foreign_keys``
   is a silent no-op inside an open transaction, so it must run before any
   other SQL; init asserts the read-back is ``1``). Schema creation is
-  idempotent and stamped with ``PRAGMA user_version``.
+  idempotent and stamped with ``PRAGMA user_version``; a file stamped at a
+  known older version is brought forward by the ordered
+  :data:`_MIGRATIONS` table (forward-only, data-retaining), and any other
+  stamp is rejected loudly.
 - **Storage never mints IDs or timestamps.** Every write receives a fully
   formed domain entity; the codecs below only encode/decode what callers
   supply.
@@ -73,7 +76,15 @@ Phase 11 task 6 added the additive login-state/session surface
 :meth:`SQLiteStorage.create_app_session`, and
 :meth:`SQLiteStorage.get_app_session`) on two new tables created
 idempotently at every open; expiry is evaluated against the adapter clock
-on read, and storage still mints nothing.
+on read, and storage still mints nothing. Phase 12 task 2 flipped email
+uniqueness: the users table is now v2 (``application_role`` column,
+non-unique ``users_email_lookup`` index, no ``users_email_unique``), a
+file stamped v1 is brought forward by the ordered :data:`_MIGRATIONS`
+table at open (forward-only, data-retaining),
+:meth:`SQLiteStorage.list_users_by_email` lands as the bounded exact-
+lookup read, and the ``provision_user`` race mapping narrows to the
+identity tuple alone (the users-by-email winner-resolution fallback is
+gone — email can no longer name a unique winner).
 """
 
 from __future__ import annotations
@@ -113,33 +124,38 @@ from app.storage.contract import (
 )
 
 #: Schema version stamped into ``PRAGMA user_version`` after creation. Bump
-#: only with a spec-revision-approved migration story; an unrecognized stamp
-#: is rejected loudly rather than reinterpreted.
-SCHEMA_VERSION: Final = 1
+#: only with a spec-revision-approved migration story recorded in
+#: :data:`_MIGRATIONS`; an unrecognized stamp is rejected loudly rather than
+#: reinterpreted.
+SCHEMA_VERSION: Final = 2
 
 #: Wall-clock bound (ms) for lock contention under WAL, per the breakdown's
 #: connection model (concurrency tests use barriers + WAL, never sleeps).
 _BUSY_TIMEOUT_MS: Final = 5000
 
 # ---------------------------------------------------------------------------
-# DDL: six base tables, PKs, FKs, and the five unique indexes (four domain
-# uniqueness constraints plus the §8 api_keys.key_id credential segment);
-# the additive Phase 11 session tables live in _SESSION_SCHEMA_STATEMENTS
-# below.
+# DDL (v2): six base tables, PKs, FKs, the four unique indexes (three domain
+# uniqueness constraints plus the §8 api_keys.key_id credential segment) and
+# the non-unique Phase 12 ``users_email_lookup`` index (email is an
+# exact-lookup field, never a constraint); the additive Phase 11 session
+# tables live in _SESSION_SCHEMA_STATEMENTS below. A *fresh* database builds
+# this shape directly; a v1 file reaches it through the 1→2 migration in
+# _MIGRATIONS, so both shapes are identical.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS users (
-        id           TEXT PRIMARY KEY,
-        display_name TEXT NOT NULL,
-        email        TEXT NOT NULL,
-        status       TEXT NOT NULL,
-        created_at   TEXT NOT NULL,
-        updated_at   TEXT NOT NULL
+        id               TEXT PRIMARY KEY,
+        display_name     TEXT NOT NULL,
+        email            TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        created_at       TEXT NOT NULL,
+        updated_at       TEXT NOT NULL,
+        application_role TEXT NOT NULL DEFAULT 'user'
     )
     """,
-    "CREATE UNIQUE INDEX IF NOT EXISTS users_email_unique ON users (email)",
+    "CREATE INDEX IF NOT EXISTS users_email_lookup ON users (email)",
     """
     CREATE TABLE IF NOT EXISTS external_identities (
         id               TEXT PRIMARY KEY,
@@ -211,6 +227,28 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
 )
 
 # ---------------------------------------------------------------------------
+# Ordered schema migrations consumed by :meth:`SQLiteStorage._ensure_schema`.
+# Keys are the ``user_version`` stamp a file carries on open; the value is
+# the ordered statement list that brings it forward, whose final statement
+# re-stamps ``PRAGMA user_version``. Migrations are **forward-only** and
+# data-retaining; a stamp that is neither ``0`` (fresh init at
+# :data:`SCHEMA_VERSION`), a key here, nor :data:`SCHEMA_VERSION` itself is
+# rejected loudly. Phase 12 added the single ``1 → 2`` migration: the
+# ``application_role`` column (the column default backfills every existing
+# row to ``'user'``), the retirement of the unique email constraint, and the
+# non-unique ``users_email_lookup`` index.
+# ---------------------------------------------------------------------------
+
+_MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
+    1: (
+        "ALTER TABLE users ADD COLUMN application_role TEXT NOT NULL DEFAULT 'user'",
+        "DROP INDEX users_email_unique",
+        "CREATE INDEX users_email_lookup ON users (email)",
+        "PRAGMA user_version = 2",
+    ),
+}
+
+# ---------------------------------------------------------------------------
 # Additive Phase 11 DDL: login-state and session tables. These run on *every*
 # open (idempotent ``CREATE TABLE IF NOT EXISTS``, no data migration, no
 # ``user_version`` bump): a database initialized before Phase 11 gains the
@@ -250,10 +288,11 @@ TABLE_NAMES: Final[tuple[str, ...]] = (
     "app_sessions",
 )
 
-#: Unique index inventory (five: four domain-uniqueness constraints plus the
-#: §8 credential-segment point lookup).
+#: Unique index inventory (four: three domain-uniqueness constraints plus the
+#: §8 credential-segment point lookup). Phase 12 retired
+#: ``users_email_unique``: email is a non-unique exact-lookup field now,
+#: backed by the plain ``users_email_lookup`` index (not listed here).
 UNIQUE_INDEX_NAMES: Final[tuple[str, ...]] = (
-    "users_email_unique",
     "external_identities_tuple_unique",
     "organizations_slug_unique",
     "memberships_pair_unique",
@@ -378,13 +417,19 @@ def decode_cursor(scope: str, cursor: str) -> tuple[datetime, str]:
 
 
 def user_from_row(row: sqlite3.Row) -> User:
-    """Rebuild a :class:`User` from a ``users`` row."""
+    """Rebuild a :class:`User` from a ``users`` row.
+
+    ``application_role`` goes through ``model_validate`` like every other
+    column, so a corrupt stored role string fails loudly (contract
+    tripwire).
+    """
     return User.model_validate(
         {
             "id": row["id"],
             "display_name": row["display_name"],
             "email": row["email"],
             "status": row["status"],
+            "application_role": row["application_role"],
             "created_at": decode_timestamp(row["created_at"]),
             "updated_at": decode_timestamp(row["updated_at"]),
         }
@@ -508,15 +553,19 @@ def app_session_from_row(row: sqlite3.Row) -> AppSession:
 # domain types from app.storage.contract instead).
 # ---------------------------------------------------------------------------
 
-#: Maps every unique constraint the task-2 DDL declares to its domain
-#: ``kind``. Keys are ``(table, columns)`` exactly as SQLite reports them in
-#: ``UNIQUE constraint failed: <table>.<column>[, ...]`` messages — the five
+#: Maps every unique constraint the v2 DDL declares to its domain ``kind``.
+#: Keys are ``(table, columns)`` exactly as SQLite reports them in
+#: ``UNIQUE constraint failed: <table>.<column>[, ...]`` messages — the four
 #: named unique indexes plus the implicit PRIMARY KEY indexes (a ``id``
 #: collision reports the same way and surfaces as ``entity_id``, per the
-#: contract), including the Phase 11 session-table PKs. Tasks 4-6 reuse this
-#: table as their methods land; a violation of an unmapped constraint falls
-#: through to the generic ``StorageError`` (fail loudly, never leak the
-#: driver error).
+#: contract), including the Phase 11 session-table PKs. Phase 12 removed the
+#: ``("users", ("email",))`` entry: the email UNIQUE index no longer exists,
+#: so a duplicate email is a legal write, and ``USER_EMAIL`` stays in the
+#: frozen vocabulary but is never translated (a synthetic ``users.email``
+#: violation now falls through to the generic ``StorageError`` — fail loudly,
+#: never leak the driver error). Tasks 4-6 reuse this table as their methods
+#: land; a violation of an unmapped constraint falls through to the generic
+#: :class:`~app.storage.contract.StorageError`.
 _UNIQUE_KIND_BY_COLUMNS: Final[dict[tuple[str, tuple[str, ...]], DuplicateEntityKind]] = {
     ("api_keys", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("api_keys", ("key_id",)): DuplicateEntityKind.API_KEY_ID,
@@ -533,7 +582,6 @@ _UNIQUE_KIND_BY_COLUMNS: Final[dict[tuple[str, tuple[str, ...]], DuplicateEntity
     ("organizations", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("organizations", ("slug",)): DuplicateEntityKind.ORGANIZATION_SLUG,
     ("users", ("id",)): DuplicateEntityKind.ENTITY_ID,
-    ("users", ("email",)): DuplicateEntityKind.USER_EMAIL,
 }
 
 
@@ -692,30 +740,77 @@ class SQLiteStorage:
         return conn
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        """Create the schema once per file; idempotent and version-stamped.
+        """Create or migrate the schema once per file; idempotent and
+        version-stamped.
+
+        Stamp dispatch: ``0`` is a fresh file (build the current
+        :data:`_SCHEMA_STATEMENTS` shape and stamp it); :data:`SCHEMA_VERSION`
+        is current (no DDL); any other stamp listed in :data:`_MIGRATIONS` is
+        brought forward by its ordered migration (forward-only,
+        data-retaining — the Phase 12 ``1 → 2`` migration adds the
+        ``application_role`` column with its ``'user'`` default backfill,
+        drops ``users_email_unique``, and creates ``users_email_lookup``).
+        Every other stamp is rejected loudly.
 
         The Phase 11 session tables (:data:`_SESSION_SCHEMA_STATEMENTS`) run
-        on every initialization — a pre-Phase-11 file stamped at
-        :data:`SCHEMA_VERSION` gains them additively (``CREATE TABLE IF NOT
-        EXISTS``, no data migration, no version bump).
+        on every initialization — a pre-Phase-11 file gains them additively
+        (``CREATE TABLE IF NOT EXISTS``, no data migration, no version bump).
         """
         with self._lock:
             if self._schema_ready:
                 return
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, SCHEMA_VERSION):
-                raise StorageError(
-                    f"unsupported schema version {version} at {self._path}; "
-                    f"expected {SCHEMA_VERSION}"
-                )
             if version == 0:
                 for statement in _SCHEMA_STATEMENTS:
                     conn.execute(statement)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version == SCHEMA_VERSION:
+                pass  # current stamp: nothing to bring forward
+            elif version in _MIGRATIONS:
+                self._apply_migration(conn, version)
+            else:
+                raise StorageError(
+                    f"unsupported schema version {version} at {self._path}; "
+                    f"expected {SCHEMA_VERSION}"
+                )
             for statement in _SESSION_SCHEMA_STATEMENTS:
                 conn.execute(statement)
             conn.commit()
             self._schema_ready = True
+
+    def _apply_migration(self, conn: sqlite3.Connection, version: int) -> None:
+        """Apply one ordered migration as a single write-locked transaction.
+
+        Migration statements are *not* idempotent (bare ``ALTER``/``DROP``/
+        ``CREATE``), so — unlike the ``IF NOT EXISTS`` fresh-init path — they
+        run under ``BEGIN IMMEDIATE``: a second process initializing the same
+        file blocks on ``busy_timeout``, and the stamp re-read after the
+        write lock is acquired skips a migration the racing opener already
+        committed; a crash rolls the whole migration back to the old stamp,
+        which simply re-migrates on the next open. Every migration's final
+        statement re-stamps ``user_version``; the postcondition proves the
+        chain landed on :data:`SCHEMA_VERSION` before the file is declared
+        ready. Driver errors are translated — no raw ``sqlite3`` exception
+        escapes initialization either.
+        """
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("PRAGMA user_version").fetchone()[0] != version:
+                conn.rollback()
+                return
+            for statement in _MIGRATIONS[version]:
+                conn.execute(statement)
+            stamped = conn.execute("PRAGMA user_version").fetchone()[0]
+            if stamped != SCHEMA_VERSION:
+                conn.rollback()
+                raise StorageError(
+                    f"schema migration from version {version} left stamp {stamped}; "
+                    f"expected {SCHEMA_VERSION} at {self._path}"
+                )
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise StorageError("schema migration failed") from exc
 
     def close(self) -> None:
         """Release every connection opened by this instance. Not reusable after."""
@@ -735,11 +830,15 @@ class SQLiteStorage:
         :meth:`provision_user` (batch, task 7): the helper never commits or
         rolls back — transaction discipline belongs to the calling contract
         method. Storage mints nothing: the row is exactly the caller-supplied
-        entity, with both temporal columns through the fixed-width codec.
+        entity, with both temporal columns through the fixed-width codec and
+        the Phase 12 ``application_role`` stored as its enum string (the
+        column's ``'user'`` DEFAULT exists only to backfill pre-Phase-12 rows
+        during the 1→2 migration; every write names the value).
         """
         conn.execute(
-            "INSERT INTO users (id, display_name, email, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO users"
+            " (id, display_name, email, status, created_at, updated_at, application_role)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 str(user.id),
                 user.display_name,
@@ -747,17 +846,19 @@ class SQLiteStorage:
                 str(user.status),
                 encode_timestamp(user.created_at),
                 encode_timestamp(user.updated_at),
+                str(user.application_role),
             ),
         )
 
     def create_user(self, user: User) -> User:
         """Persist a new user and echo the caller-supplied entity back.
 
-        Storage mints nothing: the row is exactly ``user``. Duplicate emails
-        and ``usr_`` id collisions surface as translated
-        :class:`~app.storage.contract.DuplicateEntityError` kinds
-        (``user_email`` / ``entity_id``); the failed transaction is rolled
-        back so the rejected write leaves no trace.
+        Storage mints nothing: the row is exactly ``user``. Email is not a
+        uniqueness constraint (Phase 12), so duplicate addresses are legal
+        and only ``usr_`` id collisions surface as translated
+        :class:`~app.storage.contract.DuplicateEntityError`
+        (``kind="entity_id"``); the failed transaction is rolled back so the
+        rejected write leaves no trace.
         """
         conn = self._connection()
         try:
@@ -780,6 +881,24 @@ class SQLiteStorage:
         if row is None:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_row(row)
+
+    def list_users_by_email(self, email: str) -> list[User]:
+        """Exact-match lookup of every user carrying ``email`` (Phase 12).
+
+        Email is non-unique, so this returns zero/one/many users ordered by
+        ``(created_at, id)`` ascending (contract-pinned; ``id`` is the
+        tiebreaker). An unknown address is an empty list, never
+        :class:`~app.storage.contract.EntityNotFoundError`, and there is no
+        pagination cursor (documented bounded domain operation). The
+        ``users_email_lookup`` index backs the equality predicate; ordering
+        is applied by the statement itself.
+        """
+        conn = self._connection()
+        rows = conn.execute(
+            "SELECT * FROM users WHERE email = ? ORDER BY created_at ASC, id ASC",
+            (email,),
+        ).fetchall()
+        return [user_from_row(row) for row in rows]
 
     def _insert_external_identity_row(
         self,
@@ -1326,17 +1445,19 @@ class SQLiteStorage:
         conn: sqlite3.Connection,
         *,
         identity: ExternalIdentity,
-        email: str,
     ) -> UserId | None:
         """Best-effort winner resolution after a raced batch rolled back.
 
         Runs post-rollback (autocommit, so the read sees the concurrent
         winner's committed rows): re-read the identity row for the batch's
-        ``(provider, provider_subject, tenant_normalized)`` tuple, falling
-        back to a users-by-email read. Both reads are adapter-internal — the
-        contract gains no separate resolve method — and return the winner's
-        ``usr_`` id so Phase 03 converges without a second query, or ``None``
-        when neither resolves.
+        ``(provider, provider_subject, tenant_normalized)`` tuple — the
+        **sole** convergence key from Phase 12 on. The old users-by-email
+        fallback is gone: email is non-unique, so a by-email read could name
+        an arbitrary member of a shared-address crowd rather than the actual
+        winner. The read is adapter-internal — the contract gains no separate
+        resolve method — and returns the winner's ``usr_`` id so Phase 03
+        converges without a second query, or ``None`` when it does not
+        resolve.
         """
         row = conn.execute(
             "SELECT user_id FROM external_identities"
@@ -1349,9 +1470,6 @@ class SQLiteStorage:
         ).fetchone()
         if row is not None:
             return UserId(row["user_id"])
-        row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-        if row is not None:
-            return UserId(row["id"])
         return None
 
     def provision_user(
@@ -1375,17 +1493,20 @@ class SQLiteStorage:
         stored encoding is identical to the standalone paths; nothing is
         committed until the whole batch has succeeded.
 
-        Duplicate/concurrency semantics (contract-pinned): any UNIQUE
-        violation on ``users.email`` **or** the identity tuple is spec §6's
-        concurrent-first-login race (both attempts carry the same email and
-        identity tuple, distinct record ids) and surfaces as
-        :class:`~app.storage.contract.DuplicateExternalIdentityError` with
-        ``existing_user_id`` resolved post-rollback by
-        :meth:`_resolve_provision_race_user_id`. Other UNIQUE violations
-        (organization slug, membership pair, record-id PKs) propagate as
-        their own translated :class:`~app.storage.contract.DuplicateEntityError`
-        kind, and FK violations (a parent the batch does not itself create)
-        as :class:`~app.storage.contract.ReferenceNotFoundError`. Every
+        Duplicate/concurrency semantics (contract-pinned): the identity
+        tuple is the **sole** race/convergence key from Phase 12 on — a
+        UNIQUE violation on it is spec §6's concurrent-first-login race
+        (both attempts carry the same tuple, distinct record ids) and
+        surfaces as :class:`~app.storage.contract.DuplicateExternalIdentityError`
+        with ``existing_user_id`` resolved post-rollback by
+        :meth:`_resolve_provision_race_user_id`. Email is never a conflict
+        here: a batch sharing an address with an existing user but carrying
+        a fresh identity tuple commits as a second, independent user. Other
+        UNIQUE violations (organization slug, membership pair, record-id
+        PKs) propagate as their own translated
+        :class:`~app.storage.contract.DuplicateEntityError` kind, and FK
+        violations (a parent the batch does not itself create) as
+        :class:`~app.storage.contract.ReferenceNotFoundError`. Every
         failure path rolls the whole batch back: no partial user, identity,
         organization, membership, or audit rows survive.
 
@@ -1412,17 +1533,15 @@ class SQLiteStorage:
             # rows, not this rolled-back batch.
             conn.rollback()
             translated = _translate_driver_error(exc)
-            if isinstance(translated, DuplicateEntityError) and translated.kind in (
-                DuplicateEntityKind.USER_EMAIL,
-                DuplicateEntityKind.EXTERNAL_IDENTITY,
+            if (
+                isinstance(translated, DuplicateEntityError)
+                and translated.kind is DuplicateEntityKind.EXTERNAL_IDENTITY
             ):
-                # §6 race mapping (contract-pinned): email/identity-tuple
-                # collisions inside a provisioning batch are never reported
-                # as a plain email conflict.
+                # §6 race mapping (contract-pinned): only an identity-tuple
+                # collision inside a provisioning batch converges; email is
+                # no longer a constraint at all (Phase 12).
                 raise DuplicateExternalIdentityError(
-                    existing_user_id=self._resolve_provision_race_user_id(
-                        conn, identity=identity, email=user.email
-                    )
+                    existing_user_id=self._resolve_provision_race_user_id(conn, identity=identity)
                 ) from exc
             raise translated from exc
         conn.commit()

@@ -12,10 +12,10 @@ decision. Acceptance mapping:
 - a repeated request resolves the same ``usr_``/``org_`` with stable row
   counts (no duplicate tenants);
 - a disabled user raises with zero mutation;
-- a genuine email collision (different ``sub``, same email) surfaces as
-  :class:`~app.services.identity.ProvisioningConflictError` and leaves **no
-  partial rows** — the real-storage counterpart of decision 7's stranger-id
-  trap, exercising the adapter's email-fallback resolution;
+- Phase 12 coexistence (different ``sub``, same email): the second login
+  provisions a **second, independent user** with its own personal org and
+  owner membership — email is no longer a conflict, the identity tuple is
+  the only convergence key, and neither batch leaves partial rows;
 - Phase 11's verified profile (task 5): the miss path provisions **only**
   from a gated :class:`~app.auth.cognito.CognitoProfile` (email and display
   name), a miss without a profile provider raises ``TokenValidationError``
@@ -50,7 +50,6 @@ from app.models.ids import ExternalIdentityId, UserId
 from app.models.user import User
 from app.services.identity import (
     DisabledUserError,
-    ProvisioningConflictError,
     resolve_or_provision,
 )
 from app.storage.contract import Storage
@@ -234,50 +233,49 @@ def test_disabled_user_raises_without_mutation(db_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Email collision on real storage: conflict, no partial rows
+# Email coexistence on real storage (Phase 12): two users, two orgs, no
+# partial rows
 # ---------------------------------------------------------------------------
 
 
-def test_email_collision_conflicts_and_leaves_no_partial_rows(db_path: Path) -> None:
-    """A *different* sub whose verified profile carries a stranger's email:
-    provision_user raises the race error (email UNIQUE), the identity re-read
-    misses, and the service refuses to converge on the stranger (decision 7) —
-    the adapter's ``existing_user_id`` email fallback names ``usr_stranger``
-    here."""
+def test_email_coexistence_provisions_two_users_with_own_orgs(db_path: Path) -> None:
+    """A *different* sub whose verified profile carries an existing user's
+    email is a legitimate second shadow user: the service provisions it in
+    full through the same batch path, the two users coexist with separate
+    personal orgs, and nothing partial is left behind (Phase 12 retired the
+    old email-collision conflict and the adapter's by-email fallback)."""
     storage: Storage = open_sqlite_storage(db_path)
     try:
-        storage.create_user(
-            User(
-                id=UserId("usr_stranger"),
-                display_name="Stranger",
-                email="dev@example.test",
-                status=UserStatus.ACTIVE,
-                created_at=_NOW,
-                updated_at=_NOW,
-            )
+        first = resolve_or_provision(
+            storage,
+            _claims(sub="cognito-sub-sqlite"),
+            now=_NOW,
+            profile_provider=lambda: _profile(sub="cognito-sub-sqlite", email="dev@example.test"),
         )
-        with pytest.raises(ProvisioningConflictError):
-            resolve_or_provision(
-                storage,
-                _claims(sub="brand-new-sub", email=None),
-                now=_NOW,
-                # The profile email is the stranger's: the batch races the
-                # users.email UNIQUE (the claims email is no longer read).
-                profile_provider=lambda: _profile(sub="brand-new-sub", email="dev@example.test"),
-            )
+        second = resolve_or_provision(
+            storage,
+            _claims(sub="brand-new-sub", email=None),
+            now=_NOW,
+            profile_provider=lambda: _profile(sub="brand-new-sub", email="dev@example.test"),
+        )
     finally:
         storage.close()
 
+    assert first.user.id != second.user.id
+    assert first.context.organization_id != second.context.organization_id
     assert _counts(db_path) == {
-        "users": 1,  # only the stranger survived — no partial batch
-        "external_identities": 0,
-        "organizations": 0,
-        "memberships": 0,
+        "users": 2,  # both batches committed in full
+        "external_identities": 2,
+        "organizations": 2,  # each user owns its own personal org
+        "memberships": 2,
         "api_keys": 0,
-        "audit_events": 0,
+        "audit_events": 6,
         "oauth_login_states": 0,
         "app_sessions": 0,
     }
+    users = {str(row["id"]): row["email"] for row in _rows(db_path, "users")}
+    assert set(users) == {str(first.user.id), str(second.user.id)}
+    assert set(users.values()) == {"dev@example.test"}  # shared address, two rows
 
 
 # ---------------------------------------------------------------------------

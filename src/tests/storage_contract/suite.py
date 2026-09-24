@@ -258,7 +258,10 @@ def make_app_session(
 
 
 # ---------------------------------------------------------------------------
-# Task 3 — users: create/retrieve, not-found, duplicate email, duplicate id
+# Task 3 — users: create/retrieve, not-found, duplicate id; Phase 12 flipped
+# the email case: equal emails are two separate users, and the exact-lookup
+# list_users_by_email operation returns zero/one/many rows in
+# (created_at, id) order
 # ---------------------------------------------------------------------------
 
 
@@ -278,19 +281,17 @@ def test_get_unknown_user_raises_entity_not_found(storage: Storage) -> None:
         storage.get_user(UserId("usr_missing_0001"))
 
 
-def test_duplicate_email_raises_user_email_conflict(storage: Storage) -> None:
+def test_duplicate_email_creates_separate_users(storage: Storage) -> None:
     first = make_user()
     storage.create_user(first)
-    # Email is a constraint, never an identity: a different usr_ id with a
-    # taken email is rejected as a domain conflict.
+    # Phase 12 (shadow registration): email is a non-unique exact-lookup
+    # field, never a constraint. A different usr_ id with a shared address
+    # is a legitimate second user, stored and resolved independently.
     duplicate = make_user(user_id="usr_test_0002", email=first.email)
-    with pytest.raises(DuplicateEntityError) as excinfo:
-        storage.create_user(duplicate)
-    assert excinfo.value.kind is DuplicateEntityKind.USER_EMAIL
-    # The rejected write is fully rolled back: the original row is intact and
-    # the rejected id was never consumed, so a clean insert of it succeeds.
+    created = storage.create_user(duplicate)
+    assert created == duplicate
     assert storage.get_user(first.id) == first
-    storage.create_user(make_user(user_id="usr_test_0002"))
+    assert storage.get_user(duplicate.id) == duplicate
 
 
 def test_duplicate_user_id_raises_entity_id_conflict(storage: Storage) -> None:
@@ -303,6 +304,40 @@ def test_duplicate_user_id_raises_entity_id_conflict(storage: Storage) -> None:
         storage.create_user(same_id)
     assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
     assert storage.get_user(first.id) == first
+
+
+# ---------------------------------------------------------------------------
+# Phase 12 — list_users_by_email: exact-match lookup returning zero/one/many
+# users ordered by (created_at, id); an unknown address is an empty list and
+# never EntityNotFoundError (this is a lookup, not the §12 resolve signal)
+# ---------------------------------------------------------------------------
+
+
+def test_list_users_by_email_unknown_address_returns_empty_list(storage: Storage) -> None:
+    user = make_user()
+    storage.create_user(user)
+    assert storage.list_users_by_email("nobody@example.test") == []
+
+
+def test_list_users_by_email_single_match(storage: Storage) -> None:
+    user = make_user()
+    storage.create_user(user)
+    assert storage.list_users_by_email(user.email) == [user]
+
+
+def test_list_users_by_email_returns_shared_address_users_in_order(storage: Storage) -> None:
+    # Two users sharing one email plus an unrelated user: exactly the two
+    # shared-address users, ordered by (created_at, id) ascending — the same
+    # deterministic key the paginated lists use. Insertion order is scrambled
+    # so the read, not the write sequence, must produce the ordering.
+    later = make_user(user_id="usr_test_0002", email="shared@example.test", created_at=T1)
+    earlier = make_user(user_id="usr_test_0001", email="shared@example.test", created_at=T0)
+    unrelated = make_user(user_id="usr_test_0003", email="other@example.test", created_at=T0)
+    storage.create_user(unrelated)
+    storage.create_user(later)
+    storage.create_user(earlier)
+    assert storage.list_users_by_email("shared@example.test") == [earlier, later]
+    assert storage.list_users_by_email(unrelated.email) == [unrelated]
 
 
 # ---------------------------------------------------------------------------
@@ -1041,9 +1076,10 @@ def test_audit_event_for_unknown_organization_raises_reference_not_found(
 # ---------------------------------------------------------------------------
 # Task 7 — provision_user atomic compound: happy path (every component via
 # reads; audit persistence via task 6's duplicate-append proof), §6 race
-# mapping (email/identity-tuple collision -> DuplicateExternalIdentityError
-# carrying the winner's existing_user_id), email-duplicate/identity-absent
-# fallback, membership-conflict full rollback, and the barrier race.
+# mapping (identity-tuple collision -> DuplicateExternalIdentityError
+# carrying the winner's existing_user_id; Phase 12 narrowed this to the
+# identity tuple alone — a shared email with a fresh tuple is a second user,
+# not a race), membership-conflict full rollback, and the barrier race.
 # ---------------------------------------------------------------------------
 
 
@@ -1130,9 +1166,10 @@ def test_provision_race_loser_maps_email_conflict_with_winner_id(storage: Storag
         membership=winner[3],
         audit_events=winner[4],
     )
-    # Loser: same email AND same identity tuple, distinct record ids. The
-    # users-email UNIQUE fires first (users insert first) and must still map
-    # to the race error, not a plain email conflict.
+    # Loser: same email AND same identity tuple, distinct record ids. Email
+    # is no longer a constraint (Phase 12), so the users insert passes and
+    # the identity-tuple UNIQUE is the violation that fires — it alone must
+    # map to the race error, not a plain conflict.
     loser = _provision_race_batch("0002", email="race@example.test", provider_subject="sub-race")
     with pytest.raises(DuplicateExternalIdentityError) as excinfo:
         storage.provision_user(
@@ -1163,48 +1200,57 @@ def test_provision_race_loser_maps_email_conflict_with_winner_id(storage: Storag
     assert storage.get_user(winner[0].id) == winner[0]
 
 
-def test_provision_email_collision_without_identity_resolves_by_email(storage: Storage) -> None:
+def test_provision_same_email_different_subject_creates_two_users(storage: Storage) -> None:
     existing = make_user()
     storage.create_user(existing)
-    # Email-duplicate / identity-absent variant: the identity tuple is fresh,
-    # only the email collides. Same pinned mapping, with existing_user_id
-    # resolved by the users-by-email fallback read.
-    with pytest.raises(DuplicateExternalIdentityError) as excinfo:
-        storage.provision_user(
-            user=make_user(user_id="usr_test_0002", email=existing.email),
-            identity=make_identity(
-                identity_id="extid_test_0002",
-                user_id="usr_test_0002",
-                provider_subject="subject-unique-0002",
-            ),
-            organization=make_organization(organization_id="org_test_0002"),
-            membership=make_membership(
-                membership_id="mem_test_0002",
-                organization_id="org_test_0002",
-                user_id="usr_test_0002",
-            ),
-            audit_events=[
-                make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")
-            ],
+    # Phase 12: a fresh identity tuple sharing an existing user's email is a
+    # legitimate second shadow user — not the §6 race, not a conflict. The
+    # batch commits in full and the two users stay separate (the old
+    # email-fallback convergence is gone: email can no longer name a
+    # unique winner).
+    result = storage.provision_user(
+        user=make_user(user_id="usr_test_0002", email=existing.email),
+        identity=make_identity(
+            identity_id="extid_test_0002",
+            user_id="usr_test_0002",
+            provider_subject="subject-unique-0002",
+        ),
+        organization=make_organization(organization_id="org_test_0002"),
+        membership=make_membership(
+            membership_id="mem_test_0002",
+            organization_id="org_test_0002",
+            user_id="usr_test_0002",
+        ),
+        audit_events=[make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")],
+    )
+    assert result.user.email == existing.email
+    # Every component of the batch persisted (full commit, not rollback)...
+    assert storage.get_user(existing.id) == existing
+    assert storage.get_user(result.user.id) == result.user
+    assert storage.get_organization(OrganizationId("org_test_0002")) == result.organization
+    assert (
+        storage.get_membership(
+            organization_id=OrganizationId("org_test_0002"),
+            user_id=UserId("usr_test_0002"),
         )
-    assert excinfo.value.existing_user_id == existing.id
-    # Full rollback: nothing but the pre-existing user survived the batch.
-    with pytest.raises(EntityNotFoundError):
-        storage.get_user(UserId("usr_test_0002"))
-    with pytest.raises(EntityNotFoundError):
-        storage.get_organization(OrganizationId("org_test_0002"))
-    with pytest.raises(EntityNotFoundError):
+        == result.membership
+    )
+    # ...and the batch's audit row is really stored (duplicate-append proof).
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.append_audit_event(
+            make_audit_event(audit_id="aud_test_0002", organization_id="org_test_0002")
+        )
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+    # Each subject resolves to its own user; the shared address is exactly
+    # what the by-email lookup returns — both, (created_at, id) ordered.
+    assert (
         storage.get_user_by_external_identity(
             provider=IdentityProvider.COGNITO,
             provider_subject="subject-unique-0002",
         )
-    # The rolled-back organization is genuinely absent: an audit append
-    # referencing it fails on the FK (no partial org row survived).
-    with pytest.raises(ReferenceNotFoundError):
-        storage.append_audit_event(
-            make_audit_event(audit_id="aud_test_0003", organization_id="org_test_0002")
-        )
-    assert storage.get_user(existing.id) == existing
+        == result.user
+    )
+    assert storage.list_users_by_email(existing.email) == [existing, result.user]
 
 
 def test_provision_membership_conflict_rolls_back_whole_batch(storage: Storage) -> None:
@@ -1232,8 +1278,8 @@ def test_provision_membership_conflict_rolls_back_whole_batch(storage: Storage) 
         )
     error = excinfo.value
     assert error.kind is DuplicateEntityKind.MEMBERSHIP
-    # A membership conflict is NOT the race error: only email/identity-tuple
-    # violations map to DuplicateExternalIdentityError.
+    # A membership conflict is NOT the race error: only identity-tuple
+    # violations map to DuplicateExternalIdentityError (Phase 12).
     assert not isinstance(error, DuplicateExternalIdentityError)
     # No partial state: every row the batch had already written (user,
     # identity, organization) was rolled back with the rejected membership.
@@ -1397,7 +1443,7 @@ def test_provision_organization_slug_conflict_is_plain_duplicate_and_rolls_back(
     error = excinfo.value
     assert error.kind is DuplicateEntityKind.ORGANIZATION_SLUG
     # A slug conflict is NOT the race error: this compound never converges
-    # (unlike provision_user's email/identity-tuple mapping).
+    # (unlike provision_user's identity-tuple mapping).
     assert not isinstance(error, DuplicateExternalIdentityError)
     # Full rollback: the rejected batch consumed none of its ids...
     with pytest.raises(EntityNotFoundError):

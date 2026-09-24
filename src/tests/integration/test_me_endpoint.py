@@ -8,8 +8,10 @@ the frozen Phase 01 envelope. Acceptance mapping:
 - each 401 variant (missing/malformed header, expired, wrong issuer, wrong
   client, ``token_use=id``, garbage token, forged signature) asserts **zero
   calls** on a recording storage wrapper — "rejected without storage mutation";
-- named non-401 cases: ``test_disabled_user_403``, ``test_email_collision_409``,
-  ``test_jwks_down_503`` — all seeded with existing create methods only;
+- named non-401 cases: ``test_disabled_user_403``,
+  ``test_email_coexistence_provisions_second_user`` (Phase 12: a shared
+  email provisions a second user, it no longer 409s), ``test_jwks_down_503``
+  — all seeded with existing create methods only;
 - the happy path returns ``usr_``/profile fields and the body carries no
   ``sub``, no ``client_id``, no token bytes; repeated requests provision
   exactly once; every error body validates against the frozen ``Error`` model.
@@ -430,11 +432,13 @@ def test_disabled_user_403(env: _Env) -> None:
     assert env.profile_source.fetched_subjects == []  # hit path: zero user-info requests
 
 
-def test_email_collision_409(env: _Env) -> None:
-    """A stranger owns the email under a different sub: the batch races the
-    email UNIQUE, the identity re-read misses, and the service refuses to
-    converge on the stranger (decision 7) -> 409, no partial rows."""
-    env.storage.create_user(
+def test_email_coexistence_provisions_second_user(env: _Env) -> None:
+    """Phase 12: a stranger already owns this email under a different sub —
+    that no longer blocks provisioning. The login creates a second,
+    independent user through one full batch (own personal org, own
+    membership); the identity tuple, not the email, is the convergence key,
+    and the stranger is untouched."""
+    stranger = env.storage.create_user(
         User(
             id=UserId("usr_stranger_me"),
             display_name="Stranger",
@@ -446,11 +450,18 @@ def test_email_collision_409(env: _Env) -> None:
     )
     response = env.client.get("/v1/me", headers=env.auth(env.token()))
 
-    assert response.status_code == 409
-    assert Error.model_validate(response.json()).code == "conflict"
-    assert env.storage.calls.count("provision_user") == 1  # the failed attempt only
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"].startswith("usr_")
+    assert body["id"] != str(stranger.id)
+    assert body["email"] == EMAIL
+    # Exactly one provisioning write, committed in full (no standalone
+    # organization write — the compound is the batch), and the stranger's
+    # row is unchanged.
+    assert env.storage.calls.count("provision_user") == 1
     assert env.storage.calls.count("create_user") == 1  # only the stranger seed
-    assert env.storage.calls.count("create_organization") == 0  # no partial batch
+    assert env.storage.calls.count("create_organization") == 0
+    assert env.storage.get_user(stranger.id) == stranger
 
 
 def test_jwks_down_503(tmp_path: Path, key: TestKey) -> None:

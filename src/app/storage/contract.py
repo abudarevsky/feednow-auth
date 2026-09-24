@@ -2,7 +2,8 @@
 
 This module is the *only* storage surface application code (Phases 03, 05, 06)
 may depend on. It declares the 19 §11/§12 operations plus the four additive
-Phase 11 login-state/session operations (23 total) as a
+Phase 11 login-state/session operations plus the additive Phase 12
+``list_users_by_email`` exact-lookup (24 total) as a
 :class:`typing.Protocol` plus the domain error vocabulary adapters raise.
 
 Contract-wide rules (pinned by the Phase 02 breakdown; adapters must not
@@ -101,9 +102,13 @@ class DuplicateEntityKind(StrEnum):
 
     Additive vocabulary: renaming or removing a value is a contract change
     requiring a spec revision. ``entity_id`` covers PRIMARY KEY (``id``)
-    collisions on any stored record; the remaining values name the five
+    collisions on any stored record; the remaining values name the
     domain-uniqueness constraints (external-identity tuple, membership pair,
     organization slug, user email, ``api_keys.key_id`` credential segment).
+    ``USER_EMAIL`` is retained per this enum's own frozen additive-vocabulary
+    rule but is **never raised** from Phase 12 on: shadow registration made
+    equal emails valid separate users, so email is no longer a uniqueness
+    constraint and no adapter may translate a violation into this kind.
     """
 
     ENTITY_ID = "entity_id"
@@ -133,12 +138,13 @@ class DuplicateEntityError(StorageError):
 class DuplicateExternalIdentityError(DuplicateEntityError):
     """Concurrent-provisioning signal raised by :meth:`Storage.provision_user`.
 
-    In spec §6's concurrent-first-login race both attempts carry the *same*
-    email **and** the same identity tuple, so the loser's first UNIQUE
-    violation may be ``users.email`` rather than the identity index. Inside
-    ``provision_user`` any UNIQUE violation on the email or the identity tuple
-    is interpreted as that race and surfaces as this error (kind is pinned to
-    ``external_identity``), never as a plain email conflict.
+    The external-identity tuple ``(provider, provider_subject,
+    provider_tenant)`` is the **sole** race/convergence key (Phase 12): in
+    spec §6's concurrent-first-login race both attempts carry the same
+    tuple, and the loser's UNIQUE violation on it surfaces as this error
+    (kind is pinned to ``external_identity``). Email is no longer part of
+    the race story — two attempts sharing an address but carrying distinct
+    identity tuples are two legitimate separate users, never a conflict.
 
     ``existing_user_id`` is the winner's ``usr_`` identity when the adapter can
     resolve it after rolling back, else ``None`` — so Phase 03 converges
@@ -218,9 +224,10 @@ class ProvisionedOrganization(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# The protocol (23 methods: spec §11 surface + the §12 compound
+# The protocol (24 methods: spec §11 surface + the §12 compound
 # ``provision_user`` + the Phase 04 compound ``provision_organization``
-# + the four additive Phase 11 login-state/session operations)
+# + the four additive Phase 11 login-state/session operations
+# + the additive Phase 12 ``list_users_by_email`` exact-lookup)
 # ---------------------------------------------------------------------------
 
 
@@ -244,10 +251,14 @@ class Storage(Protocol):
     def create_user(self, user: User) -> User:
         """Persist a new user.
 
+        Email is **not** a uniqueness constraint from Phase 12 on: two
+        distinct ``usr_`` identities may carry the same address (shadow
+        registration), so this operation never raises a ``user_email``
+        conflict.
+
         Raises:
-            DuplicateEntityError: ``kind="user_email"`` when the email is
-                taken (email is a constraint, never an identity), or
-                ``kind="entity_id"`` when ``user.id`` already exists.
+            DuplicateEntityError: ``kind="entity_id"`` when ``user.id``
+                already exists.
         """
         ...
 
@@ -256,6 +267,22 @@ class Storage(Protocol):
 
         Raises:
             EntityNotFoundError: when no such user exists.
+        """
+        ...
+
+    def list_users_by_email(self, email: str) -> list[User]:
+        """Exact-match lookup of every user that carries ``email`` (Phase 12).
+
+        Email is a non-unique exact-lookup field, so this returns a list and
+        the consumer must handle zero/one/many results explicitly rather than
+        guessing (spec 12 invariant 5). Results are ordered by
+        ``(created_at, id)`` ascending — the same deterministic key the
+        paginated lists use, with ``id`` the tiebreaker. An unknown address
+        returns an empty list and **never** raises
+        :class:`EntityNotFoundError` (this is a lookup, not the §12 resolve
+        signal). There is deliberately no pagination cursor: this is a
+        documented **bounded** domain operation serving the provisioning and
+        administration resolution rules, not a generic adapter query API.
         """
         ...
 
@@ -511,18 +538,22 @@ class Storage(Protocol):
         silently skip them. The returned :class:`ProvisionedUser` echoes the
         caller-supplied objects unchanged — nothing is minted or re-read.
 
-        Duplicate/concurrency semantics: any UNIQUE violation on the user
-        email **or** the identity tuple is interpreted as spec §6's concurrent
-        first-login race (both attempts carry the same email and identity
-        tuple) and raises :class:`DuplicateExternalIdentityError` after a full
-        rollback, with ``existing_user_id`` resolved by the adapter when it can
-        and ``None`` otherwise. Other UNIQUE violations (organization slug,
-        membership pair) propagate as their own :class:`DuplicateEntityError`
-        kind. Every failure path is fully rolled back: no partial user,
-        organization, membership, or audit rows survive a rejected batch.
+        Duplicate/concurrency semantics: the identity tuple is the **sole**
+        race/convergence key (Phase 12). A UNIQUE violation on it is
+        interpreted as spec §6's concurrent first-login race (both attempts
+        carry the same identity tuple) and raises
+        :class:`DuplicateExternalIdentityError` after a full rollback, with
+        ``existing_user_id`` resolved by the adapter when it can and ``None``
+        otherwise. Email is never a conflict here: a batch that shares an
+        address with an existing user but carries a fresh identity tuple
+        provisions a second, independent user. Other UNIQUE violations
+        (organization slug, membership pair) propagate as their own
+        :class:`DuplicateEntityError` kind. Every failure path is
+        fully rolled back: no partial user, organization, membership, or
+        audit rows survive a rejected batch.
 
         Raises:
-            DuplicateExternalIdentityError: email/identity-tuple collision,
+            DuplicateExternalIdentityError: identity-tuple collision,
                 including the concurrent-provisioning race.
             DuplicateEntityError: ``kind="organization_slug"`` /
                 ``kind="membership"`` / ``kind="entity_id"`` for the remaining

@@ -13,7 +13,8 @@ contract, so every branch is pinned:
 - (d) token validation failure → 401, JWKS outage → 503, zero user-table
   writes either way;
 - (e) profile subject/verification/shape failure → 401, outage → 503;
-- (f) disabled user → 403, email collision → 409;
+- (f) disabled user → 403; a different ``sub`` sharing an existing user's
+  email provisions a second, independent user (Phase 12), never a 409;
 - (g) success → 302 to the stored return URL with the ``feednow_session``
   cookie (``HttpOnly; SameSite=Lax; Path=/``; ``Secure`` caller-controlled),
   and a withdrawn return origin → 400 with **no** session issued.
@@ -596,7 +597,7 @@ def test_profile_outage_is_503(env: _Env) -> None:
 
 
 # ---------------------------------------------------------------------------
-# (f) identity resolution failures
+# (f) identity resolution: disabled stays 403; a shared email coexists (12)
 # ---------------------------------------------------------------------------
 
 
@@ -615,7 +616,11 @@ def test_disabled_user_is_403(env: _Env) -> None:
     assert env.storage.calls.count("create_app_session") == 0
 
 
-def test_email_collision_is_409(env: _Env) -> None:
+def test_email_coexistence_provisions_second_user(env: _Env) -> None:
+    """Phase 12: a stranger already owns this email under a different sub.
+    The callback no longer 409s — the new sub provisions its own user
+    through one full batch and receives a session; the identity tuple, not
+    the email, is the convergence key, and the stranger is untouched."""
     env.seed_user("usr_stranger_cb", "stranger-sub", NATIVE_EMAIL)
     state = env.start_login()
     env.token_endpoint.token = env.access_token("collision-sub")
@@ -623,11 +628,16 @@ def test_email_collision_is_409(env: _Env) -> None:
 
     response = env.callback(state)
 
-    assert response.status_code == 409
-    envelope = Error.model_validate(response.json())
-    assert envelope.code == "conflict"
-    assert env.storage.calls.count("create_organization") == 0  # no partial batch
-    assert env.storage.calls.count("create_app_session") == 0
+    assert response.status_code == 302
+    assert response.headers["location"] == RETURN_URL
+    assert env.storage.calls.count("provision_user") == 1  # one full batch
+    assert env.storage.calls.count("create_organization") == 0  # not standalone
+    users = env.table_rows("users")
+    assert len(users) == 2  # the seeded stranger and the new shadow user
+    assert {row["email"] for row in users} == {NATIVE_EMAIL}
+    assert env.table_rows("app_sessions")  # the new user got its own session
+    stranger = env.storage.get_user(UserId("usr_stranger_cb"))
+    assert stranger.display_name == "seed usr_stranger_cb"  # never merged/overwritten
 
 
 # ---------------------------------------------------------------------------
