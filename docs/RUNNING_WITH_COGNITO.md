@@ -145,10 +145,11 @@ implements the WIP 09 flow contract:
    non-200 `/v1/me` exit non-zero.
 
 Configuration is read from `FEEDNOW_LOGIN_ENV_FILE` when set, defaulting to
-`deploy/docker/.env`. Because Cognito access tokens carry no `email` claim,
-`/v1/me` derives the provisioned `User.email` from the validated claims
-(`email` claim → email-shaped `username` → `{sub}@cognito.invalid`; see
-`docs/contracts.md`).
+`deploy/docker/.env`. On first login, `/v1/me` requires a verified Cognito
+profile from the configured `FEEDNOW_COGNITO_USERINFO_URL`; it does not invent
+an email from the token subject or username. Without that profile source, a
+new identity is rejected before storage is changed. Existing identities are
+resolved without another user-info request.
 
 ---
 
@@ -226,18 +227,15 @@ curl -X POST "${API_URL}/v1/api-keys" \
   -d '{"name": "test-key", "environment": "test", "scopes": ["feednow:orders:read"]}'
 ```
 
-### WIP 09 live acceptance checklist (non-production dev pool)
+### Historical Phase 09 local-harness checklist (superseded)
 
-Run against the dev User Pool created above and the local Docker runtime
-(`./run-dev.sh --cognito`). Hermetic behavior for every step below is proven
-offline by `src/tests/unit/test_cognito_login_script.py` and
-`src/tests/unit/test_oauth_callback.py`; this checklist is the operator-run
-live pass recorded in `docs/phases/09-local-cognito-login.md`.
+This checklist describes the earlier local bearer-token harness contract. It
+is retained as historical context; Phase 11's verified-profile provisioning
+and deployed session-flow checks below supersede its first-login expectations.
 
 - [ ] **New email/password user**: sign up in the Hosted UI, sign in, paste
-      the callback URL → exit 0 and stdout is exactly the `GET /v1/me` JSON
-      with a fresh `usr_` id (email-derived or `{sub}@cognito.invalid`
-      placeholder).
+      the callback URL → earlier behavior returned a fresh `usr_` id; the
+      current profile gate requires a verified user-info profile instead.
 - [ ] **Existing Google user**: `./cognito-login.sh --provider Google` →
       the authorize URL on stderr carries `identity_provider=Google` and the
       flow completes with the user's `/v1/me` JSON.
@@ -267,6 +265,13 @@ live pass recorded in `docs/phases/09-local-cognito-login.md`.
 | `FEEDNOW_DYNAMODB_REGION` | AWS runtime | DynamoDB region |
 | `FEEDNOW_TABLE_PREFIX` | AWS runtime | Environment-specific table prefix |
 | `FEEDNOW_PEPPER_SECRET_ID` | AWS runtime | Secrets Manager secret name, never secret material |
+| `FEEDNOW_COGNITO_AUTHORIZE_URL` | Optional Phase 11 session gate | HTTPS Cognito authorization endpoint |
+| `FEEDNOW_COGNITO_TOKEN_ENDPOINT` | Optional Phase 11 session gate | HTTPS Cognito token endpoint |
+| `FEEDNOW_COGNITO_USERINFO_URL` | Optional Phase 11 session gate | HTTPS Cognito user-info endpoint; also needed for local first-login provisioning |
+| `FEEDNOW_OAUTH_REDIRECT_URL` | Optional Phase 11 session gate | Exact callback URL |
+| `FEEDNOW_ALLOWED_RETURN_ORIGINS` | Optional Phase 11 session gate | Comma-separated approved origins |
+| `FEEDNOW_SESSION_TTL_SECONDS` | Optional Phase 11 session gate | Positive session lifetime in seconds |
+| `FEEDNOW_COOKIE_SECURE` | Optional Phase 11 session gate | `true` for HTTPS deployments |
 
 ---
 
@@ -278,6 +283,122 @@ live pass recorded in `docs/phases/09-local-cognito-login.md`.
 
 ### "Token validation failed: audience mismatch"
 - Verify `FEEDNOW_COGNITO_CLIENT_ID` matches the token's `client_id` claim
+
+---
+
+## 7. Deployed client settings verification (Phase 11)
+
+Run these checks against the **dev** user pool and app client after deployment.
+Use the deployed values from the `FeedNowAuth-dev` stack and the same
+`COGNITO_CALLBACK_URLS` input used for its synth/deploy. Do not infer deployed
+settings from CDK source or a successful local mock. The callback must be the
+deployed service URL ending in `/oauth/callback`; the logout URL must also be
+registered. Never request or print the app client's secret.
+
+### Read the deployed app-client settings
+
+Set the identifiers from the dev stack outputs or Cognito console (these are
+resource identifiers, not credentials):
+
+```bash
+export AWS_REGION=<dev-region>
+export USER_POOL_ID=<dev-user-pool-id>
+export CLIENT_ID=<dev-public-app-client-id>
+```
+
+Read only the relevant deployed fields. This command deliberately omits
+`ClientSecret` and emits no unrelated account configuration:
+
+```bash
+aws cognito-idp describe-user-pool-client \
+  --region "$AWS_REGION" \
+  --user-pool-id "$USER_POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --query 'UserPoolClient.{ClientId:ClientId,AllowedOAuthFlows:AllowedOAuthFlows,AllowedOAuthScopes:AllowedOAuthScopes,CallbackURLs:CallbackURLs,LogoutURLs:LogoutURLs,SupportedIdentityProviders:SupportedIdentityProviders,EnabledFlows:ExplicitAuthFlows,ClientSecretConfigured:contains(keys(@), `ClientSecret`)}' \
+  --output json
+```
+
+Confirm the output contains all of the following:
+
+- `AllowedOAuthFlows` contains `code` (authorization-code grant).
+- `ClientSecretConfigured` is `false`, confirming this is a public client. The
+  Hosted UI authorization request uses `code_challenge_method=S256` and the
+  callback completes the `code_verifier` exchange.
+- `AllowedOAuthScopes` contains `openid`, `email`, and `profile`.
+- `CallbackURLs` contains every intended deployment callback, including the
+  exact deployed `.../oauth/callback` URL. These URLs are sourced from the
+  `COGNITO_CALLBACK_URLS` deploy input; compare against the value used for the
+  deployed stack, not a source-code default.
+- `LogoutURLs` contains the intended deployed post-logout URL.
+- `SupportedIdentityProviders` contains `COGNITO` and `Google`.
+
+In the Cognito console, verify the same client under **App integration → App
+clients → Hosted UI**. Verify native self-service registration separately
+under the user pool's sign-up settings: email is a sign-in attribute, email
+verification is enabled, and self-registration is enabled for the dev pool.
+For federation, verify the Google identity provider is configured and enabled
+on this app client. The CLI client response cannot prove the Google provider's
+upstream OAuth credentials or consent screen; those require the console's
+identity-provider settings.
+
+### Verify deployed runtime configuration
+
+Confirm the Lambda's non-secret environment configuration includes the full
+Phase 11 session set. The query returns only the seven named values:
+
+```bash
+aws lambda get-function-configuration \
+  --region "$AWS_REGION" \
+  --function-name <dev-function-name> \
+  --query 'Configuration.Environment.Variables.{Authorize:FEEDNOW_COGNITO_AUTHORIZE_URL,Token:FEEDNOW_COGNITO_TOKEN_ENDPOINT,UserInfo:FEEDNOW_COGNITO_USERINFO_URL,Redirect:FEEDNOW_OAUTH_REDIRECT_URL,Origins:FEEDNOW_ALLOWED_RETURN_ORIGINS,SessionTTL:FEEDNOW_SESSION_TTL_SECONDS,CookieSecure:FEEDNOW_COOKIE_SECURE}' \
+  --output json
+```
+
+Do not add the secret-name or unrelated variables to this output.
+
+| Key | Expected value shape |
+| --- | --- |
+| `FEEDNOW_COGNITO_AUTHORIZE_URL` | HTTPS Cognito `/oauth2/authorize` endpoint |
+| `FEEDNOW_COGNITO_TOKEN_ENDPOINT` | HTTPS Cognito `/oauth2/token` endpoint |
+| `FEEDNOW_COGNITO_USERINFO_URL` | HTTPS Cognito `/oauth2/userInfo` endpoint |
+| `FEEDNOW_OAUTH_REDIRECT_URL` | Exact deployed callback URL ending in `/oauth/callback` |
+| `FEEDNOW_ALLOWED_RETURN_ORIGINS` | Comma-separated approved HTTPS origins |
+| `FEEDNOW_SESSION_TTL_SECONDS` | Positive integer |
+| `FEEDNOW_COOKIE_SECURE` | `true` for deployed HTTPS |
+
+The seven keys are an all-or-nothing gate. Removing all seven restores the
+pre-Phase-11 deployed route surface; a partial set is a configuration error.
+Keep environment values out of command transcripts when the deployment tool
+prints unrelated Lambda settings. `FEEDNOW_COGNITO_USERINFO_URL` is also
+required in the local Cognito composition for first-login provisioning: with
+the Phase 11 profile gate, bearer-only first login without it fails with 401.
+
+### Manual dev journeys
+
+Use a dev account only. Complete both journeys through the deployed application
+and record the date, deployment/stack revision, masked subject (for example,
+first eight characters only), final route, and result. Do not record
+authorization codes, state, PKCE verifier, access tokens, email addresses, or
+client secrets.
+
+1. **Native email:** start `/oauth/login` with an approved `next`, sign up or
+   sign in through Cognito Managed Login, complete email verification when
+   prompted, and confirm the browser returns to the approved destination with
+   a `feednow_session` cookie marked `HttpOnly`, `SameSite=Lax`, `Path=/`, and
+   `Secure`. Confirm a first login provisions the verified profile and a
+   repeat login resolves the same account.
+2. **Google federation:** start the same flow with the configured Google IdP,
+   complete Google sign-in/consent, and confirm the same callback, cookie, and
+   approved-return behavior. Confirm the profile returned by Cognito is
+   verified and mapped to the same Cognito `sub` as the access token.
+
+Do not treat a local test, mock, successful synth, or source configuration as
+this deployed proof. Record the actual deployed output and both journey results
+in `docs/phases/11-cognito-authentication-profile-and-session-boundary.md`.
+Until those checks have been executed, this task's operational acceptance and
+the Phase 11 handoff remain incomplete.
+
+## 8. Troubleshooting reference
 
 ### "Pepper secret too short"
 - Must be 32+ bytes (base64 decoded). Regenerate with `openssl rand -base64 32`
@@ -299,7 +420,7 @@ live pass recorded in `docs/phases/09-local-cognito-login.md`.
 
 ---
 
-## 7. Production Deployment (Phase 07)
+## 9. Production Deployment (Phase 07)
 
 For AWS Lambda deployment, see:
 - `docs/phases/07-aws-infrastructure.md` — CDK stack, composition root
@@ -313,9 +434,8 @@ The CDK stack creates:
 - HTTP API Gateway + Lambda function
 - Least-privilege IAM roles
 
-The stack does not create an OAuth callback route: `/oauth/callback` is a
-local-only capture page mounted by `deploy/docker/local_runtime.py`, never by
-the production `app.main:create_app` surface. Browser login completes through
-the local `cognito-login.sh` flow; the deployed runtime keeps accepting
-bearer access tokens, and feednow-auth owning a hosted browser login session
-remains an explicit follow-up.
+The deployed Lambda mounts `/oauth/login` and `/oauth/callback` only when the
+complete Phase 11 session configuration is present. The local capture page
+remains a separate development harness. This phase does not enable cookie-based
+authentication on `/v1/*`; those routes continue to use the bearer-token
+contract.
