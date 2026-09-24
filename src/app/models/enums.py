@@ -62,6 +62,24 @@ class MembershipRole(StrEnum):
     VIEWER = "viewer"
 
 
+class ApplicationRole(StrEnum):
+    """Global FeedNow application role carried by a ``User`` (Phase 12).
+
+    Completely separate from :class:`MembershipRole`: membership roles are
+    **organization-local** grants resolved per organization, while an
+    application role is a single global attribute of the user record. The
+    two enums share no code path and neither substitutes for the other —
+    ``ADMIN`` appearing in both vocabularies is a naming coincidence, not a
+    relationship (spec 12 invariant 1). ``USER`` is the only value any
+    writer obtains without naming it; ``ADMIN`` is granted out of band
+    (Phase 13 bootstrap), never by login, and API-key principal contexts
+    stay roleless (spec 12 invariant 7).
+    """
+
+    USER = "user"
+    ADMIN = "admin"
+
+
 class OrganizationType(StrEnum):
     """Kind of organization (spec §4 initial types)."""
 
@@ -96,6 +114,7 @@ class IdentityProvider(StrEnum):
 __all__ = [
     "ApiKeyEnvironment",
     "ApiKeyStatus",
+    "ApplicationRole",
     "IdentityProvider",
     "MembershipRole",
     "MembershipStatus",

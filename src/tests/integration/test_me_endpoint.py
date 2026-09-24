@@ -185,7 +185,18 @@ def test_me_provisions_once_and_returns_internal_identity(env: _Env) -> None:
     assert body["display_name"] == "me-user"
     assert body["email"] == EMAIL
     assert body["status"] == "active"
-    assert {"id", "display_name", "email", "status", "created_at", "updated_at"} == set(body)
+    # Phase 12: a first-provisioned user projects the USER application role
+    # (the model default is the only reachable value pre-persistence).
+    assert body["application_role"] == "user"
+    assert {
+        "id",
+        "display_name",
+        "email",
+        "status",
+        "application_role",
+        "created_at",
+        "updated_at",
+    } == set(body)
 
     # No provider material anywhere in the response (AGENTS.md / acceptance 4).
     serialized = json.dumps(body)
@@ -193,6 +204,9 @@ def test_me_provisions_once_and_returns_internal_identity(env: _Env) -> None:
     assert ALLOWED_CLIENT not in serialized
     assert env.token() not in serialized
     assert "cognito" not in serialized.lower()
+    # Phase 12: the role is internal vocabulary — no provider identity keys
+    # (``sub``, provider names, external-identity material) ride along.
+    assert not {"sub", "provider", "provider_subject", "external_identities"} & set(body)
 
     # Exactly one provisioning write; repeat requests converge on the same user.
     assert env.storage.calls.count("provision_user") == 1

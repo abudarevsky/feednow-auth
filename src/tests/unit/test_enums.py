@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 from app.models.enums import (
     ApiKeyEnvironment,
     ApiKeyStatus,
+    ApplicationRole,
     IdentityProvider,
     MembershipRole,
     MembershipStatus,
@@ -21,13 +22,15 @@ from app.models.enums import (
 
 # Exact sets pinned by the Phase 01 breakdown (Planner decisions). Spec §4
 # names the concepts but does not enumerate them; these values are frozen for
-# Phase 02 (stored as strings) and Phase 05 (branched on).
+# Phase 02 (stored as strings) and Phase 05 (branched on). Phase 12 adds
+# ApplicationRole (spec 12 invariant 1).
 PINNED_ENUM_VALUES: dict[type[StrEnum], set[str]] = {
     UserStatus: {"active", "disabled"},
     OrganizationStatus: {"active", "disabled"},
     MembershipStatus: {"active", "disabled"},
     ApiKeyStatus: {"active", "revoked"},
     MembershipRole: {"owner", "admin", "member", "viewer"},
+    ApplicationRole: {"user", "admin"},
     OrganizationType: {"personal", "customer", "internal"},
     ApiKeyEnvironment: {"live", "test"},
     IdentityProvider: {"cognito", "shopify", "google", "microsoft", "oidc"},
@@ -85,3 +88,26 @@ def test_api_key_status_has_no_expired_variant():
 def test_membership_status_has_no_removed_variant():
     # Member removal is a physical delete, not a status.
     assert "removed" not in {member.value for member in MembershipStatus}
+
+
+def test_application_role_is_disjoint_from_membership_role():
+    # Spec 12 invariant 1: the global application role is a separate enum from
+    # the organization-local membership role — no shared code path, no
+    # inheritance. The overlapping ``admin`` *string* is a naming coincidence
+    # between two distinct vocabularies; the sets must not merge either way.
+    assert ApplicationRole is not MembershipRole
+    assert not issubclass(ApplicationRole, MembershipRole)
+    assert not issubclass(MembershipRole, ApplicationRole)
+    app_values = {member.value for member in ApplicationRole}
+    org_values = {member.value for member in MembershipRole}
+    # Organization-local roles never exist as application roles ...
+    assert org_values - app_values == {"owner", "member", "viewer"}
+    # ... and the global user role never exists as a membership role.
+    assert "user" not in org_values
+
+
+def test_application_role_default_value_is_user():
+    # USER is the only role a writer obtains without naming it (the User
+    # model default; proven end-to-end in test_identity_entities.py).
+    assert ApplicationRole.USER == "user"
+    assert ApplicationRole("user") is ApplicationRole.USER

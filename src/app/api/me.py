@@ -9,8 +9,9 @@ singletons) stays intact.
 
 The route is registered **from the frozen manifest entry itself**
 (:func:`~app.api.schemas.manifest.endpoint_for`), so method, path, success
-status, and response model cannot drift from the §14 contract — the response
-schema (:class:`~app.api.schemas.me.MeResponse`) is untouched by this phase.
+status, and response model cannot drift from the §14 contract — Phase 12
+extended the response schema (:class:`~app.api.schemas.me.MeResponse`) with
+``application_role`` but left the frozen route entry untouched.
 
 The handler returns the caller's own :class:`~app.models.user.User` fields
 only: the resolved ``AuthorizationContext`` (organization, roles) exists for
@@ -65,6 +66,7 @@ def build_me_router(
             display_name=user.display_name,
             email=user.email,
             status=user.status,
+            application_role=user.application_role,
             created_at=user.created_at,
             updated_at=user.updated_at,
         )

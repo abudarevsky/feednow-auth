@@ -31,6 +31,7 @@ from app.api.schemas import (
     PageParams,
 )
 from app.api.schemas.manifest import ENDPOINTS
+from app.models.enums import ApplicationRole
 from app.models.user import User
 
 # --- §15 payloads, copied verbatim from the spec ------------------------------
@@ -233,10 +234,19 @@ def test_me_response_mirrors_user_fields_and_forbids_extras() -> None:
         "display_name": "Ada",
         "email": "ada@example.com",
         "status": "active",
+        "application_role": "user",
         "created_at": CREATED_AT,
         "updated_at": CREATED_AT,
     }
-    MeResponse.model_validate(payload)
+    parsed = MeResponse.model_validate(payload)
+    assert parsed.application_role is ApplicationRole.USER
+    # Phase 12: the global role is exposed on /me and validated as an enum.
+    assert (
+        MeResponse.model_validate({**payload, "application_role": "admin"}).application_role
+        is ApplicationRole.ADMIN
+    )
+    with pytest.raises(ValidationError):
+        MeResponse.model_validate({**payload, "application_role": "owner"})
     with pytest.raises(ValidationError):
         MeResponse.model_validate({**payload, "external_identities": []})
 

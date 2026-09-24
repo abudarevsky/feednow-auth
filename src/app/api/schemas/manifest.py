@@ -19,7 +19,8 @@ revision — §14/§15 define no body for these; §15's key-creation request and
 response below are copied verbatim and are NOT derived):
 
 - ``GET /v1/me`` → ``MeResponse``: ``id``, ``display_name``, ``email``,
-  ``status``, ``created_at``, ``updated_at`` (mirrors the §4 ``User``).
+  ``status``, ``application_role``, ``created_at``, ``updated_at`` (mirrors
+  the §4 ``User``, Phase 12 role field included).
 - ``POST /v1/organizations`` → ``OrganizationCreateRequest``: ``name``,
   ``slug``, ``type`` (default ``customer``); → ``OrganizationResponse``:
   ``id``, ``name``, ``slug``, ``type``, ``status``, ``created_at``,

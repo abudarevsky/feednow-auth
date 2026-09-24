@@ -19,12 +19,21 @@ from app.models import (
     Organization,
     User,
 )
+from app.models.enums import ApplicationRole
 from app.models.ids import UserId
 
-# --- §4 field lists, verbatim and in spec order -----------------------------
+# --- §4 field lists (+ Phase 12 application_role), verbatim and in order ----
 
 SPEC_FIELD_LISTS = {
-    User: ["id", "display_name", "email", "status", "created_at", "updated_at"],
+    User: [
+        "id",
+        "display_name",
+        "email",
+        "status",
+        "application_role",
+        "created_at",
+        "updated_at",
+    ],
     ExternalIdentity: [
         "id",
         "user_id",
@@ -184,6 +193,33 @@ def test_missing_enum_field_rejected(entity, field):
     del payload[field]
     with pytest.raises(ValidationError):
         entity.model_validate(payload)
+
+
+# --- application_role (Phase 12) ---------------------------------------------
+
+
+def test_application_role_defaults_to_user_when_omitted():
+    # The explicit model default is the only way a writer obtains USER;
+    # VALID_PAYLOADS deliberately omits the field so this proves it.
+    assert "application_role" not in VALID_PAYLOADS[User]
+    assert build(User).application_role is ApplicationRole.USER
+
+
+def test_application_role_round_trips_explicitly():
+    admin = build(User, application_role="admin")
+    assert admin.application_role is ApplicationRole.ADMIN
+    dumped = admin.model_dump_json()
+    assert json.loads(dumped)["application_role"] == "admin"
+    assert User.model_validate_json(dumped) == admin
+    assert User.model_validate(admin.model_dump()) == admin
+
+
+@pytest.mark.parametrize("bad", ["owner", "member", "viewer", "ADMIN", "superuser", ""])
+def test_invalid_application_role_values_rejected(bad):
+    # Membership-only roles are not application roles (spec 12 invariant 1):
+    # the separate vocabularies do not accept each other's strings.
+    with pytest.raises(ValidationError):
+        build(User, application_role=bad)
 
 
 # --- application identity vs. provider subject --------------------------------
