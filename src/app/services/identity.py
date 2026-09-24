@@ -15,25 +15,29 @@ Flow (spec §6, breakdown decisions 4—9):
 2. A lookup miss builds one fully formed batch with
    :func:`build_provisioning_batch` — pure in ``(claims, profile, now, ids)``
    so every value is deterministic under test — and hands it to the single
-   atomic ``provision_user`` call (User ``active``, ExternalIdentity, personal
-   ``active`` organization, ``owner`` ``active`` membership, and the three
-   creation audits ``user.created`` / ``organization.created`` /
-   ``membership.created``). The batch's ``User.email`` comes **only** from a
+   atomic ``provision_user`` call (User ``active`` with ``application_role``
+   set **explicitly** to ``user`` (Phase 12 — never via the model default),
+   ExternalIdentity, personal ``active`` organization, ``owner`` ``active``
+   membership, and the three creation audits ``user.created`` /
+   ``organization.created`` / ``membership.created``). The batch's
+   ``User.email`` comes **only** from a
    :class:`~app.auth.cognito.CognitoProfile` that passed
    :func:`~app.auth.cognito.require_provisioning_profile` (Phase 11): the
    access-token ``email`` claim is advisory and a miss without a profile
    provider is refused with :class:`~app.auth.errors.TokenValidationError`
    before any storage write.
 3. A :class:`~app.storage.contract.DuplicateExternalIdentityError` is spec §6's
-   concurrent-first-login race *or* a genuine email collision. The service
+   concurrent-first-login race: the identity tuple is the **sole** race/
+   convergence key (Phase 12 — a duplicate email is no longer a conflict on
+   either adapter; equal emails are legitimate separate users). The service
    re-reads the identity tuple: found → converge on the winner's user; absent
    → :class:`ProvisioningConflictError` (409-mapped in task 5). **Convergence
-   happens only via that re-read** — ``error.existing_user_id`` is resolved by
-   the adapter through an email fallback and is therefore a *stranger's* id in
-   the email-collision case; it serves only as a post-convergence cross-check
-   (decision 7). The batch email plays **no part** in deciding convergence:
-   the identity tuple is the sole authority, so the §6 race outcome is
-   independent of the profile email value.
+   happens only via that re-read** — ``error.existing_user_id`` is the winner
+   the adapter resolved after its own rollback (or ``None``) and serves only
+   as a post-convergence cross-check (decision 7). The batch email plays
+   **no part** in deciding convergence: the identity tuple is the sole
+   authority, so the §6 race outcome is independent of the profile email
+   value.
 4. After any resolution, a non-``active`` user raises :class:`DisabledUserError`
    with no storage mutation (reads only; provisioning already happened or was
    skipped).
@@ -73,6 +77,7 @@ from app.auth.errors import TokenValidationError
 from app.models.audit_event import AuditEvent
 from app.models.authorization_context import AuthorizationContext
 from app.models.enums import (
+    ApplicationRole,
     IdentityProvider,
     MembershipRole,
     MembershipStatus,
@@ -132,12 +137,15 @@ class NoActiveOrganizationError(Exception):
 
 
 class ProvisioningConflictError(Exception):
-    """Provisioning raced a *different* account (task 5 → 409).
+    """Provisioning raced an identity with no resolvable winner (task 5 → 409).
 
     The identity-tuple re-read after a :class:`~app.storage.contract.
-    DuplicateExternalIdentityError` found no winner, so the batch conflicted
-    on the email constraint without sharing the identity — a genuine email
-    collision, not spec §6's same-user race. Fixed safe message (no email).
+    DuplicateExternalIdentityError` found no winner, so storage reported an
+    identity-tuple conflict whose tuple belongs to nobody — not spec §6's
+    same-user race. From Phase 12 on this is the error's **only** trigger: a
+    duplicate email is no longer a conflict on either adapter (equal emails
+    are separate users), so no email path reaches this class. Fixed safe
+    message (no email).
     """
 
     def __init__(
@@ -260,7 +268,10 @@ def build_provisioning_batch(
     profile's ``display_name`` when present, else the ``username`` claim when
     non-empty, else ``sub`` (the verifier normalizes empty/absent to ``None``);
     ``User.email`` comes from the verified ``profile.email`` — never from the
-    claims. The default workspace is
+    claims; ``User.application_role`` is set **explicitly** to
+    :attr:`~app.models.enums.ApplicationRole.USER` (Phase 12 — provisioning
+    never relies on the model default, and ``ADMIN`` is granted out of band,
+    never by login). The default workspace is
     ``"{display_name}'s Workspace"`` with the unique-by-construction slug
     ``personal-{user_id}`` (decision 6 — never derived from email); all five
     entities and three audits share the single injected ``now``; audit
@@ -274,6 +285,7 @@ def build_provisioning_batch(
         display_name=display_name,
         email=profile.email,
         status=UserStatus.ACTIVE,
+        application_role=ApplicationRole.USER,
         created_at=now,
         updated_at=now,
     )
@@ -373,8 +385,9 @@ def resolve_or_provision(
 
     Raises:
         DisabledUserError: the resolved user is not ``active`` (no mutation).
-        ProvisioningConflictError: the race re-read found no identity — a
-            genuine email collision with a different account.
+        ProvisioningConflictError: the identity-tuple race re-read found no
+            winner (from Phase 12 on, email is never a conflict, so this is
+            the error's only trigger).
         NoActiveOrganizationError: the user has no usable organization
             (unreachable right after provisioning; reachable once Phase 04
             can disable orgs).
@@ -405,12 +418,13 @@ def _provision_or_converge(
 
     Decision 7's rule is absolute: convergence is driven **only** by the
     identity-tuple re-read (same ``sub`` → the winner's user). The adapter's
-    ``existing_user_id`` is email-fallback-resolved and may name a stranger,
-    so after a successful re-read it is consulted only to cross-check the
-    winner — a disagreement means storage told us two different users and is
-    refused as a conflict rather than silently trusted. Because the decision
-    never compares emails, a caller exercising the §6 race needs no particular
-    profile email value beyond the gate's presence requirement.
+    ``existing_user_id`` is the winner it resolved after its own rollback (or
+    ``None``), so after a successful re-read it is consulted only to
+    cross-check the winner — a disagreement means storage told us two
+    different users and is refused as a conflict rather than silently
+    trusted. Because the decision never compares emails, a caller exercising
+    the §6 race needs no particular profile email value beyond the gate's
+    presence requirement.
 
     The profile gate (:func:`verified_provisioning_profile`) runs before the
     batch is built, so a gate failure — or a missing provider on this miss

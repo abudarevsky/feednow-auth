@@ -16,6 +16,10 @@ decision. Acceptance mapping:
   provisions a **second, independent user** with its own personal org and
   owner membership — email is no longer a conflict, the identity tuple is
   the only convergence key, and neither batch leaves partial rows;
+- Phase 12 role persistence: a store-seeded ``application_role=ADMIN`` user
+  comes back from the login hit path with role, status, email, and
+  ``updated_at`` unchanged (set directly through the adapter; no service API
+  grants roles);
 - Phase 11's verified profile (task 5): the miss path provisions **only**
   from a gated :class:`~app.auth.cognito.CognitoProfile` (email and display
   name), a miss without a profile provider raises ``TokenValidationError``
@@ -38,6 +42,7 @@ import pytest
 from app.auth.cognito import CognitoClaims, CognitoProfile
 from app.auth.errors import TokenValidationError
 from app.models.enums import (
+    ApplicationRole,
     IdentityProvider,
     MembershipRole,
     MembershipStatus,
@@ -46,7 +51,9 @@ from app.models.enums import (
     UserStatus,
 )
 from app.models.external_identity import ExternalIdentity
-from app.models.ids import ExternalIdentityId, UserId
+from app.models.ids import ExternalIdentityId, MembershipId, OrganizationId, UserId
+from app.models.membership import Membership
+from app.models.organization import Organization
 from app.models.user import User
 from app.services.identity import (
     DisabledUserError,
@@ -276,6 +283,89 @@ def test_email_coexistence_provisions_two_users_with_own_orgs(db_path: Path) -> 
     users = {str(row["id"]): row["email"] for row in _rows(db_path, "users")}
     assert set(users) == {str(first.user.id), str(second.user.id)}
     assert set(users.values()) == {"dev@example.test"}  # shared address, two rows
+
+
+# ---------------------------------------------------------------------------
+# Phase 12: a store-granted ADMIN survives the login hit path unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_admin_role_survives_login_hit_path_unchanged(db_path: Path) -> None:
+    """A user seeded with ``application_role=ADMIN`` **directly through the
+    adapter** (no service API grants roles) comes back from a login hit with
+    role, status, email, and ``updated_at`` unchanged: login never rewrites
+    or escalates the global role (spec 12 invariants 2—3)."""
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        seeded = storage.create_user(
+            User(
+                id=UserId("usr_admin_seed"),
+                display_name="Admin",
+                email="admin@example.test",
+                status=UserStatus.ACTIVE,
+                application_role=ApplicationRole.ADMIN,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        storage.create_external_identity(
+            ExternalIdentity(
+                id=ExternalIdentityId("extid_admin_seed"),
+                user_id=seeded.id,
+                provider=IdentityProvider.COGNITO,
+                provider_subject="cognito-sub-sqlite",
+                provider_tenant=None,
+                created_at=_NOW,
+            )
+        )
+        storage.create_organization(
+            Organization(
+                id=OrganizationId("org_admin_seed"),
+                name="Admin's Workspace",
+                slug="personal-usr_admin_seed",
+                type=OrganizationType.PERSONAL,
+                status=OrganizationStatus.ACTIVE,
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+        storage.create_membership(
+            Membership(
+                id=MembershipId("mem_admin_seed"),
+                organization_id=OrganizationId("org_admin_seed"),
+                user_id=seeded.id,
+                role=MembershipRole.OWNER,
+                status=MembershipStatus.ACTIVE,
+                created_at=_NOW,
+            )
+        )
+        later = datetime(2026, 9, 20, 12, 0, 0, tzinfo=UTC)
+        resolved = resolve_or_provision(storage, _claims(), now=later)
+
+        # The hit path returns the stored model byte-for-byte (role, status,
+        # email, and updated_at included) and re-reads identical state.
+        assert resolved.user == seeded
+        assert resolved.user.application_role is ApplicationRole.ADMIN
+        assert resolved.user.status is UserStatus.ACTIVE
+        assert resolved.user.email == "admin@example.test"
+        assert resolved.user.updated_at == _NOW
+        assert storage.get_user(seeded.id) == seeded
+    finally:
+        storage.close()
+
+    users = _rows(db_path, "users")
+    assert len(users) == 1
+    assert users[0]["application_role"] == "admin"  # persisted grant, not the default
+    assert _counts(db_path) == {
+        "users": 1,
+        "external_identities": 1,
+        "organizations": 1,
+        "memberships": 1,
+        "api_keys": 0,
+        "audit_events": 0,  # zero writes: no provisioning, no login mutation
+        "oauth_login_states": 0,
+        "app_sessions": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

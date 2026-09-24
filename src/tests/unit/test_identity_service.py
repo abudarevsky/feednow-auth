@@ -8,17 +8,20 @@ two acceptance-critical proofs live here:
   user never re-provisions (the read-only context probes are asserted
   separately);
 - **rejected/conflicting paths never mutate** — disabled users raise before
-  any context read, and the email-collision race raises after exactly one
-  (failed) ``provision_user`` attempt, never a second.
+  any context read, and the identity-conflict path (a race re-read with no
+  winner) raises after exactly one (failed) ``provision_user`` attempt, never
+  a second. From Phase 12 on a duplicate email is no longer a conflict on
+  either adapter, so the identity tuple is the only conflict signal.
 
 Per breakdown decision 7, the convergence test carries a *consistent*
-``existing_user_id`` while the conflict test carries a **stranger's** id —
-proving the service ignores that field for convergence and re-reads the
-identity tuple instead. Since Phase 11 task 5 every miss-path call carries a
-fake ``profile_provider``: account creation reads the email only from the
-gated :class:`~app.auth.cognito.CognitoProfile`, and a miss without one is
-refused before any write. Real-SQLite behavior (row read-back, repeat-call
-stability) is owned by ``test_identity_service_sqlite.py``.
+``existing_user_id`` while the conflict tests carry one the identity re-read
+never confirms — proving the service ignores that field for convergence and
+re-reads the identity tuple instead. Since Phase 11 task 5 every miss-path
+call carries a fake ``profile_provider``: account creation reads the email
+only from the gated :class:`~app.auth.cognito.CognitoProfile`, and a miss
+without one is refused before any write. Real-SQLite behavior (row read-back,
+repeat-call stability, same-email coexistence) is owned by
+``test_identity_service_sqlite.py``.
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from app.auth.errors import TokenValidationError
 from app.models.audit_event import AuditEvent
 from app.models.authorization_context import AuthorizationContext
 from app.models.enums import (
+    ApplicationRole,
     IdentityProvider,
     MembershipRole,
     MembershipStatus,
@@ -313,6 +317,8 @@ def test_batch_entities_match_pinned_values() -> None:
     assert batch.user.display_name == "Dev"
     assert batch.user.email == "dev@example.test"
     assert batch.user.status is UserStatus.ACTIVE
+    # Phase 12: the batch pins the global role explicitly (never via default).
+    assert batch.user.application_role is ApplicationRole.USER
     assert batch.user.created_at == _NOW and batch.user.updated_at == _NOW
 
     assert batch.identity.id == _IDS.external_identity_id
@@ -619,7 +625,7 @@ def test_race_convergence_never_depends_on_the_batch_email() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Race convergence vs. email collision (decision 7)
+# Race convergence vs. identity conflict with no winner (decision 7, Phase 12)
 # ---------------------------------------------------------------------------
 
 
@@ -656,14 +662,15 @@ def test_race_convergence_ignores_existing_user_id_when_none() -> None:
     assert resolved.user is winner
 
 
-def test_email_collision_raises_conflict_and_ignores_stranger_id() -> None:
-    """Decision 7's trap: the adapter resolves ``existing_user_id`` via an
-    email fallback, so in the not-a-race case it names a *stranger*. The
-    identity re-read misses; the service must raise the conflict and never
-    converge on (or return) the stranger's id."""
+def test_identity_conflict_without_winner_raises_conflict_and_ignores_reported_id() -> None:
+    """Phase 12's inverted collision case: a same-email user is now a
+    legitimate separate account, so the adapter's reported
+    ``existing_user_id`` can only ever name the identity-tuple winner — and
+    here the identity re-read finds no winner at all. The service must raise
+    the conflict and never converge on (or return) the unconfirmed id."""
     storage = StubStorage()
     stranger = _user("usr_stranger", email="dev@example.test")
-    storage.users["usr_stranger"] = stranger  # email taken, different identity
+    storage.users["usr_stranger"] = stranger  # same email: a valid separate user now
     storage.provision_error = DuplicateExternalIdentityError(
         existing_user_id=UserId("usr_stranger")
     )
