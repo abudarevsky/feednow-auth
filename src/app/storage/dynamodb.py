@@ -22,7 +22,14 @@ plain conflict).
 The module is importable on its own; nothing in ``app.main``/api/auth/services
 reaches it (the subprocess ``import app.main`` boto3-free proof stays green
 because only an explicit ``from app.storage.dynamodb import
-open_dynamodb_storage`` loads this module).
+open_dynamodb_storage`` loads this module). **Phase 11 task 7** added the
+login-state/session group
+(:meth:`DynamoDbStorage.save_oauth_login_state`,
+:meth:`DynamoDbStorage.consume_oauth_login_state` — the atomic
+``delete_item`` + ``attribute_exists`` + ``ALL_OLD`` get-and-delete —
+:meth:`DynamoDbStorage.create_app_session`, and
+:meth:`DynamoDbStorage.get_app_session`) against two new single-table
+:data:`SCHEMA` entries carrying a numeric ``expires_at_epoch`` TTL attribute.
 
 Design carried from the Phase 06 breakdown (planner decisions 2, 3, 5, 6, 7):
 
@@ -86,7 +93,8 @@ from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams, clamp_limit
-from app.models.timestamps import UtcDatetime, ensure_utc
+from app.models.session import AppSession, OAuthLoginState
+from app.models.timestamps import UtcDatetime, ensure_utc, utc_now
 from app.models.user import User
 from app.storage.contract import (
     DuplicateEntityError,
@@ -168,10 +176,15 @@ class TableSpec:
         return payload
 
 
-#: The seven-table schema (decision 2): record-id-keyed entity tables, the
-#: memberships table keyed by the native (org, user) pair with both listing
-#: GSIs, the api-keys listing GSI, and the key-only ``unique_constraints``
-#: table that enforces every uniqueness DynamoDB cannot enforce natively.
+#: The table schema (decision 2's single source): record-id-keyed entity
+#: tables, the memberships table keyed by the native (org, user) pair with
+#: both listing GSIs, the api-keys listing GSI, the key-only
+#: ``unique_constraints`` table that enforces every uniqueness DynamoDB
+#: cannot enforce natively, and — additive from Phase 11 task 7 — the two
+#: single-table session stores ``oauth_login_states`` and ``app_sessions``
+#: (partition key ``pk`` = the caller-minted opaque id, with a numeric
+#: ``expires_at_epoch`` attribute reserved for the Phase 11 task-8 TTL
+#: enablement).
 SCHEMA: Final[tuple[TableSpec, ...]] = (
     TableSpec(name="users", partition_key="pk"),
     TableSpec(name="organizations", partition_key="pk"),
@@ -192,6 +205,8 @@ SCHEMA: Final[tuple[TableSpec, ...]] = (
         ),
     ),
     TableSpec(name="unique_constraints", partition_key="pk"),
+    TableSpec(name="oauth_login_states", partition_key="pk"),
+    TableSpec(name="app_sessions", partition_key="pk"),
 )
 
 #: The :data:`SCHEMA` table names as a set — the adapter's own guard that an
@@ -567,6 +582,73 @@ def audit_event_item(audit_event: AuditEvent) -> dict[str, Any]:
     if audit_event.target_id is not None:
         item["target_id"] = audit_event.target_id
     return item
+
+
+# ---------------------------------------------------------------------------
+# Session items (Phase 11 task 7): the two additive single-table stores.
+# ``pk`` is the caller-minted opaque id; the sortable fixed-width
+# ``expires_at`` TEXT carries the exact (microsecond) instant the domain
+# record round-trips through, and the numeric ``expires_at_epoch`` (whole
+# seconds) is the TTL attribute the Phase 11 task-8 CDK enablement points
+# at. The adapter enforces expiry on read/consume immediately — DynamoDB
+# Local never runs the TTL background sweep and production TTL deletion is
+# asynchronous — so the epoch attribute is cleanup, never a correctness
+# dependency.
+# ---------------------------------------------------------------------------
+
+
+def ttl_epoch_seconds(value: datetime) -> int:
+    """Whole-second UTC epoch of one aware datetime (the TTL attribute form).
+
+    DynamoDB TTL requires a NUMBER of Unix epoch seconds; truncation means
+    TTL can sweep at most one second early, which is irrelevant because
+    every read re-checks the exact ``expires_at`` TEXT value.
+    """
+    return int(ensure_utc(value).timestamp())
+
+
+def oauth_login_state_item(state: OAuthLoginState) -> dict[str, Any]:
+    """The ``oauth_login_states`` item for one domain login state."""
+    return {
+        "pk": state.state_id,
+        "code_verifier": state.code_verifier,
+        "return_url": state.return_url,
+        "expires_at": encode_timestamp(state.expires_at),
+        "expires_at_epoch": ttl_epoch_seconds(state.expires_at),
+    }
+
+
+def oauth_login_state_from_item(item: Mapping[str, Any]) -> OAuthLoginState:
+    """Rebuild an :class:`~app.models.session.OAuthLoginState` from an item."""
+    return OAuthLoginState.model_validate(
+        {
+            "state_id": item["pk"],
+            "code_verifier": item["code_verifier"],
+            "return_url": item["return_url"],
+            "expires_at": decode_timestamp(item["expires_at"]),
+        }
+    )
+
+
+def app_session_item(session: AppSession) -> dict[str, Any]:
+    """The ``app_sessions`` item for one domain session."""
+    return {
+        "pk": session.session_id,
+        "user_id": str(session.user_id),
+        "expires_at": encode_timestamp(session.expires_at),
+        "expires_at_epoch": ttl_epoch_seconds(session.expires_at),
+    }
+
+
+def app_session_from_item(item: Mapping[str, Any]) -> AppSession:
+    """Rebuild an :class:`~app.models.session.AppSession` from an item."""
+    return AppSession.model_validate(
+        {
+            "session_id": item["pk"],
+            "user_id": item["user_id"],
+            "expires_at": decode_timestamp(item["expires_at"]),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2005,6 +2087,113 @@ class DynamoDbStorage:
             audit_events=events,
         )
 
+    # -- Login state and application sessions (Phase 11 task 7) ----------------
+
+    def save_oauth_login_state(self, state: OAuthLoginState) -> None:
+        """Persist a pending OAuth login state (returns ``None``).
+
+        Storage mints nothing: the item is exactly ``state`` (plus the
+        derived numeric ``expires_at_epoch`` TTL attribute). A standalone
+        conditional ``PutItem`` with ``attribute_not_exists(pk)`` — the
+        single-item discipline of decision 4, the same channel the
+        revocation CAS and the membership delete use — so a duplicate
+        ``state_id`` surfaces as ``DuplicateEntityError(kind="entity_id")``
+        and a rejected write leaves no item.
+        """
+        states_table = self._table("oauth_login_states")
+
+        def submit() -> None:
+            states_table.put_item(
+                Item=oauth_login_state_item(state),
+                ConditionExpression="attribute_not_exists(#pk)",
+                ExpressionAttributeNames={"#pk": "pk"},
+            )
+
+        if not execute_conditional_write(submit):
+            raise DuplicateEntityError(DuplicateEntityKind.ENTITY_ID)
+
+    def consume_oauth_login_state(self, state_id: str) -> OAuthLoginState | None:
+        """Atomically fetch-and-delete one login state (replay-safe).
+
+        ``delete_item`` with ``ConditionExpression`` ``attribute_exists(pk)``
+        and ``ReturnValues=ALL_OLD``: the conditional delete is DynamoDB's
+        atomic get-and-delete, so exactly one concurrent caller receives the
+        old item and a replayed (or unknown-id) consume fails the condition
+        and returns ``None`` — never an error. The winning item is then
+        checked against the adapter clock; a state at/past ``expires_at``
+        behaves as absent (and is deleted either way, so expired states
+        never linger waiting for the TTL sweep).
+        """
+        states_table = self._table("oauth_login_states")
+        captured: dict[str, Any] = {}
+
+        def submit() -> None:
+            response = states_table.delete_item(
+                Key={"pk": state_id},
+                ConditionExpression="attribute_exists(#pk)",
+                ExpressionAttributeNames={"#pk": "pk"},
+                ReturnValues="ALL_OLD",
+            )
+            captured.clear()
+            captured.update(response)
+
+        if not execute_conditional_write(submit):
+            return None
+        item = captured.get("Attributes")
+        if not isinstance(item, dict):
+            # The condition guaranteed the item existed, so ALL_OLD carried
+            # it; a response without attributes is a driver anomaly, and
+            # "no state delivered" is the only safe reading of it.
+            return None
+        state = oauth_login_state_from_item(item)
+        if state.expires_at <= utc_now():
+            return None
+        return state
+
+    def create_app_session(self, session: AppSession) -> AppSession:
+        """Persist a new application session (caller-echo).
+
+        Storage mints nothing: the item is exactly ``session`` (plus the
+        derived ``expires_at_epoch`` TTL attribute). A standalone conditional
+        ``PutItem`` with ``attribute_not_exists(pk)`` makes a duplicate
+        ``session_id`` a ``DuplicateEntityError(kind="entity_id")``.
+        ``user_id`` is application identity enforced at the model boundary,
+        not a reference check (the contract declares no session→user
+        integrity, mirroring the SQLite adapter).
+        """
+        sessions_table = self._table("app_sessions")
+
+        def submit() -> None:
+            sessions_table.put_item(
+                Item=app_session_item(session),
+                ConditionExpression="attribute_not_exists(#pk)",
+                ExpressionAttributeNames={"#pk": "pk"},
+            )
+
+        if not execute_conditional_write(submit):
+            raise DuplicateEntityError(DuplicateEntityKind.ENTITY_ID)
+        return session
+
+    def get_app_session(self, session_id: str) -> AppSession | None:
+        """Load a live application session by its opaque id.
+
+        One strongly consistent point read (the adapter-wide ``_get``
+        discipline); the decoded record is then checked against the adapter
+        clock. An unknown id and a session at/past ``expires_at`` both yield
+        ``None`` — expired is indistinguishable from absent, never
+        :class:`EntityNotFoundError`. The server-side counterpart is the
+        ``expires_at_epoch`` TTL attribute (Phase 11 task 8): DynamoDB Local
+        never sweeps and production sweeps asynchronously, so the read-side
+        check is what makes expiry immediate and exact.
+        """
+        item = self._get("app_sessions", {"pk": session_id})
+        if item is None:
+            return None
+        session = app_session_from_item(item)
+        if session.expires_at <= utc_now():
+            return None
+        return session
+
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
@@ -2061,6 +2250,8 @@ __all__ = [
     "api_key_from_item",
     "api_key_id_constraint_item",
     "api_key_item",
+    "app_session_from_item",
+    "app_session_item",
     "audit_event_item",
     "classify_cancellation_reasons",
     "classify_client_error",
@@ -2081,10 +2272,13 @@ __all__ = [
     "membership_from_item",
     "membership_id_constraint_item",
     "membership_item",
+    "oauth_login_state_from_item",
+    "oauth_login_state_item",
     "open_dynamodb_storage",
     "organization_from_item",
     "organization_item",
     "organization_slug_constraint_item",
+    "ttl_epoch_seconds",
     "user_email_constraint_item",
     "user_from_item",
     "user_item",

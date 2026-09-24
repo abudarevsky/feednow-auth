@@ -58,6 +58,7 @@ from app.models.ids import (
     UserId,
 )
 from app.models.pagination import MAX_PAGE_LIMIT, MIN_PAGE_LIMIT, Page, PageParams
+from app.models.session import AppSession, OAuthLoginState
 from app.storage.contract import (
     DuplicateEntityError,
     DuplicateEntityKind,
@@ -212,6 +213,47 @@ def make_audit_event(
         action=action,
         metadata={"conformance": True},
         created_at=created_at,
+    )
+
+
+# Phase 11 login-state/session expiry is evaluated against the adapter's own
+# clock, so the two instants below are pinned far from any plausible test run:
+# one is unambiguously in the past (expired) and one unambiguously in the
+# future (live). The suite still never calls ``utc_now()`` itself.
+EXPIRED_AT = datetime(2000, 1, 1, tzinfo=UTC)
+LIVE_AT = datetime(2100, 1, 1, tzinfo=UTC)
+
+#: 43-character RFC 7636 code verifier (the model floor) built deterministically.
+_TEST_CODE_VERIFIER = "verifier-" + "0" * 34
+
+
+def make_login_state(
+    *,
+    state_id: str = "state_test_0000001",
+    code_verifier: str = _TEST_CODE_VERIFIER,
+    return_url: str = "/dashboard",
+    expires_at: datetime = LIVE_AT,
+) -> OAuthLoginState:
+    """Build a fully formed ``OAuthLoginState`` (live expiry by default)."""
+    return OAuthLoginState(
+        state_id=state_id,
+        code_verifier=code_verifier,
+        return_url=return_url,
+        expires_at=expires_at,
+    )
+
+
+def make_app_session(
+    *,
+    session_id: str = "sess_test_0000001",
+    user_id: str = "usr_test_0001",
+    expires_at: datetime = LIVE_AT,
+) -> AppSession:
+    """Build a fully formed ``AppSession`` (live expiry by default)."""
+    return AppSession(
+        session_id=session_id,
+        user_id=UserId(user_id),
+        expires_at=expires_at,
     )
 
 
@@ -1766,3 +1808,117 @@ def test_inserts_between_pages_neither_duplicate_nor_skip_unvisited_items(
     assert pages[-1].next_cursor is None
     visited = [membership.id for membership in first.items] + continuation
     assert len(visited) == len(set(visited)), "an item was visited on two pages"
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 task 6 — OAuth login state and application session persistence.
+# The four additive contract operations: save/consume (atomic get-and-delete,
+# replay-safe) and create/get (expiry-filtered read). Expiry is evaluated
+# against the adapter clock, so the cases use the far-past/far-future pinned
+# instants above. ``consume`` and ``get`` return ``None`` for unknown and
+# expired records (never EntityNotFoundError); a duplicate save/create is a
+# domain ``entity_id`` conflict; concurrent consume delivers to exactly one
+# caller.
+# ---------------------------------------------------------------------------
+
+
+def test_save_and_consume_oauth_login_state_round_trips(storage: Storage) -> None:
+    state = make_login_state()
+    # save returns None (storage mints nothing, re-reads nothing).
+    assert storage.save_oauth_login_state(state) is None
+    consumed = storage.consume_oauth_login_state(state.state_id)
+    assert consumed == state
+    assert consumed is not None
+    assert consumed.code_verifier == state.code_verifier
+    assert consumed.return_url == state.return_url
+
+
+def test_consume_oauth_login_state_is_get_and_delete(storage: Storage) -> None:
+    state = make_login_state()
+    storage.save_oauth_login_state(state)
+    assert storage.consume_oauth_login_state(state.state_id) == state
+    # The record is gone: a second consume (the replay the flow must reject)
+    # yields None, never the state again.
+    assert storage.consume_oauth_login_state(state.state_id) is None
+
+
+def test_consume_unknown_oauth_login_state_returns_none(storage: Storage) -> None:
+    # Unknown id is None, NOT EntityNotFoundError (the callback maps None to a
+    # 401; storage must not raise for a caller-controlled id).
+    assert storage.consume_oauth_login_state("state_test_missing") is None
+
+
+def test_consume_expired_oauth_login_state_returns_none(storage: Storage) -> None:
+    expired = make_login_state(state_id="state_test_expired", expires_at=EXPIRED_AT)
+    storage.save_oauth_login_state(expired)
+    assert storage.consume_oauth_login_state("state_test_expired") is None
+
+
+def test_duplicate_oauth_login_state_save_raises_entity_id_conflict(
+    storage: Storage,
+) -> None:
+    state = make_login_state()
+    storage.save_oauth_login_state(state)
+    # A second save under the same state_id is a primary-key conflict.
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.save_oauth_login_state(make_login_state(return_url="/other"))
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+    # The rejected write left no trace: the original still consumes cleanly.
+    assert storage.consume_oauth_login_state(state.state_id) == state
+
+
+def test_concurrent_consume_delivers_to_exactly_one_caller(storage: Storage) -> None:
+    # Barrier + WAL (SQLite) / conditional delete (DynamoDB), never sleeps:
+    # two racing consumes of one state; exactly one receives the record.
+    state = make_login_state()
+    storage.save_oauth_login_state(state)
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, OAuthLoginState | None] = {}
+    failures: dict[str, BaseException] = {}
+
+    def attempt(token: str) -> None:
+        try:
+            barrier.wait()
+            outcomes[token] = storage.consume_oauth_login_state(state.state_id)
+        except Exception as exc:  # recorded; asserted empty on the main thread
+            failures[token] = exc
+
+    threads = [threading.Thread(target=attempt, args=(token,)) for token in ("early", "late")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == {}
+    delivered = [value for value in outcomes.values() if value is not None]
+    assert len(delivered) == 1, "exactly one concurrent caller must receive the state"
+    assert delivered[0] == state
+
+
+def test_create_and_get_app_session_round_trips(storage: Storage) -> None:
+    session = make_app_session()
+    created = storage.create_app_session(session)
+    # Caller-echo: storage mints nothing.
+    assert created == session
+    assert storage.get_app_session(session.session_id) == session
+
+
+def test_get_unknown_app_session_returns_none(storage: Storage) -> None:
+    assert storage.get_app_session("sess_test_missing") is None
+
+
+def test_get_expired_app_session_returns_none(storage: Storage) -> None:
+    expired = make_app_session(session_id="sess_test_expired", expires_at=EXPIRED_AT)
+    storage.create_app_session(expired)
+    assert storage.get_app_session("sess_test_expired") is None
+
+
+def test_duplicate_app_session_create_raises_entity_id_conflict(
+    storage: Storage,
+) -> None:
+    session = make_app_session()
+    storage.create_app_session(session)
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.create_app_session(make_app_session(user_id="usr_test_0002"))
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+    # The rejected write left no trace: the original still reads back.
+    assert storage.get_app_session(session.session_id) == session

@@ -66,6 +66,14 @@ compound, :meth:`SQLiteStorage.provision_organization` (organization +
 membership + audits in one transaction, deliberately **no** race-convergence
 mapping — a slug conflict is a plain translated ``DuplicateEntityError``).
 Behavior/conformance testing is owned by ``src/tests/storage_contract/``.
+Phase 11 task 6 added the additive login-state/session surface
+(:meth:`SQLiteStorage.save_oauth_login_state`,
+:meth:`SQLiteStorage.consume_oauth_login_state` — a single
+``DELETE ... RETURNING`` so exactly one concurrent caller wins —
+:meth:`SQLiteStorage.create_app_session`, and
+:meth:`SQLiteStorage.get_app_session`) on two new tables created
+idempotently at every open; expiry is evaluated against the adapter clock
+on read, and storage still mints nothing.
 """
 
 from __future__ import annotations
@@ -88,7 +96,8 @@ from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams, clamp_limit
-from app.models.timestamps import UtcDatetime, ensure_utc
+from app.models.session import AppSession, OAuthLoginState
+from app.models.timestamps import UtcDatetime, ensure_utc, utc_now
 from app.models.user import User
 from app.storage.contract import (
     DuplicateEntityError,
@@ -113,8 +122,10 @@ SCHEMA_VERSION: Final = 1
 _BUSY_TIMEOUT_MS: Final = 5000
 
 # ---------------------------------------------------------------------------
-# DDL: six tables, PKs, FKs, and the five unique indexes (four domain
-# uniqueness constraints plus the §8 api_keys.key_id credential segment).
+# DDL: six base tables, PKs, FKs, and the five unique indexes (four domain
+# uniqueness constraints plus the §8 api_keys.key_id credential segment);
+# the additive Phase 11 session tables live in _SESSION_SCHEMA_STATEMENTS
+# below.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
@@ -199,6 +210,34 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     """,
 )
 
+# ---------------------------------------------------------------------------
+# Additive Phase 11 DDL: login-state and session tables. These run on *every*
+# open (idempotent ``CREATE TABLE IF NOT EXISTS``, no data migration, no
+# ``user_version`` bump): a database initialized before Phase 11 gains the
+# two tables on its next connection, and a fresh database gets them right
+# after the base schema. ``user_id`` on ``app_sessions`` is application
+# identity enforced at the model boundary, deliberately **not** a foreign key
+# (the contract declares no session→user referential integrity).
+# ---------------------------------------------------------------------------
+
+_SESSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
+    """
+    CREATE TABLE IF NOT EXISTS oauth_login_states (
+        state_id      TEXT PRIMARY KEY,
+        code_verifier TEXT NOT NULL,
+        return_url    TEXT NOT NULL,
+        expires_at    TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS app_sessions (
+        session_id TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    )
+    """,
+)
+
 #: Tables the schema owns (documentation and conformance-facing inventory).
 TABLE_NAMES: Final[tuple[str, ...]] = (
     "users",
@@ -207,6 +246,8 @@ TABLE_NAMES: Final[tuple[str, ...]] = (
     "memberships",
     "api_keys",
     "audit_events",
+    "oauth_login_states",
+    "app_sessions",
 )
 
 #: Unique index inventory (five: four domain-uniqueness constraints plus the
@@ -438,6 +479,29 @@ def audit_event_from_row(row: sqlite3.Row) -> AuditEvent:
     )
 
 
+def oauth_login_state_from_row(row: sqlite3.Row) -> OAuthLoginState:
+    """Rebuild an :class:`OAuthLoginState` from an ``oauth_login_states`` row."""
+    return OAuthLoginState.model_validate(
+        {
+            "state_id": row["state_id"],
+            "code_verifier": row["code_verifier"],
+            "return_url": row["return_url"],
+            "expires_at": decode_timestamp(row["expires_at"]),
+        }
+    )
+
+
+def app_session_from_row(row: sqlite3.Row) -> AppSession:
+    """Rebuild an :class:`AppSession` from an ``app_sessions`` row."""
+    return AppSession.model_validate(
+        {
+            "session_id": row["session_id"],
+            "user_id": row["user_id"],
+            "expires_at": decode_timestamp(row["expires_at"]),
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # sqlite3 → domain error translation (acceptance 1: no driver exception and
 # no SQL constraint text may escape the adapter; callers branch on the
@@ -447,14 +511,16 @@ def audit_event_from_row(row: sqlite3.Row) -> AuditEvent:
 #: Maps every unique constraint the task-2 DDL declares to its domain
 #: ``kind``. Keys are ``(table, columns)`` exactly as SQLite reports them in
 #: ``UNIQUE constraint failed: <table>.<column>[, ...]`` messages — the five
-#: named unique indexes plus the six implicit PRIMARY KEY indexes (a ``id``
+#: named unique indexes plus the implicit PRIMARY KEY indexes (a ``id``
 #: collision reports the same way and surfaces as ``entity_id``, per the
-#: contract). Tasks 4-6 reuse this table as their methods land; a violation
-#: of an unmapped constraint falls through to the generic ``StorageError``
-#: (fail loudly, never leak the driver error).
+#: contract), including the Phase 11 session-table PKs. Tasks 4-6 reuse this
+#: table as their methods land; a violation of an unmapped constraint falls
+#: through to the generic ``StorageError`` (fail loudly, never leak the
+#: driver error).
 _UNIQUE_KIND_BY_COLUMNS: Final[dict[tuple[str, tuple[str, ...]], DuplicateEntityKind]] = {
     ("api_keys", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("api_keys", ("key_id",)): DuplicateEntityKind.API_KEY_ID,
+    ("app_sessions", ("session_id",)): DuplicateEntityKind.ENTITY_ID,
     ("audit_events", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("external_identities", ("id",)): DuplicateEntityKind.ENTITY_ID,
     (
@@ -463,6 +529,7 @@ _UNIQUE_KIND_BY_COLUMNS: Final[dict[tuple[str, tuple[str, ...]], DuplicateEntity
     ): DuplicateEntityKind.EXTERNAL_IDENTITY,
     ("memberships", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("memberships", ("organization_id", "user_id")): DuplicateEntityKind.MEMBERSHIP,
+    ("oauth_login_states", ("state_id",)): DuplicateEntityKind.ENTITY_ID,
     ("organizations", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("organizations", ("slug",)): DuplicateEntityKind.ORGANIZATION_SLUG,
     ("users", ("id",)): DuplicateEntityKind.ENTITY_ID,
@@ -625,7 +692,13 @@ class SQLiteStorage:
         return conn
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        """Create the schema once per file; idempotent and version-stamped."""
+        """Create the schema once per file; idempotent and version-stamped.
+
+        The Phase 11 session tables (:data:`_SESSION_SCHEMA_STATEMENTS`) run
+        on every initialization — a pre-Phase-11 file stamped at
+        :data:`SCHEMA_VERSION` gains them additively (``CREATE TABLE IF NOT
+        EXISTS``, no data migration, no version bump).
+        """
         with self._lock:
             if self._schema_ready:
                 return
@@ -639,7 +712,9 @@ class SQLiteStorage:
                 for statement in _SCHEMA_STATEMENTS:
                     conn.execute(statement)
                 conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-                conn.commit()
+            for statement in _SESSION_SCHEMA_STATEMENTS:
+                conn.execute(statement)
+            conn.commit()
             self._schema_ready = True
 
     def close(self) -> None:
@@ -1414,6 +1489,113 @@ class SQLiteStorage:
             membership=membership,
             audit_events=events,
         )
+
+    # -- Login state and application sessions (Phase 11) ------------------------
+
+    def save_oauth_login_state(self, state: OAuthLoginState) -> None:
+        """Persist a pending OAuth login state (contract-pinned caller-echo
+        write; returns ``None``).
+
+        Storage mints nothing: the row is exactly ``state``. A duplicate
+        ``state_id`` surfaces as ``DuplicateEntityError(kind="entity_id")``
+        via the PRIMARY KEY (translated, never a raw driver error), and the
+        rejected write leaves no trace.
+        """
+        conn = self._connection()
+        try:
+            conn.execute(
+                "INSERT INTO oauth_login_states"
+                " (state_id, code_verifier, return_url, expires_at)"
+                " VALUES (?, ?, ?, ?)",
+                (
+                    state.state_id,
+                    state.code_verifier,
+                    state.return_url,
+                    encode_timestamp(state.expires_at),
+                ),
+            )
+        except sqlite3.Error as exc:
+            # Covers IntegrityError (translated per constraint) and every
+            # other driver failure: roll the implicit transaction back so the
+            # thread-local connection is never left stale, and raise only
+            # domain errors (contract: sqlite3 exceptions must not escape).
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+
+    def consume_oauth_login_state(self, state_id: str) -> OAuthLoginState | None:
+        """Atomically fetch-and-delete one login state (replay-safe).
+
+        Consumption is a single ``DELETE ... RETURNING``: SQLite serializes
+        the write, so exactly one concurrent caller receives the deleted row
+        and every other caller observes zero rows and gets ``None``. An
+        unknown id likewise yields ``None`` (never
+        :class:`EntityNotFoundError`). The winning row is then checked
+        against the adapter clock: a state at/past ``expires_at`` behaves as
+        absent (and is deleted either way, so expired states never linger).
+        """
+        conn = self._connection()
+        try:
+            row = conn.execute(
+                "DELETE FROM oauth_login_states WHERE state_id = ?"
+                " RETURNING state_id, code_verifier, return_url, expires_at",
+                (state_id,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+        if row is None:
+            return None
+        state = oauth_login_state_from_row(row)
+        if state.expires_at <= utc_now():
+            return None
+        return state
+
+    def create_app_session(self, session: AppSession) -> AppSession:
+        """Persist a new application session and echo the caller-supplied
+        record back.
+
+        Storage mints nothing: the row is exactly ``session``. A duplicate
+        ``session_id`` surfaces as ``DuplicateEntityError(kind="entity_id")``
+        via the PRIMARY KEY; ``user_id`` is application identity enforced at
+        the model boundary, not a foreign key (no session→user reference).
+        """
+        conn = self._connection()
+        try:
+            conn.execute(
+                "INSERT INTO app_sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)",
+                (
+                    session.session_id,
+                    str(session.user_id),
+                    encode_timestamp(session.expires_at),
+                ),
+            )
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+        return session
+
+    def get_app_session(self, session_id: str) -> AppSession | None:
+        """Load a live application session by its opaque id.
+
+        A point read; the row is decoded and then checked against the
+        adapter clock: an unknown id and a session at/past ``expires_at``
+        both yield ``None`` (expired is indistinguishable from absent —
+        never :class:`EntityNotFoundError`).
+        """
+        conn = self._connection()
+        row = conn.execute(
+            "SELECT * FROM app_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        session = app_session_from_row(row)
+        if session.expires_at <= utc_now():
+            return None
+        return session
 
 
 def open_sqlite_storage(path: str | Path) -> Storage:

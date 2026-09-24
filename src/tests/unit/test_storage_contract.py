@@ -7,10 +7,10 @@ Covers the task's verify lines:
 2. ``ProvisionedUser`` is frozen and is a pure caller-echo bundle.
 3. A minimal stub class satisfies ``isinstance`` under ``runtime_checkable``;
    a partial stub does not.
-4. The protocol exposes exactly the 19 §11/§12 methods (18 Phase 02
-   operations plus the Phase 04 ``provision_organization`` compound), all
-   synchronous, with signatures that reference only domain/typing types (no
-   driver types).
+4. The protocol exposes exactly the 23 §11/§12 + Phase 11 methods (18 Phase 02
+   operations plus the Phase 04 ``provision_organization`` compound plus the
+   four additive Phase 11 login-state/session operations), all synchronous,
+   with signatures that reference only domain/typing types (no driver types).
 5. Subprocess-isolated import check (fresh interpreter, Phase 01 task-6
    precedent): importing ``app.storage.contract`` and ``app.storage`` pulls in
    neither ``sqlite3``, ``boto3``, nor any adapter module. In-process
@@ -63,10 +63,11 @@ from app.models.ids import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 
-#: The 19 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
-#: ``provision_user`` compound) and the Phase 04 ``provision_organization``
+#: The 23 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
+#: ``provision_user`` compound), the Phase 04 ``provision_organization``
 #: compound (breakdown decision 2 — an explicit addition to the current
-#: phase's contract).
+#: phase's contract), and the four additive Phase 11 login-state/session
+#: operations.
 CONTRACT_METHODS = frozenset(
     {
         "create_user",
@@ -88,6 +89,10 @@ CONTRACT_METHODS = frozenset(
         "append_audit_event",
         "provision_user",
         "provision_organization",
+        "save_oauth_login_state",
+        "consume_oauth_login_state",
+        "create_app_session",
+        "get_app_session",
     }
 )
 
@@ -117,6 +122,7 @@ ALLOWED_ANNOTATION_MODULES = frozenset(
         "app.models.membership",
         "app.models.organization",
         "app.models.pagination",
+        "app.models.session",
         "app.models.timestamps",
         "app.models.user",
         "app.storage.contract",
@@ -446,14 +452,14 @@ def test_plain_object_does_not_satisfy_isinstance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Protocol surface: 19 methods, sync, domain-only types
+# 4. Protocol surface: 23 methods, sync, domain-only types
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_exposes_exactly_the_19_contract_methods() -> None:
+def test_protocol_exposes_exactly_the_23_contract_methods() -> None:
     members = typing.get_protocol_members(contract.Storage)
     assert members == set(CONTRACT_METHODS)
-    assert len(members) == 19
+    assert len(members) == 23
 
 
 @pytest.mark.parametrize("name", sorted(CONTRACT_METHODS))

@@ -191,6 +191,8 @@ def test_provision_batch_stores_rows_exactly_like_standalone_paths(
         "memberships": 1,
         "api_keys": 0,
         "audit_events": 2,
+        "oauth_login_states": 0,
+        "app_sessions": 0,
     }
     identity_row = conn.execute("SELECT * FROM external_identities").fetchone()
     # Tenant normalization and the fixed-width timestamp codec apply to the

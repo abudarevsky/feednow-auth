@@ -29,6 +29,8 @@ import pytest
 
 import app.storage.contract as contract
 from app.models.enums import IdentityProvider
+from app.models.ids import UserId
+from app.models.session import AppSession, OAuthLoginState
 from app.storage.dynamodb import (
     CURSOR_SCOPE_API_KEYS,
     CURSOR_SCOPE_MEMBERSHIPS,
@@ -36,6 +38,8 @@ from app.storage.dynamodb import (
     SCHEMA,
     ConstraintKind,
     DynamoDbStorage,
+    app_session_from_item,
+    app_session_item,
     decode_cursor,
     decode_provider_tenant,
     decode_timestamp,
@@ -45,7 +49,10 @@ from app.storage.dynamodb import (
     encode_provider_tenant,
     encode_sort_key,
     encode_timestamp,
+    oauth_login_state_from_item,
+    oauth_login_state_item,
     open_dynamodb_storage,
+    ttl_epoch_seconds,
 )
 
 # ---------------------------------------------------------------------------
@@ -214,7 +221,7 @@ def test_invalid_cursor_messages_never_echo_the_cursor() -> None:
 # -- schema (single source) ---------------------------------------------------
 
 
-def test_schema_is_the_seven_table_single_source() -> None:
+def test_schema_is_the_nine_table_single_source() -> None:
     assert [spec.name for spec in SCHEMA] == [
         "users",
         "organizations",
@@ -223,11 +230,74 @@ def test_schema_is_the_seven_table_single_source() -> None:
         "api_keys",
         "memberships",
         "unique_constraints",
+        "oauth_login_states",
+        "app_sessions",
     ]
     # The harness re-exports the very same tuple object (no drift).
     from tests.support import dynamodb_local as local
 
     assert local.TABLE_SPECS is SCHEMA
+
+
+def test_phase_11_session_tables_are_pk_keyed_single_tables() -> None:
+    # Phase 11 task 7: the two additive session stores are single-table,
+    # partition-keyed by the caller-minted opaque id, with no GSI and no sort
+    # key (the atomic get-and-delete and point read are both pk-only).
+    by_name = {spec.name: spec for spec in SCHEMA}
+    for name in ("oauth_login_states", "app_sessions"):
+        spec = by_name[name]
+        assert (spec.partition_key, spec.sort_key) == ("pk", None), name
+        assert spec.indexes == (), name
+
+
+# -- session item codecs (Phase 11 task 7) ------------------------------------
+
+
+_LIVE = datetime(2100, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+
+
+def _login_state() -> OAuthLoginState:
+    return OAuthLoginState(
+        state_id="state_test_0000001",
+        code_verifier="verifier-" + "0" * 34,
+        return_url="/dashboard",
+        expires_at=_LIVE,
+    )
+
+
+def _app_session() -> AppSession:
+    return AppSession(
+        session_id="sess_test_0000001",
+        user_id=UserId("usr_test_0001"),
+        expires_at=_LIVE,
+    )
+
+
+def test_ttl_epoch_seconds_is_whole_second_utc_epoch_int() -> None:
+    epoch = ttl_epoch_seconds(_LIVE)
+    assert isinstance(epoch, int)
+    assert epoch == int(_LIVE.timestamp())
+
+
+def test_oauth_login_state_item_round_trips_with_ttl_attribute() -> None:
+    state = _login_state()
+    item = oauth_login_state_item(state)
+    assert item["pk"] == state.state_id
+    # The exact microsecond instant lives in the sortable TEXT attribute; the
+    # numeric epoch attribute is the (second-granularity) TTL pointer.
+    assert item["expires_at"] == encode_timestamp(_LIVE)
+    assert item["expires_at_epoch"] == ttl_epoch_seconds(_LIVE)
+    assert oauth_login_state_from_item(item) == state
+
+
+def test_app_session_item_round_trips_with_ttl_attribute() -> None:
+    session = _app_session()
+    item = app_session_item(session)
+    assert item["pk"] == session.session_id
+    assert item["user_id"] == "usr_test_0001"
+    assert item["expires_at"] == encode_timestamp(_LIVE)
+    assert item["expires_at_epoch"] == ttl_epoch_seconds(_LIVE)
+    assert app_session_from_item(item) == session
 
 
 # -- factory + adapter shell (injected fake, no network) ----------------------

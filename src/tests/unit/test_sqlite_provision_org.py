@@ -159,6 +159,8 @@ def test_org_batch_stores_rows_exactly_like_standalone_paths(storage: SQLiteStor
         "memberships": 1,
         "api_keys": 0,
         "audit_events": 2,
+        "oauth_login_states": 0,
+        "app_sessions": 0,
     }
     organization_row = conn.execute("SELECT created_at, updated_at FROM organizations").fetchone()
     # The fixed-width timestamp codec applies to the batch path exactly as to

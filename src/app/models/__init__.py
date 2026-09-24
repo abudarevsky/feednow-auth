@@ -9,6 +9,8 @@ Phase 01 contract surface (frozen for downstream phases):
   entities (spec §4) plus the credential, audit, and authorization
   entities (:mod:`app.models.api_key`, :mod:`app.models.audit_event`,
   :mod:`app.models.authorization_context`).
+- Phase 11 adds the additive session surface: :class:`OAuthLoginState` and
+  :class:`AppSession` from :mod:`app.models.session`.
 """
 
 from app.models.api_key import (
@@ -40,6 +42,14 @@ from app.models.enums import (
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.membership import Membership
 from app.models.organization import Organization, OrganizationName, OrganizationSlug
+from app.models.session import (
+    AppSession,
+    CodeVerifier,
+    OAuthLoginState,
+    ReturnUrl,
+    SessionId,
+    StateId,
+)
 from app.models.user import Email, User
 
 __all__ = [
@@ -48,12 +58,14 @@ __all__ = [
     "ApiKeyEnvironment",
     "ApiKeyName",
     "ApiKeyStatus",
+    "AppSession",
     "AuditAction",
     "AuditEvent",
     "AuditMetadata",
     "AuditTargetId",
     "AuditTargetType",
     "AuthorizationContext",
+    "CodeVerifier",
     "Email",
     "ExternalIdentity",
     "IdentityProvider",
@@ -62,14 +74,18 @@ __all__ = [
     "Membership",
     "MembershipRole",
     "MembershipStatus",
+    "OAuthLoginState",
     "Organization",
     "OrganizationName",
     "OrganizationSlug",
     "OrganizationStatus",
     "OrganizationType",
     "ProviderTenant",
+    "ReturnUrl",
     "Scope",
     "SecretHash",
+    "SessionId",
+    "StateId",
     "User",
     "UserStatus",
 ]

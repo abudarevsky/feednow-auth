@@ -1,7 +1,8 @@
 """Domain-oriented storage contract (Phase 02, spec §11/§12).
 
 This module is the *only* storage surface application code (Phases 03, 05, 06)
-may depend on. It declares the 19 §11/§12 operations as a
+may depend on. It declares the 19 §11/§12 operations plus the four additive
+Phase 11 login-state/session operations (23 total) as a
 :class:`typing.Protocol` plus the domain error vocabulary adapters raise.
 
 Contract-wide rules (pinned by the Phase 02 breakdown; adapters must not
@@ -65,6 +66,7 @@ from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams
+from app.models.session import AppSession, OAuthLoginState
 from app.models.timestamps import UtcDatetime
 from app.models.user import User
 
@@ -216,8 +218,9 @@ class ProvisionedOrganization(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# The protocol (19 methods: spec §11 surface + the §12 compound
-# ``provision_user`` + the Phase 04 compound ``provision_organization``)
+# The protocol (23 methods: spec §11 surface + the §12 compound
+# ``provision_user`` + the Phase 04 compound ``provision_organization``
+# + the four additive Phase 11 login-state/session operations)
 # ---------------------------------------------------------------------------
 
 
@@ -573,6 +576,66 @@ class Storage(Protocol):
             DuplicateEntityError: ``kind="organization_slug"`` for a taken
                 slug, ``kind="entity_id"`` for a taken record id.
             ReferenceNotFoundError: when ``membership.user_id`` is unknown.
+        """
+        ...
+
+    # -- Login state and application sessions (Phase 11) ----------------------
+    #
+    # Additive Phase 11 surface backing the authorization-code session flow.
+    # These records are caller-formed end to end: storage mints no id and no
+    # ``expires_at`` (the same discipline as every ``create_*`` above). Their
+    # *reads* evaluate expiry against the adapter's own clock — a read is not
+    # a write, so the "never mints timestamps" rule does not forbid it. An
+    # expired record behaves as absent (``None``); it is not a
+    # :class:`EntityNotFoundError`, because these are lookups, not the §12
+    # resolve signal.
+
+    def save_oauth_login_state(self, state: OAuthLoginState) -> None:
+        """Persist a pending OAuth login state (single-use PKCE verifier).
+
+        Returns ``None`` — storage mints nothing and re-reads nothing. The
+        ``state_id`` is the caller-minted lookup key.
+
+        Raises:
+            DuplicateEntityError: ``kind="entity_id"`` when ``state.state_id``
+                was already saved (a minted state id must be unique).
+        """
+        ...
+
+    def consume_oauth_login_state(self, state_id: str) -> OAuthLoginState | None:
+        """Atomically fetch-and-delete one login state (replay-safe).
+
+        Get-and-delete in a single atomic step: exactly one concurrent caller
+        receives the record; every other caller (a replay, or a second tab
+        racing the first) gets ``None``. A state read at/past ``expires_at``
+        also yields ``None`` (treated as absent and, on adapters that can,
+        removed). Never raises for an unknown/expired/replayed id — the
+        callback maps ``None`` to a 401, so the storage contract must not
+        surface :class:`EntityNotFoundError` here.
+        """
+        ...
+
+    def create_app_session(self, session: AppSession) -> AppSession:
+        """Persist a new application session (caller-echo).
+
+        Storage mints nothing: the stored record is exactly ``session``. The
+        ``session_id`` is the caller-minted opaque cookie key.
+
+        Raises:
+            DuplicateEntityError: ``kind="entity_id"`` when ``session.session_id``
+                was already created.
+        """
+        ...
+
+    def get_app_session(self, session_id: str) -> AppSession | None:
+        """Load a live application session by its opaque id.
+
+        Returns the stored :class:`AppSession` when the id exists and is
+        strictly before ``expires_at``; returns ``None`` for an unknown id and
+        for a session at/past ``expires_at`` (expired sessions are
+        indistinguishable from absent ones to the caller). Never raises
+        :class:`EntityNotFoundError` — session verification treats ``None`` as
+        "not logged in".
         """
         ...
 

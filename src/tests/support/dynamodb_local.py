@@ -9,12 +9,12 @@ machines without Docker. The server is expected to run ``-inMemory
 (DynamoDB Local 2.x format-validates the access key but never contacts AWS).
 
 Isolation follows the conformance suite's fixture contract ("initialized
-adapter with all tables empty, per test"): each test creates the seven
+adapter with all tables empty, per test"): each test creates the nine
 adapter tables under a fresh random prefix and deletes them on teardown —
 deterministic, no truncation races.
 
 The table spec is the adapter's :data:`app.storage.dynamodb.SCHEMA` — the
-single source of the seven-table names and key schemas (breakdown decision 2),
+single source of the table names and key schemas (breakdown decision 2),
 re-exported here as :data:`TABLE_SPECS` so the harness and the adapter can never
 drift. ``make_dynamodb_storage`` builds an adapter under a fresh prefix through
 the documented factory.
@@ -63,7 +63,8 @@ WAITER_CONFIG: Final = {"Delay": 0.1, "MaxAttempts": 100}
 #: Characters DynamoDB permits in table names (3-255 long).
 _TABLE_NAME_PATTERN: Final = re.compile(r"^[a-zA-Z0-9_.\-]{3,255}$")
 
-#: The seven-table schema, imported from the adapter (the single source). The
+#: The full table schema (nine tables since Phase 11), imported from the
+#: adapter (the single source). The
 #: ``IndexSpec``/``TableSpec`` types and their ``create_parameters`` builder
 #: live in :mod:`app.storage.dynamodb`; re-exported here so the harness and the
 #: adapter can never drift.
@@ -145,12 +146,12 @@ def random_table_prefix() -> str:
 
 
 def table_names(prefix: str) -> tuple[str, ...]:
-    """The fully prefixed names of the seven harness tables."""
+    """The fully prefixed names of every harness table."""
     return tuple(f"{prefix}{spec.name}" for spec in TABLE_SPECS)
 
 
 def create_tables(prefix: str, *, resource: Any | None = None) -> None:
-    """Create all seven tables under ``prefix`` and wait until ACTIVE.
+    """Create every :data:`SCHEMA` table under ``prefix`` and wait until ACTIVE.
 
     ``resource`` is the injectable seam for unit tests; when omitted, a
     resource is built for the configured (and required) Local endpoint.
@@ -166,7 +167,7 @@ def create_tables(prefix: str, *, resource: Any | None = None) -> None:
 
 
 def delete_tables(prefix: str, *, resource: Any | None = None) -> None:
-    """Delete all seven tables under ``prefix`` and confirm they are gone.
+    """Delete every :data:`SCHEMA` table under ``prefix`` and confirm gone.
 
     Teardown-tolerant: a table that never materialized (partial setup) is
     skipped rather than failing the teardown over the real test error.

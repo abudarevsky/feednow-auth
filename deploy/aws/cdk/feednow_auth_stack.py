@@ -3,8 +3,9 @@
 Exposes the :class:`FeedNowAuthEnv` value object that validates the
 ``FEEDNOW_ENV`` deployment input and derives every environment-bound name
 from it, plus the :class:`FeedNowAuthStack` class. Phase 07 task 2 adds the
-seven DynamoDB tables (transcribed verbatim from ``SCHEMA`` in
-``src/app/storage/dynamodb.py``); task 3 adds the Cognito user pool, the
+DynamoDB tables (transcribed verbatim from ``SCHEMA`` in
+``src/app/storage/dynamodb.py``; Phase 11 task 8 extends them with the two
+TTL-enabled login-state/session tables); task 3 adds the Cognito user pool, the
 public PKCE app client, and the hosted domain; task 4 adds the generated
 API-key pepper secret and the least-privilege Lambda execution role (the
 consolidated IAM matrix from docs/phases/06-dynamodb.md); task 6 adds the
@@ -123,20 +124,26 @@ class _IndexSpec:
 
 @dataclass(frozen=True)
 class _TableSpec:
-    """One table's name suffix and key schema (Phase 06 decision 2's layout)."""
+    """One table's name suffix, key schema (decision 2's layout), and TTL.
+
+    ``ttl_attribute`` (Phase 11 task 8) names a non-key numeric attribute
+    DynamoDB should expire items on; it is ``None`` for every Phase 06 table.
+    """
 
     name: str
     partition_key: str
     sort_key: str | None = None
     indexes: tuple[_IndexSpec, ...] = ()
+    ttl_attribute: str | None = None
 
 
-#: The seven-table schema, transcribed verbatim from ``SCHEMA`` in
+#: The table schema, transcribed verbatim from ``SCHEMA`` in
 #: ``src/app/storage/dynamodb.py`` (docs/phases/06-dynamodb.md "Table and
-#: index schema"). Duplicated rather than imported on purpose: the synth path
-#: (``requirements.txt``) carries no boto3, so the CDK app must not import the
-#: runtime adapter module. ``test_cdk_dynamodb.py`` pins this copy against the
-#: runtime ``SCHEMA`` so the two can never drift.
+#: index schema"), plus the two additive Phase 11 session tables. Duplicated
+#: rather than imported on purpose: the synth path (``requirements.txt``)
+#: carries no boto3, so the CDK app must not import the runtime adapter
+#: module. ``test_cdk_dynamodb.py`` pins this copy against the runtime
+#: ``SCHEMA`` (name + key schema + indexes) so the two can never drift.
 _SCHEMA: Final[tuple[_TableSpec, ...]] = (
     _TableSpec(name="users", partition_key="pk"),
     _TableSpec(name="organizations", partition_key="pk"),
@@ -157,6 +164,10 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
         ),
     ),
     _TableSpec(name="unique_constraints", partition_key="pk"),
+    # Phase 11 task 8: the login-state and session stores, TTL-enabled on the
+    # numeric ``expires_at_epoch`` attribute the task-7 adapter writes.
+    _TableSpec(name="oauth_login_states", partition_key="pk", ttl_attribute="expires_at_epoch"),
+    _TableSpec(name="app_sessions", partition_key="pk", ttl_attribute="expires_at_epoch"),
 )
 
 #: The actions the Phase 06 adapter performs *only* inside
@@ -167,13 +178,23 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
 #: the membership delete are standalone conditional single-item writes.
 _TRANSACTIONAL_ACTIONS: Final[frozenset[str]] = frozenset({"PutItem", "ConditionCheckItem"})
 
+#: Phase 11 task 8: the session/login-state tables are written by the task-7
+#: adapter as *standalone* conditional operations (``put_item`` with
+#: ``attribute_not_exists``, ``delete_item`` with ``attribute_exists``) and
+#: read by ``get_item`` -- never inside ``TransactWriteItems``. Their grants
+#: therefore carry no ``EnclosingOperation`` pin (pinning ``PutItem`` here
+#: would deny the standalone write the adapter actually performs).
+_STANDALONE_WRITE_TABLES: Final[frozenset[str]] = frozenset({"oauth_login_states", "app_sessions"})
+
 #: Consolidated per-resource least-privilege matrix, transcribed verbatim
 #: from the "Least-privilege IAM matrix" table in docs/phases/06-dynamodb.md
-#: (Phase 07 CDK input, AC 5). GSI ARNs are not rows here: they get
-#: ``dynamodb:Query`` only, and a GSI ``Query`` also needs ``Query`` on the
-#: base table ARN (already covered by the table rows below). No ``Scan``,
-#: no table-admin actions (``CreateTable``/``DeleteTable``/``DescribeTable``
-#: belong to the CloudFormation deploy path, never the runtime role).
+#: (Phase 07 CDK input, AC 5), extended by the two Phase 11 session rows with
+#: exactly the actions the task-7 adapter calls. GSI ARNs are not rows here:
+#: they get ``dynamodb:Query`` only, and a GSI ``Query`` also needs
+#: ``Query`` on the base table ARN (already covered by the table rows below).
+#: No ``Scan``, no table-admin actions (``CreateTable``/``DeleteTable``/
+#: ``DescribeTable`` belong to the CloudFormation deploy path, never the
+#: runtime role).
 _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
     "users": frozenset({"GetItem", "PutItem", "ConditionCheckItem"}),
     "organizations": frozenset({"GetItem", "PutItem", "BatchGetItem", "ConditionCheckItem"}),
@@ -182,6 +203,10 @@ _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
     "api_keys": frozenset({"GetItem", "PutItem", "UpdateItem", "Query"}),
     "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query"}),
     "unique_constraints": frozenset({"GetItem", "PutItem"}),
+    # Phase 11: save/consume (put + conditional delete) and create/get
+    # (put + get). No Scan, no index grants (both are pk-only single tables).
+    "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
+    "app_sessions": frozenset({"GetItem", "PutItem"}),
 }
 
 
@@ -196,21 +221,26 @@ def _runtime_policy_statements(
     Each table gets a non-transactional statement (point reads, the CAS
     ``UpdateItem``, the conditional ``DeleteItem``, base-table ``Query``)
     and, when the matrix lists them, a ``PutItem``/``ConditionCheckItem``
-    statement pinned to ``TransactWriteItems``. Each GSI gets ``Query``
-    only. The pepper grant is ``GetSecretValue`` on the secret ARN; the
-    log grant is ``CreateLogStream``/``PutLogEvents`` on the function's
-    log group ARN pattern -- nothing else, no wildcards anywhere.
+    statement pinned to ``TransactWriteItems``. The Phase 11 session tables
+    (:data:`_STANDALONE_WRITE_TABLES`) are the documented exception: their
+    writes are standalone conditional operations, so all their actions are
+    granted unpinned. Each GSI gets ``Query`` only. The pepper grant is
+    ``GetSecretValue`` on the secret ARN; the log grant is
+    ``CreateLogStream``/``PutLogEvents`` on the function's log group ARN
+    pattern -- nothing else, no wildcards anywhere.
     """
     statements: list[PolicyStatement] = []
     for spec in _SCHEMA:
         table_arn = tables[spec.name].table_arn
         granted = _DYNAMODB_GRANTS[spec.name]
-        plain_actions = sorted(f"dynamodb:{action}" for action in granted - _TRANSACTIONAL_ACTIONS)
+        if spec.name in _STANDALONE_WRITE_TABLES:
+            transactional: frozenset[str] = frozenset()
+        else:
+            transactional = granted & _TRANSACTIONAL_ACTIONS
+        plain_actions = sorted(f"dynamodb:{action}" for action in granted - transactional)
         if plain_actions:
             statements.append(PolicyStatement(actions=plain_actions, resources=[table_arn]))
-        transaction_actions = sorted(
-            f"dynamodb:{action}" for action in granted & _TRANSACTIONAL_ACTIONS
-        )
+        transaction_actions = sorted(f"dynamodb:{action}" for action in transactional)
         if transaction_actions:
             statements.append(
                 PolicyStatement(
@@ -436,7 +466,8 @@ class FeedNowAuthStack(cdk.Stack):
             raise ValueError(msg)
         self.cognito_callback_urls = callback_urls
 
-        # Phase 07 task 2: the seven Phase 06 schema tables. Names are
+        # Phase 07 task 2: the Phase 06 schema tables, extended by Phase 11
+        # task 8 with the two session tables. Names are
         # ``<resource_prefix><table-name>`` so the runtime ``table_prefix``
         # resolves every adapter access through these physical names.
         # Billing is on-demand everywhere; data lives on in prod, is retained
@@ -458,6 +489,10 @@ class FeedNowAuthStack(cdk.Stack):
                 ),
                 billing_mode=BillingMode.PAY_PER_REQUEST,
                 removal_policy=removal_policy,
+                # Phase 11 task 8: the session tables expire items on the
+                # numeric ``expires_at_epoch`` attribute the task-7 adapter
+                # writes (None elsewhere -> no TTL on the Phase 06 tables).
+                time_to_live_attribute=spec.ttl_attribute,
                 # PITR guards prod only (task 2); the bool shorthand is
                 # deprecated in favour of the explicit specification.
                 point_in_time_recovery_specification=(

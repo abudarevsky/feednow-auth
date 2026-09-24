@@ -71,7 +71,19 @@ TABLE_MATRIX: Mapping[str, frozenset[str]] = {
     "api_keys": frozenset({"GetItem", "PutItem", "UpdateItem", "Query"}),
     "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query"}),
     "unique_constraints": frozenset({"GetItem", "PutItem"}),
+    # Phase 11 task 8: the session/login-state tables. Exactly the actions
+    # the task-7 adapter calls, on these two ARNs only.
+    "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
+    "app_sessions": frozenset({"GetItem", "PutItem"}),
 }
+
+#: Phase 11: the session tables are written by *standalone* conditional
+#: operations (never ``TransactWriteItems``), so their ``PutItem`` grant is
+#: NOT pinned to the enclosing-operation condition the way the Phase 06
+#: tables' is. This is the single deviation from the "transactional actions
+#: are always pinned" rule, and it mirrors the stack's
+#: ``_STANDALONE_WRITE_TABLES``.
+STANDALONE_WRITE_TABLES = frozenset({"oauth_login_states", "app_sessions"})
 
 #: GSI ARNs get ``Query`` only (the base-table ``Query`` half of a GSI query
 #: is already inside the table row above).
@@ -169,14 +181,14 @@ def _secret_logical_id(env_name: str) -> str:
 
 
 def _table_logical_ids(env_name: str) -> Mapping[str, str]:
-    """logical id -> unsuffixed table name, for the seven schema tables."""
+    """logical id -> unsuffixed table name, for the nine schema tables."""
     prefix = f"feednow-auth-{env_name}-"
     mapping = {}
     for logical_id, resource in _template(env_name).find_resources("AWS::DynamoDB::Table").items():
         name = resource["Properties"]["TableName"]
         assert name.startswith(prefix)
         mapping[logical_id] = name.removeprefix(prefix)
-    assert len(mapping) == 7
+    assert len(mapping) == 9
     return mapping
 
 
@@ -281,12 +293,26 @@ def test_table_grants_equal_the_matrix_row_exactly(table_name: str) -> None:
     row = TABLE_MATRIX[table_name]
     for env_name in ENVIRONMENTS:
         grant = _dynamodb_grants(env_name)[f"table:{table_name}"]
+        if table_name in STANDALONE_WRITE_TABLES:
+            # Phase 11: every action is a standalone conditional write/read,
+            # so the whole row is granted unpinned and nothing is pinned.
+            assert grant["plain"] == row
+            assert not grant["pinned"]
+            continue
         assert grant["plain"] == row - TRANSACTIONAL_ACTIONS
         assert grant["pinned"] == row & TRANSACTIONAL_ACTIONS
 
 
 @pytest.mark.parametrize("table_name", sorted(TABLE_MATRIX))
 def test_transactional_grants_are_pinned_to_transact_write_items(table_name: str) -> None:
+    if table_name in STANDALONE_WRITE_TABLES:
+        # Phase 11 exception: these tables' PutItem is a standalone
+        # conditional write, so it must NOT be pinned (pinning it would deny
+        # the actual adapter call). Assert the inverse: nothing pinned.
+        for env_name in ENVIRONMENTS:
+            grant = _dynamodb_grants(env_name)[f"table:{table_name}"]
+            assert not grant["pinned"]
+        return
     transactional = TABLE_MATRIX[table_name] & TRANSACTIONAL_ACTIONS
     if not transactional:  # pragma: no cover - every table row has one today
         return

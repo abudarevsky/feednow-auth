@@ -116,11 +116,13 @@ def test_translation_table_covers_all_ddl_unique_constraints() -> None:
     assert mapped == {
         ("api_keys", ("id",)),
         ("api_keys", ("key_id",)),
+        ("app_sessions", ("session_id",)),
         ("audit_events", ("id",)),
         ("external_identities", ("id",)),
         ("external_identities", ("provider", "provider_subject", "provider_tenant")),
         ("memberships", ("id",)),
         ("memberships", ("organization_id", "user_id")),
+        ("oauth_login_states", ("state_id",)),
         ("organizations", ("id",)),
         ("organizations", ("slug",)),
         ("users", ("id",)),

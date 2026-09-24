@@ -164,9 +164,10 @@ def test_region_and_table_prefix_env_vars(env_name: str) -> None:
     assert variables["FEEDNOW_DYNAMODB_REGION"] == REGION
     prefix = variables["FEEDNOW_TABLE_PREFIX"]
     assert prefix == f"feednow-auth-{env_name}-"
-    # The prefix resolves through every task-2 table's physical name.
+    # The prefix resolves through every schema table's physical name (seven
+    # Phase 06 tables plus the two Phase 11 session tables).
     tables = _template(env_name).find_resources("AWS::DynamoDB::Table")
-    assert len(tables) == 7
+    assert len(tables) == 9
     for resource in tables.values():
         assert resource["Properties"]["TableName"].startswith(prefix)
 

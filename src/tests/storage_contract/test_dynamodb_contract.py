@@ -46,11 +46,12 @@ pytestmark = pytest.mark.dynamodb_local
 
 SUITE_PATH: Path = Path(__file__).resolve().parent / "suite.py"
 
-#: sha256 of ``suite.py``'s exact bytes at the Phase 06 baseline (HEAD when
-#: this entry was written; the file is untouched since Phase 04 task 1).
-#: AC 2: any drift here means the shared suite was edited to fit DynamoDB
-#: instead of the adapter changing — this pin fails loudly first.
-SUITE_SHA256_AT_BASELINE = "025c879c6a260b6f30a9d22f20129ce82371eaea084a7392958ca4f568f2ddc9"
+#: sha256 of ``suite.py``'s exact bytes at the Phase 11 task-6/7 baseline
+#: (when the four login-state/session conformance cases were added; the
+#: Phase 06 baseline was ``025c879c...`` before that additive edit). AC 2:
+#: any drift here means the shared suite was edited to fit DynamoDB instead
+#: of the adapter changing — this pin fails loudly first.
+SUITE_SHA256_AT_BASELINE = "f32efc6e9e28312a4ec836a1978291cb9a13ffd425bca4d26ce014e8fe86122f"
 
 
 @pytest.fixture

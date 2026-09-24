@@ -67,6 +67,7 @@ from app.storage.sqlite import (
     SCHEMA_VERSION,
     SQLiteStorage,
     api_key_from_row,
+    app_session_from_row,
     audit_event_from_row,
     decode_cursor,
     decode_json_column,
@@ -78,6 +79,7 @@ from app.storage.sqlite import (
     encode_timestamp,
     external_identity_from_row,
     membership_from_row,
+    oauth_login_state_from_row,
     open_sqlite_storage,
     organization_from_row,
     user_from_row,
@@ -323,7 +325,7 @@ def test_schema_init_is_idempotent_on_the_same_file(tmp_path) -> None:  # type: 
     second.close()
 
 
-def test_schema_creates_six_tables_and_five_unique_indexes(storage: SQLiteStorage) -> None:
+def test_schema_creates_eight_tables_and_five_unique_indexes(storage: SQLiteStorage) -> None:
     conn = storage._connection()
     objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
     names = {(row["type"], row["name"]) for row in objects}
@@ -334,12 +336,43 @@ def test_schema_creates_six_tables_and_five_unique_indexes(storage: SQLiteStorag
         "memberships",
         "api_keys",
         "audit_events",
+        "oauth_login_states",
+        "app_sessions",
     ):
         assert ("table", table) in names, table
     for index in sqlite_adapter.UNIQUE_INDEX_NAMES:
         assert ("index", index) in names, index
     assert len(sqlite_adapter.UNIQUE_INDEX_NAMES) == 5
-    assert len(sqlite_adapter.TABLE_NAMES) == 6
+    assert len(sqlite_adapter.TABLE_NAMES) == 8
+
+
+def test_phase_11_session_tables_are_added_to_a_pre_phase_11_database(
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    # A database initialized *before* Phase 11 (six base tables, stamped at
+    # SCHEMA_VERSION, no session tables) must gain the two additive tables on
+    # the next open — CREATE TABLE IF NOT EXISTS at open, no data migration
+    # and no version bump.
+    path = tmp_path / "pre-phase-11.sqlite"
+    conn = sqlite3.connect(path)
+    for statement in sqlite_adapter._SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+    conn.close()
+    storage = SQLiteStorage(path)
+    try:
+        tables = {
+            row["name"]
+            for row in storage._connection()
+            .execute("SELECT type, name FROM sqlite_master WHERE type = 'table'")
+            .fetchall()
+        }
+        assert {"oauth_login_states", "app_sessions"} <= tables
+        version = storage._connection().execute("PRAGMA user_version").fetchone()[0]
+        assert version == SCHEMA_VERSION
+    finally:
+        storage.close()
 
 
 def test_unique_indexes_are_effective_at_the_constraint_level(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -588,6 +621,47 @@ def test_mappers_rebuild_domain_objects_from_real_rows(storage: SQLiteStorage) -
     assert audit_event_from_row(_fetch_one(conn, "audit_events")) == make_audit_event()
 
 
+def test_session_mappers_rebuild_domain_objects_from_real_rows(
+    storage: SQLiteStorage,
+) -> None:
+    # Phase 11: the two new mappers rebuild through model_validate from rows
+    # written with the same fixed-width timestamp encoding the contract
+    # methods use (microseconds preserved).
+    live = datetime(2100, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)
+    conn = storage._connection()
+    conn.execute(
+        "INSERT INTO oauth_login_states"
+        " (state_id, code_verifier, return_url, expires_at) VALUES (?, ?, ?, ?)",
+        ("state_test_0000001", "verifier-" + "0" * 34, "/dashboard", encode_timestamp(live)),
+    )
+    conn.execute(
+        "INSERT INTO app_sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)",
+        ("sess_test_0000001", "usr_test_0001", encode_timestamp(live)),
+    )
+    conn.commit()
+    state = oauth_login_state_from_row(_fetch_one(conn, "oauth_login_states"))
+    assert state.state_id == "state_test_0000001"
+    assert state.expires_at == live
+    session = app_session_from_row(_fetch_one(conn, "app_sessions"))
+    assert session.user_id == UserId("usr_test_0001")
+    assert session.expires_at == live
+
+
+def test_session_mappers_reject_corrupt_stored_timestamp(
+    storage: SQLiteStorage,
+) -> None:
+    # Corrupt stored values fail loudly (contract tripwire) on the new mappers
+    # exactly as on the Phase 02 ones.
+    conn = storage._connection()
+    conn.execute(
+        "INSERT INTO app_sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)",
+        ("sess_test_0000001", "usr_test_0001", "yesterday"),
+    )
+    conn.commit()
+    with pytest.raises(ValueError, match="isoformat"):
+        app_session_from_row(_fetch_one(conn, "app_sessions"))
+
+
 def test_identity_mapper_restores_none_tenant_from_normalized_empty(storage: SQLiteStorage) -> None:
     conn = storage._connection()
     _insert_user(conn, make_user())
@@ -644,12 +718,13 @@ def test_closed_instance_is_not_reusable(tmp_path) -> None:  # type: ignore[no-u
 def test_contract_surface_has_no_remaining_stubs() -> None:
     # The task-2 skeleton existed so a forgotten method failed loudly with
     # NotImplementedError; task 7 completed the surface with provision_user,
-    # and Phase 04 task 1 added provision_organization (implemented).
+    # Phase 04 task 1 added provision_organization, and Phase 11 task 6 added
+    # the four login-state/session operations (all implemented).
     # Definition-of-done tripwire (acceptance: "all contract methods
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 19, members
+    assert len(members) == 23, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

@@ -192,6 +192,8 @@ def test_repeated_calls_resolve_same_identity_without_duplicates(db_path: Path) 
         "memberships": 1,
         "api_keys": 0,
         "audit_events": 3,
+        "oauth_login_states": 0,
+        "app_sessions": 0,
     }
 
 
@@ -273,6 +275,8 @@ def test_email_collision_conflicts_and_leaves_no_partial_rows(db_path: Path) -> 
         "memberships": 0,
         "api_keys": 0,
         "audit_events": 0,
+        "oauth_login_states": 0,
+        "app_sessions": 0,
     }
 
 
@@ -384,6 +388,8 @@ def test_hit_path_never_calls_profile_provider_and_keeps_stored_email(
         "memberships": 1,
         "api_keys": 0,
         "audit_events": 3,
+        "oauth_login_states": 0,
+        "app_sessions": 0,
     }
 
 
@@ -424,6 +430,8 @@ def test_profile_subject_mismatch_provisions_nothing(db_path: Path) -> None:
             "memberships": 0,
             "api_keys": 0,
             "audit_events": 0,
+            "oauth_login_states": 0,
+            "app_sessions": 0,
         }
     finally:
         storage.close()
@@ -446,6 +454,8 @@ def test_miss_without_profile_provider_provisions_nothing(db_path: Path) -> None
             "memberships": 0,
             "api_keys": 0,
             "audit_events": 0,
+            "oauth_login_states": 0,
+            "app_sessions": 0,
         }
     finally:
         storage.close()

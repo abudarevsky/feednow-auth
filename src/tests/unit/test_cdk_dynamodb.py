@@ -124,9 +124,9 @@ def test_cdk_schema_copy_matches_runtime_schema() -> None:
 # --- Resource count and physical names ----------------------------------------
 
 
-def test_template_declares_exactly_seven_tables() -> None:
+def test_template_declares_exactly_nine_tables() -> None:
     for env_name in ENVIRONMENTS:
-        assert len(_tables(env_name)) == 7, f"{env_name} must declare exactly 7 tables"
+        assert len(_tables(env_name)) == 9, f"{env_name} must declare exactly 9 tables"
 
 
 def test_table_names_carry_the_env_prefix() -> None:
@@ -179,6 +179,37 @@ def test_gsi_names_key_schemas_and_projection_match_runtime_schema() -> None:
 
 
 # --- Billing, encryption, and capacity drift ---------------------------------
+
+
+# --- Phase 11 task 8: TTL on the session tables only --------------------------
+
+#: The two additive session tables and the numeric TTL attribute the task-7
+#: adapter writes on every item.
+_SESSION_TTL_TABLES = ("oauth_login_states", "app_sessions")
+_TTL_ATTRIBUTE = "expires_at_epoch"
+
+
+def test_ttl_is_enabled_on_the_session_tables_only() -> None:
+    for env_name in ENVIRONMENTS:
+        for spec in SCHEMA:
+            properties = _table_by_name(env_name, f"feednow-auth-{env_name}-{spec.name}")
+            ttl = properties.get("TimeToLiveSpecification")
+            if spec.name in _SESSION_TTL_TABLES:
+                assert ttl == {"AttributeName": _TTL_ATTRIBUTE, "Enabled": True}, spec.name
+            else:
+                assert ttl is None, f"{spec.name} must not carry a TTL"
+
+
+def test_cdk_schema_copy_marks_ttl_on_the_session_tables() -> None:
+    # The stack's own transcription carries the TTL attribute exactly where
+    # the runtime adapter writes it (the runtime TableSpec has no TTL field;
+    # this pins the stack-side decision 2's session extension).
+    ttl_by_name = {spec.name: spec.ttl_attribute for spec in stack_module._SCHEMA}
+    assert ttl_by_name["oauth_login_states"] == _TTL_ATTRIBUTE
+    assert ttl_by_name["app_sessions"] == _TTL_ATTRIBUTE
+    for spec in SCHEMA:
+        if spec.name not in _SESSION_TTL_TABLES:
+            assert ttl_by_name[spec.name] is None, spec.name
 
 
 def test_billing_is_pay_per_request_with_no_capacity_drift() -> None:

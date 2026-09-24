@@ -1,7 +1,7 @@
 """Unit proofs for the DynamoDB Local harness (no Docker, no network I/O).
 
 Covers the harness contract from Phase 06 decision 8: env-var gating with
-explicit skip reasons, a connect-level endpoint probe, the seven-table
+explicit skip reasons, a connect-level endpoint probe, the nine-table
 names/key-schema spec (decision 2's layout), prefix hygiene, and the
 create/delete lifecycle driven against an injected fake resource so no live
 calls are made.
@@ -137,7 +137,7 @@ def _spec(name: str) -> local.TableSpec:
     return next(spec for spec in local.TABLE_SPECS if spec.name == name)
 
 
-def test_seven_tables_with_expected_names() -> None:
+def test_nine_tables_with_expected_names() -> None:
     assert [spec.name for spec in local.TABLE_SPECS] == [
         "users",
         "organizations",
@@ -146,6 +146,8 @@ def test_seven_tables_with_expected_names() -> None:
         "api_keys",
         "memberships",
         "unique_constraints",
+        "oauth_login_states",
+        "app_sessions",
     ]
 
 
@@ -237,6 +239,8 @@ def test_table_names_are_prefixed_in_spec_order() -> None:
         "pfx-api_keys",
         "pfx-memberships",
         "pfx-unique_constraints",
+        "pfx-oauth_login_states",
+        "pfx-app_sessions",
     )
 
 
@@ -259,7 +263,7 @@ def test_delete_tables_deletes_every_spec_and_confirms_gone() -> None:
     client = _FakeClient()
     local.delete_tables("pfx-", resource=_FakeResource(client))
     assert client.deleted_names == list(local.table_names("pfx-"))
-    assert [call[0] for call in client.waiter_calls] == ["table_not_exists"] * 7
+    assert [call[0] for call in client.waiter_calls] == ["table_not_exists"] * 9
     _assert_capitalized_waiter_config(client)
 
 
@@ -277,7 +281,7 @@ def test_delete_tables_tolerates_missing_table_but_propagates_other_errors() -> 
     client = _FakeClient(delete_errors={missing: _client_error("ResourceNotFoundException")})
     local.delete_tables("pfx-", resource=_FakeResource(client))
     assert missing not in client.deleted_names  # skipped, teardown stays quiet
-    assert len(client.deleted_names) == 6
+    assert len(client.deleted_names) == 8
 
     hostile = _FakeClient(delete_errors={missing: _client_error("InternalServerError")})
     with pytest.raises(ClientError):
