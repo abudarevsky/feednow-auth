@@ -63,6 +63,7 @@ from app.services.identity import (
     build_user_context,
     new_provisioning_ids,
     resolve_or_provision,
+    verified_provisioning_profile,
 )
 from app.storage.contract import (
     DuplicateExternalIdentityError,
@@ -564,6 +565,57 @@ def test_miss_without_profile_provider_raises_before_any_write() -> None:
     assert storage.provision_calls == []
     assert storage.write_calls == 0
     assert storage.identity_reads == [(str(IdentityProvider.COGNITO), "cognito-sub-1", None)]
+
+
+def test_verified_provisioning_profile_gates_and_returns_the_provider_profile() -> None:
+    """The service's single profile seam: the profile is verified against the
+    verified token's subject and returned unchanged, so the batch email can
+    only ever come from a gated profile."""
+    profile = verified_provisioning_profile(_claims(), lambda: _profile())
+
+    assert profile.sub == "cognito-sub-1"
+    assert profile.email == "verified@example.test"
+    assert profile.email_verified is True
+
+
+def test_verified_provisioning_profile_refuses_a_missing_provider() -> None:
+    """The seam itself is the refusal point: ``None`` never reaches the gate,
+    so no caller can provision on access-token claims."""
+    with pytest.raises(TokenValidationError, match="verified profile required for provisioning"):
+        verified_provisioning_profile(_claims(), None)
+
+
+def test_verified_provisioning_profile_refuses_subject_mismatch() -> None:
+    """The seam binds the profile to the verified token's subject, so a
+    provider returning someone else's profile is a 401-class refusal."""
+    with pytest.raises(TokenValidationError, match="subject does not match"):
+        verified_provisioning_profile(_claims(), lambda: _profile(sub="someone-else"))
+
+
+def test_race_convergence_never_depends_on_the_batch_email() -> None:
+    """§6 convergence is keyed on the identity tuple alone: the winner's
+    stored email differs from this attempt's profile email and the adapter
+    resolves no winner id, yet the service still converges — and returns the
+    stored user, never an email rewritten from the profile."""
+    storage = StubStorage()
+    winner = _user("usr_winner", email="winner@example.test")
+    _seed_known_user(storage, winner, _organization("org_winner"))
+    storage.miss_first_identity_read = True
+    storage.provision_error = DuplicateExternalIdentityError(existing_user_id=None)
+
+    resolved = resolve_or_provision(
+        storage,
+        _claims(),
+        now=_NOW,
+        ids=_IDS,
+        # A different email from the winner's stored one: no fixture value
+        # here participates in the convergence decision.
+        profile_provider=lambda: _profile(email="offered@example.test"),
+    )
+
+    assert resolved.user is winner
+    assert resolved.user.email == "winner@example.test"
+    assert len(storage.provision_calls) == 1
 
 
 # ---------------------------------------------------------------------------

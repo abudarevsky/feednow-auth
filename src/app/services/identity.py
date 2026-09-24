@@ -31,7 +31,9 @@ Flow (spec §6, breakdown decisions 4—9):
    happens only via that re-read** — ``error.existing_user_id`` is resolved by
    the adapter through an email fallback and is therefore a *stranger's* id in
    the email-collision case; it serves only as a post-convergence cross-check
-   (decision 7).
+   (decision 7). The batch email plays **no part** in deciding convergence:
+   the identity tuple is the sole authority, so the §6 race outcome is
+   independent of the profile email value.
 4. After any resolution, a non-``active`` user raises :class:`DisabledUserError`
    with no storage mutation (reads only; provisioning already happened or was
    skipped).
@@ -214,6 +216,33 @@ def _lookup_external_identity(storage: Storage, claims: CognitoClaims) -> User:
     )
 
 
+def verified_provisioning_profile(
+    claims: CognitoClaims,
+    profile_provider: Callable[[], CognitoProfile] | None,
+) -> CognitoProfile:
+    """Obtain and gate the profile the provisioning batch is built from.
+
+    The single place the provisioning path touches profile material:
+
+    * a **missing** provider is refused with
+      :class:`~app.auth.errors.TokenValidationError`
+      (``"verified profile required for provisioning"``) — account creation
+      never falls back to access-token claims, so no caller (production or
+      test) can provision without a verified profile;
+    * a supplied profile goes through
+      :func:`~app.auth.cognito.require_provisioning_profile` bound to
+      ``claims.sub``, which is what makes ``profile.email`` the only email the
+      service ever reads and pins the profile's subject to the verified
+      token's.
+
+    Raises:
+        TokenValidationError: no provider, or a profile failing the gate.
+    """
+    if profile_provider is None:
+        raise TokenValidationError("verified profile required for provisioning")
+    return require_provisioning_profile(profile_provider(), token_sub=claims.sub)
+
+
 def build_provisioning_batch(
     claims: CognitoClaims,
     now: datetime,
@@ -224,7 +253,7 @@ def build_provisioning_batch(
     """Build the atomic first-login batch — **pure** (no clock, no entropy).
 
     ``profile`` is a **required** keyword and must already have passed
-    :func:`~app.auth.cognito.require_provisioning_profile` (the gate runs in
+    :func:`verified_provisioning_profile` (the gate runs in
     :func:`_provision_or_converge` before this builder is reached), so
     ``profile.email`` is present, verified, and subject-matched. Values are
     pinned by breakdown decisions 5—8 and Phase 11: display name is the
@@ -334,11 +363,11 @@ def resolve_or_provision(
 
     ``profile_provider`` (Phase 11) is invoked **only** on the identity-tuple
     miss path: the hit path performs zero profile work and never overwrites
-    the stored user's email. Its profile is gated through
-    :func:`~app.auth.cognito.require_provisioning_profile` **before** any
-    storage write, so a bad profile raises :class:`TokenValidationError`
-    (401-mapped) with the store untouched. A **missing** provider on the miss
-    path is likewise refused with :class:`TokenValidationError`
+    the stored user's email. Its profile is gated by
+    :func:`verified_provisioning_profile` **before** any storage write, so a
+    bad profile raises :class:`TokenValidationError` (401-mapped) with the
+    store untouched. A **missing** provider on the miss path is likewise
+    refused with :class:`TokenValidationError`
     (``"verified profile required for provisioning"``) before any write:
     account creation never falls back to access-token claims (task 5).
 
@@ -379,15 +408,17 @@ def _provision_or_converge(
     ``existing_user_id`` is email-fallback-resolved and may name a stranger,
     so after a successful re-read it is consulted only to cross-check the
     winner — a disagreement means storage told us two different users and is
-    refused as a conflict rather than silently trusted.
+    refused as a conflict rather than silently trusted. Because the decision
+    never compares emails, a caller exercising the §6 race needs no particular
+    profile email value beyond the gate's presence requirement.
 
-    The profile gate runs before the batch is built, so a gate failure — or
-    a missing provider on this miss path — leaves zero storage mutation (the
-    no-mutation rule extends to absent and bad provider profiles alike).
+    The profile gate (:func:`verified_provisioning_profile`) runs before the
+    batch is built, so a gate failure — or a missing provider on this miss
+    path — leaves zero storage mutation (the no-mutation rule extends to
+    absent and bad provider profiles alike). Nothing below reads the batch
+    email: convergence is decided by the identity tuple alone.
     """
-    if profile_provider is None:
-        raise TokenValidationError("verified profile required for provisioning")
-    profile = require_provisioning_profile(profile_provider(), token_sub=claims.sub)
+    profile = verified_provisioning_profile(claims, profile_provider)
     batch = build_provisioning_batch(
         claims,
         now if now is not None else utc_now(),
@@ -470,4 +501,5 @@ __all__ = [
     "build_user_context",
     "new_provisioning_ids",
     "resolve_or_provision",
+    "verified_provisioning_profile",
 ]
