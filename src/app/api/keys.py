@@ -71,6 +71,7 @@ from app.models.pagination import Page, PageParams
 from app.services import api_key_service
 from app.services.api_key_service import ApiKeyConflictError, ApiKeyNotFoundError
 from app.storage.contract import InvalidCursorError, Storage
+from app.auth.session import SessionManager
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_api_keys")
@@ -109,6 +110,7 @@ def build_api_keys_router(
     pepper_source: PepperSource,
     *,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> APIRouter:
     """Build the API-key routers bound to ``storage``, ``verifier``, and ``pepper_source``.
 
@@ -124,6 +126,7 @@ def build_api_keys_router(
         "list_api_keys",
         pepper_source=pepper_source,
         profile_source=profile_source,
+        session_manager=session_manager,
     )
     create_access = build_organization_admin_dependency(
         storage,
@@ -131,6 +134,7 @@ def build_api_keys_router(
         "create_api_key",
         pepper_source=pepper_source,
         profile_source=profile_source,
+        session_manager=session_manager,
     )
     revoke_access = build_organization_admin_dependency(
         storage,
@@ -138,6 +142,7 @@ def build_api_keys_router(
         "revoke_api_key",
         pepper_source=pepper_source,
         profile_source=profile_source,
+        session_manager=session_manager,
     )
 
     def list_api_keys(

@@ -82,6 +82,7 @@ from app.services.authorization import (
 )
 from app.services.identity import ResolvedIdentity
 from app.storage.contract import EntityNotFoundError, Storage
+from app.auth.session import SessionManager
 
 #: The one fixed 403 message for every denial shape (decision 4: uniform,
 #: existence-oracle-free, identical body for unknown/inactive org, missing/
@@ -226,6 +227,7 @@ def _build_organization_access_dependency(
     min_role: MembershipRole,
     pepper_source: PepperSource | None,
     profile_source: ProfileSource | None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
     """Return the access dependency enforcing ``min_role`` (decision 3 rank).
 
@@ -241,7 +243,7 @@ def _build_organization_access_dependency(
     composed; it only ever matters for a first-login human miss.
     """
     if pepper_source is None:
-        current_user = build_current_user(storage, verifier, profile_source)
+        current_user = build_current_user(storage, verifier, profile_source, session_manager)
 
         def human_only_route_access(
             organization_id: OrganizationId,
@@ -253,7 +255,7 @@ def _build_organization_access_dependency(
 
         return human_only_route_access
 
-    current_principal = build_current_principal(storage, verifier, pepper_source, profile_source)
+    current_principal = build_current_principal(storage, verifier, pepper_source, profile_source, session_manager)
 
     def principal_route_access(
         organization_id: OrganizationId,
@@ -272,6 +274,7 @@ def build_organization_member_dependency(
     *,
     pepper_source: PepperSource | None = None,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
     """Read access: any **active** membership (rank >= ``viewer``).
 
@@ -282,7 +285,7 @@ def build_organization_member_dependency(
     seam to the human authentication chain.
     """
     return _build_organization_access_dependency(
-        storage, verifier, operation_id, MembershipRole.VIEWER, pepper_source, profile_source
+        storage, verifier, operation_id, MembershipRole.VIEWER, pepper_source, profile_source, session_manager
     )
 
 
@@ -293,6 +296,7 @@ def build_organization_admin_dependency(
     *,
     pepper_source: PepperSource | None = None,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
     """Mutation access: rank >= ``admin`` (owner or admin only, decision 3).
 
@@ -300,7 +304,7 @@ def build_organization_admin_dependency(
     :func:`build_organization_member_dependency`.
     """
     return _build_organization_access_dependency(
-        storage, verifier, operation_id, MembershipRole.ADMIN, pepper_source, profile_source
+        storage, verifier, operation_id, MembershipRole.ADMIN, pepper_source, profile_source, session_manager
     )
 
 

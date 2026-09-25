@@ -234,9 +234,11 @@ Session boundary (Phase 11):
   behave as absent; reads are not writes). Both adapters implement them;
   DynamoDB stores a numeric `expires_at_epoch` TTL attribute on the two
   new tables.
-- **Cookie-based authentication of `/v1/*` routes is not enabled by this
-  phase.** Session verification is component-level only; `/v1/*` keeps the
-  bearer-token contract exactly as before.
+- The production `/v1/*` entrypoint keeps bearer-token authentication. The
+  local Cognito Compose runtime may inject `SessionManager` into mounted
+  browser routers so the account UI can authenticate with the HTTP-only
+  session cookie; this local composition does not revise the production
+  endpoint manifest.
 
 Administration boundary (Phase 13):
 

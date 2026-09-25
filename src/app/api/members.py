@@ -48,6 +48,7 @@ from app.services.authorization import (
     TargetUserNotFoundError,
 )
 from app.storage.contract import InvalidCursorError, Storage
+from app.auth.session import SessionManager
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_members")
@@ -73,6 +74,7 @@ def build_members_router(
     verifier: AccessTokenVerifier,
     *,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> APIRouter:
     """Build the member routers bound to ``storage`` and ``verifier``.
 
@@ -81,13 +83,16 @@ def build_members_router(
     """
     router = APIRouter(tags=["members"])
     list_access = build_organization_member_dependency(
-        storage, verifier, "list_members", profile_source=profile_source
+        storage, verifier, "list_members", profile_source=profile_source,
+        session_manager=session_manager,
     )
     create_access = build_organization_admin_dependency(
-        storage, verifier, "create_member", profile_source=profile_source
+        storage, verifier, "create_member", profile_source=profile_source,
+        session_manager=session_manager,
     )
     remove_access = build_organization_admin_dependency(
-        storage, verifier, "remove_member", profile_source=profile_source
+        storage, verifier, "remove_member", profile_source=profile_source,
+        session_manager=session_manager,
     )
 
     def list_members(

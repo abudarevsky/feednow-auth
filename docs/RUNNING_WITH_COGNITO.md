@@ -32,13 +32,16 @@ contract.
 2. **Create App Client**
    - In your User Pool → App integration → App client → Create app client
    - Auth flows: `ALLOW_USER_SRP_AUTH`, `ALLOW_REFRESH_TOKEN_AUTH`
-   - Secret: **Do not generate a secret** (this is a public PKCE client)
-   - **Note the Client ID**. This is a public client and has no client secret.
+   - For a public client, do not generate a secret. For a confidential client,
+     keep its client secret in the backend-only `FEEDNOW_COGNITO_CLIENT_SECRET`
+     setting; never put it in the UI environment.
+   - **Note the Client ID** and use it with the matching secret, if configured.
 
 3. **Configure Callback URLs**
    - App client → Hosted UI → Edit
-   - Callback URL: `http://localhost:8000/oauth/callback` (for local testing)
-   - Logout URL: `http://localhost:8000/logout`
+   - Callback URLs: `http://localhost:8000/oauth/callback` for the account UI
+     and `http://localhost:8000/oauth/cli-callback` for `cognito-login.sh`
+   - Allowed sign-out URL: `http://localhost:8000/logout`
    - Allowed OAuth flows: `Authorization code grant`
    - Allowed OAuth scopes: `openid`, `email`, `profile`
    - Branding: **Hosted UI (classic)**. The CDK stack explicitly selects this
@@ -113,38 +116,43 @@ cd deploy/docker
 cp .env.example .env
 # Set FEEDNOW_COGNITO_ISSUER, FEEDNOW_COGNITO_CLIENT_ID, and a base64
 # FEEDNOW_PEPPER_SECRET in .env.
-./run-dev.sh --cognito
-./cognito-login.sh
+./run-dev.sh --cognito --ui
 ```
 
-This local composition uses SQLite and the real Cognito JWKS endpoint, and it
-serves the local-only `GET /oauth/callback` capture page
-(`deploy/docker/oauth_callback.py`, mounted only by `local_runtime.py` — the
-production `app.main:create_app` surface never sees it). `cognito-login.sh`
-implements the WIP 09 flow contract:
+This local composition uses SQLite and the real Cognito endpoints. The
+browser-facing flow starts at `http://localhost:3000`; the backend owns the
+authorization-code + PKCE exchange, establishes an HTTP-only `feednow_session`
+cookie, and returns the browser to the account dashboard. With `--ui`, the
+Compose `ui` service runs Vite on port 3000 and proxies `/api/*` to the backend
+container at `http://app:8000`; browser requests never use the Docker service
+name. Without `--ui`, only the backend runs in Docker; start Vite from a
+terminal with `cd ../../../feednow-auth-ui && npm run dev`, which proxies to
+`http://127.0.0.1:8000`. Set
+`FEEDNOW_FRONTEND_URL=http://localhost:3000` and register
+`http://localhost:8000/oauth/callback` on the existing public Cognito app
+client. The old `cognito-login.sh` remains available for command-line
+diagnostics but is not the account UI login path.
 
-1. Generates a PKCE verifier/challenge **and a random CSRF `state`**, then
-   opens `{domain}/oauth2/authorize` (`--provider Google` adds
-   `identity_provider=Google`; the flag value is passed to the URL builder).
-2. The Cognito redirect lands on `http://localhost:8000/oauth/callback`,
-   which renders a page instructing you to copy the **complete callback URL**
-   from the browser address bar and paste it back into the terminal. The page
-   echoes only `code`/`state` (or `error`/`error_description`), HTML-escaped,
-   as text — it logs nothing and persists nothing, and the Cognito compose
-   override runs uvicorn with `--no-access-log` so the query string (and the
-   one-time code) never reaches container logs.
-3. The script validates the pasted `state` against the generated one and
-   aborts **before any token exchange** on a mismatch or an `error`
-   parameter.
-4. The token exchange posts `grant_type`, `code`, `redirect_uri`,
-   `code_verifier`, and `client_id` (plus `client_secret` only when the env
-   provides one) as a form body built by `python3 urlencode` and piped to
-   `curl --data-binary @-` over HTTPS — code, verifier, and secret never
-   appear in argv, logs, or files.
-5. stdout carries **only** the `GET /v1/me` JSON body on HTTP 200; all
-   guidance and fixed credential-free error messages go to stderr, and
-   missing config (before any network call), a failed exchange, or a
-   non-200 `/v1/me` exit non-zero.
+The browser flow uses the backend's PKCE state. Sign-out clears the local
+session and navigates through Cognito's `/logout` endpoint, which returns the
+browser through the registered local URL `http://localhost:8000/logout` and
+then to the UI sign-in page. Add `http://localhost:8000/logout` to the app
+client's allowed sign-out URLs. The
+sign-in request includes `prompt=select_account` so Cognito can ask Google to
+show its account chooser where supported.
+
+1. The UI navigates to `/api/oauth/login`; the backend uses its configured
+   absolute account landing URL (`FEEDNOW_FRONTEND_URL/account`) and stores a
+   single-use state and PKCE verifier before redirecting to Cognito Managed
+   Login. Do not send `/account` as a relative `next` path: the callback runs
+   on the backend origin, so that path would return to the backend rather than
+   the UI.
+2. Cognito returns to the backend callback. The backend exchanges the code,
+   validates the access token, fetches the verified profile, provisions the
+   internal user and personal organization idempotently, and issues the
+   session cookie.
+3. The UI loads the account via `/api/v1/me`; protected browser API calls use
+   that cookie. No Cognito token is stored in browser storage.
 
 Configuration is read from `FEEDNOW_LOGIN_ENV_FILE` when set, defaulting to
 `deploy/docker/.env`. On first login, `/v1/me` requires a verified Cognito
@@ -183,13 +191,24 @@ updates that federated profile in place rather than deleting or recreating it.
 
 ## 3. Run with Docker Compose
 
-### Production-like (no live reload)
+### Local account UI and API
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml up --build
+cd deploy/docker
+cp .env.example .env
+# Fill in the existing development pool issuer, app client id, domain,
+# and a locally generated base64 pepper. Set FEEDNOW_COGNITO_CLIENT_SECRET
+# only when the selected app client has a secret. The user-info URL defaults to
+# <domain>/oauth2/userInfo when FEEDNOW_COGNITO_USERINFO_URL is unset.
+./run-dev.sh --cognito --ui
 ```
 
-### Development (with live reload)
+Open `http://localhost:3000`. Use `./run-dev.sh --cognito` to run only the
+backend in Docker and start Vite in a terminal, or `./run-dev.sh --ui` as a
+shortcut for `--cognito --ui`. The named SQLite volume is retained by normal
+stop/start. Use `--reset` only when intentionally discarding local data.
+
+### Backend development (with live reload)
 
 ```bash
 docker compose -f deploy/docker/docker-compose.yml \
@@ -227,7 +246,8 @@ AUTH_URL="${COGNITO_DOMAIN}/oauth2/authorize?response_type=code&client_id=${CLIE
 echo "Open in browser: $AUTH_URL"
 ```
 
-The local app serves the `/oauth/callback` capture page, and
+The local app serves `/oauth/callback` for the browser UI flow and a separate
+`/oauth/cli-callback` capture page for the host-side login helper.
 `./cognito-login.sh` builds the full authorize URL (PKCE challenge and CSRF
 `state` included) itself — construct the URL by hand only to debug app-client
 configuration. A successful sign-in lands on the capture page, where you copy

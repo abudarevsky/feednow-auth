@@ -49,6 +49,7 @@ from app.services.authorization import (
 )
 from app.services.identity import ResolvedIdentity
 from app.storage.contract import InvalidCursorError, Storage
+from app.auth.session import SessionManager
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_organizations")
@@ -78,6 +79,7 @@ def build_organizations_router(
     verifier: AccessTokenVerifier,
     *,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> APIRouter:
     """Build the organization routers bound to ``storage`` and ``verifier``.
 
@@ -85,9 +87,9 @@ def build_organizations_router(
     a first-login human miss provisions from the verified user-info profile.
     """
     router = APIRouter(tags=["organizations"])
-    current_user = build_current_user(storage, verifier, profile_source)
+    current_user = build_current_user(storage, verifier, profile_source, session_manager)
     get_access = build_organization_member_dependency(
-        storage, verifier, "get_organization", profile_source=profile_source
+        storage, verifier, "get_organization", profile_source=profile_source, session_manager=session_manager
     )
 
     def list_organizations(

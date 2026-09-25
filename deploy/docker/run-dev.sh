@@ -2,7 +2,9 @@
 # run-dev.sh — Start feednow-auth dev environment in Docker
 #
 # Usage:
-#   ./run-dev.sh --cognito    # Start full local SQLite + Cognito runtime
+#   ./run-dev.sh --cognito          # Start backend; run UI from a terminal
+#   ./run-dev.sh --cognito --ui     # Start backend and UI in Docker
+#   ./run-dev.sh --ui               # Alias for --cognito --ui
 #   ./run-dev.sh --stop       # Stop and remove containers
 #   ./run-dev.sh --logs       # Follow logs
 #   ./run-dev.sh --reset      # Stop, remove volumes, and restart fresh
@@ -34,6 +36,7 @@ Start feednow-auth development environment in Docker.
 
 Options:
   --cognito     Enable Cognito authentication (requires .env with Cognito vars)
+  --ui           Also build and start the account UI in Docker on port 3000
   --stop        Stop and remove containers
   --logs        Follow container logs
   --reset       Stop, remove volumes, and restart fresh
@@ -54,6 +57,8 @@ Environment:
 
 Examples:
   $(basename "$0") --cognito          # Start with Cognito auth enabled
+  $(basename "$0") --cognito --ui     # Start backend and UI together in Docker
+  $(basename "$0") --cognito          # Then run npm run dev in feednow-auth-ui
   $(basename "$0") --logs             # Follow logs
   $(basename "$0") --reset            # Fresh start and restart Cognito
 EOF
@@ -75,6 +80,7 @@ enable_cognito() {
     source "${ENV_FILE}" 2>/dev/null || true
     [[ -z "${FEEDNOW_COGNITO_ISSUER:-}" ]] && missing+=("FEEDNOW_COGNITO_ISSUER")
     [[ -z "${FEEDNOW_COGNITO_CLIENT_ID:-}" ]] && missing+=("FEEDNOW_COGNITO_CLIENT_ID")
+    [[ -z "${FEEDNOW_COGNITO_DOMAIN:-}" ]] && missing+=("FEEDNOW_COGNITO_DOMAIN")
     [[ -z "${FEEDNOW_PEPPER_SECRET:-}" ]] && missing+=("FEEDNOW_PEPPER_SECRET")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -90,6 +96,7 @@ enable_cognito() {
 
 start_dev() {
     local with_cognito="${1:-false}"
+    local with_ui="${2:-false}"
 
     check_env_file
 
@@ -101,6 +108,9 @@ start_dev() {
 
     log_info "Building and starting containers..."
     local compose_args=(-f "${COMPOSE_FILE}" --profile cognito)
+    if [[ "${with_ui}" == "true" ]]; then
+        compose_args+=(--profile ui)
+    fi
     docker compose "${compose_args[@]}" up --build -d
 
     log_info "Waiting for health check..."
@@ -128,7 +138,13 @@ start_dev() {
     echo "  OpenAPI:    http://localhost:8000/openapi.json"
     echo "  Docs:       http://localhost:8000/docs"
     echo
-    echo "  Cognito:    ENABLED — use ./cognito-login.sh to authenticate"
+    echo "  Cognito:    ENABLED — open the account UI and use Managed Login"
+    if [[ "${with_ui}" == "true" ]]; then
+        echo "  UI:         http://localhost:3000 (Vite proxy uses Docker service app:8000)"
+    else
+        echo "  UI:         run from terminal: cd ../../../feednow-auth-ui && npm run dev"
+        echo "              Vite proxies /api to http://127.0.0.1:8000 by default"
+    fi
     echo
     echo "  Logs:       ./run-dev.sh --logs"
     echo "  Stop:       ./run-dev.sh --stop"
@@ -166,7 +182,14 @@ show_status() {
 main() {
     case "${1:-}" in
         --cognito)
-            start_dev true
+            if [[ "${2:-}" == "--ui" ]]; then
+                start_dev true true
+            else
+                start_dev true false
+            fi
+            ;;
+        --ui)
+            start_dev true true
             ;;
         --stop)
             stop_dev

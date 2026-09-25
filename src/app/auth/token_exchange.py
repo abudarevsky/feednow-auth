@@ -1,10 +1,9 @@
 """Authorization-code + PKCE token-exchange client (Phase 11 task 10).
 
 Exchanges a Cognito Hosted UI authorization code for an access token over
-the RFC 6749 / RFC 7636 ``POST /oauth2/token`` form flow. The client is the
-*public* PKCE variant matching the Phase 07 app client: the form carries
-``code_verifier`` and **no client secret is ever sent, stored, or accepted**
-by this module (AGENTS.md no-secrets rule).
+the RFC 6749 / RFC 7636 ``POST /oauth2/token`` form flow. PKCE is always
+required. Public app clients send no secret; confidential app clients may
+provide a server-side secret, sent only with HTTP Basic authentication.
 
 Contract (breakdown task 10):
 
@@ -38,6 +37,7 @@ the PKCE secret, so neither may appear in exception text or logs.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
@@ -60,6 +60,16 @@ MIN_ACCESS_TOKEN_LENGTH: Final = 32
 
 #: OIDC-standard grant type for the authorization-code exchange.
 _GRANT_TYPE: Final = "authorization_code"
+_SAFE_PROVIDER_ERRORS: Final = frozenset({
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+    "server_error",
+    "temporarily_unavailable",
+})
 
 
 class CognitoTokenEndpoint:
@@ -77,6 +87,7 @@ class CognitoTokenEndpoint:
         token_endpoint_url: str,
         client_id: str,
         timeout_seconds: float = 5.0,
+        client_secret: str | None = None,
     ) -> None:
         self._token_endpoint_url = self._validate_token_endpoint_url(token_endpoint_url)
         if not isinstance(client_id, str) or not client_id:
@@ -84,6 +95,7 @@ class CognitoTokenEndpoint:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         self._client_id = client_id
+        self._client_secret = client_secret or None
         self._timeout_seconds = timeout_seconds
         self._opener = urllib.request.build_opener(_RejectRedirectHandler())
 
@@ -122,14 +134,20 @@ class CognitoTokenEndpoint:
                 "code_verifier": code_verifier,
             }
         ).encode("utf-8")
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        }
+        if self._client_secret:
+            basic = base64.b64encode(
+                f"{self._client_id}:{self._client_secret}".encode("utf-8")
+            ).decode("ascii")
+            headers["Authorization"] = f"Basic {basic}"
         request = urllib.request.Request(
             self._token_endpoint_url,
             data=form,
             method="POST",
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "application/json",
-            },
+            headers=headers,
         )
         # HTTPError is a URLError subclass and URLError an OSError subclass:
         # the order below keeps "endpoint answered badly" distinct from
@@ -139,8 +157,21 @@ class CognitoTokenEndpoint:
             with self._opener.open(request, timeout=self._timeout_seconds) as response:
                 body: bytes = response.read(_MAX_TOKEN_BODY_BYTES + 1)
         except urllib.error.HTTPError as exc:
+            # Cognito returns OAuth error identifiers such as invalid_client
+            # and invalid_grant. Surface only an allowlisted identifier; its
+            # free-form description can contain provider details and is not
+            # needed to diagnose the common local configuration failures.
+            try:
+                payload = json.loads(exc.read(_MAX_TOKEN_BODY_BYTES + 1))
+            except (OSError, ValueError):
+                payload = None
+            provider_error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(provider_error, str) and provider_error in _SAFE_PROVIDER_ERRORS:
+                reason = f"token endpoint rejected request ({provider_error})"
+            else:
+                reason = "token endpoint returned an error response"
             raise TokenProviderUnavailableError(
-                "token endpoint returned an error response"
+                reason
             ) from exc
         except OSError as exc:
             raise TokenProviderUnavailableError("token endpoint could not be reached") from exc

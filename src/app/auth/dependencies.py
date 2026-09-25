@@ -73,7 +73,10 @@ from app.services.identity import (
     ResolvedIdentity,
     resolve_or_provision,
 )
-from app.storage.contract import Storage
+from app.storage.contract import EntityNotFoundError, Storage
+from app.auth.session import SessionManager, read_session_cookie
+from app.services.identity import build_user_context
+from app.models.enums import UserStatus
 
 #: Fixed safe messages for header-level failures (no caller text is echoed).
 MISSING_HEADER_MESSAGE: Final = "authentication credentials not provided"
@@ -163,6 +166,7 @@ def build_current_user(
     storage: Storage,
     verifier: AccessTokenVerifier,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., ResolvedIdentity]:
     """Return the ``ResolvedIdentity`` dependency bound to ``storage``/``verifier``.
 
@@ -175,6 +179,17 @@ def build_current_user(
 
     def current_user(request: Request) -> ResolvedIdentity:
         """Execute the Phase 03 authentication chain for one request."""
+        if session_manager is not None and not request.headers.get("authorization"):
+            session_id = read_session_cookie(request)
+            user_id = session_manager.verify(session_id) if session_id else None
+            if user_id is not None:
+                try:
+                    user = storage.get_user(user_id)
+                except EntityNotFoundError as exc:
+                    raise HTTPException(status_code=401, detail=MISSING_HEADER_MESSAGE) from exc
+                if user.status is not UserStatus.ACTIVE:
+                    raise HTTPException(status_code=403, detail="user account is disabled")
+                return ResolvedIdentity(user=user, context=build_user_context(storage, user))
         token = _extract_bearer_token(request)
         claims = _verify_token(verifier, token)
         return _resolve_identity(
@@ -189,6 +204,7 @@ def build_current_principal(
     verifier: AccessTokenVerifier,
     pepper_source: PepperSource,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., Principal]:
     """Return the ``Principal`` dependency: prefix-dispatched human-or-key auth.
 
@@ -215,6 +231,9 @@ def build_current_principal(
 
     def current_principal(request: Request) -> Principal:
         """Authenticate one request and wrap the outcome in a ``Principal``."""
+        if session_manager is not None and not request.headers.get("authorization"):
+            identity = build_current_user(storage, verifier, profile_source, session_manager)(request)
+            return Principal(user=identity.user, api_key=None, context=identity.context)
         token = _extract_bearer_token(request)
         if token.startswith(API_KEY_BEARER_PREFIXES):
             return _api_key_principal(token)

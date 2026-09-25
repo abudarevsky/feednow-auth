@@ -5,8 +5,7 @@
 # the Phase 06 adapter-conformance recipe. The two profiles share host port
 # 8000 but are used in separate commands, so they never collide.
 #
-#   docker compose --profile cognito up --build          # local Cognito journey
-#   ./cognito-login.sh --provider Google                 # in another shell
+#   docker compose --profile cognito up --build          # local account app
 #
 # Non-secret configuration names are documented in .env.example; the actual
 # values live in the non-committed .env loaded via `env_file` below.
@@ -21,7 +20,7 @@ services:
   # runs as uid 1000, so initialise (and repair existing local volumes) before
   # it opens SQLite.  This service is local-only and never handles secrets.
   data-init:
-    profiles: ["cognito"]
+    profiles: ["cognito", "ui"]
     image: busybox:1.36.1
     user: "0:0"
     volumes:
@@ -29,7 +28,7 @@ services:
     command: ["sh", "-c", "chown -R 1000:1000 /data"]
 
   app:
-    profiles: ["cognito"]
+    profiles: ["cognito", "ui"]
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
@@ -51,6 +50,18 @@ services:
     # interpolation at `run` time without baking it into .env.
     environment:
       FEEDNOW_DYNAMODB_LOCAL_ENDPOINT: ${FEEDNOW_DYNAMODB_LOCAL_ENDPOINT:-}
+
+  ui:
+    profiles: ["ui"]
+    build:
+      context: ../../../feednow-auth-ui
+      dockerfile: Dockerfile
+    environment:
+      FEEDNOW_AUTH_ORIGIN: http://app:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - app
 
   dynamodb-local:
     profiles: ["testing"]

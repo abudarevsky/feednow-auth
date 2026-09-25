@@ -12,6 +12,7 @@ The composition performs a short local-only volume initialization before the
 non-root app starts. It preserves the SQLite database while repairing the
 volume ownership needed for first-login provisioning.
 
-Use `./cognito-login.sh` for the Cognito email/password page. The script only
+Register `http://localhost:8000/oauth/cli-callback` as an additional Cognito
+callback URL for the local CLI flow. Use `./cognito-login.sh` for the Cognito email/password page. The script only
 prints the final `/v1/me` JSON; its authorization URL and operational messages
 go to stderr.

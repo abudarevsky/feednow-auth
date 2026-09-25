@@ -39,6 +39,10 @@ OAUTH_CALLBACK_URL: Final[str] = "http://localhost:8000/oauth/callback"
 # Served path on the local app; must match the URL above.
 OAUTH_CALLBACK_PATH: Final[str] = "/oauth/callback"
 
+# Separate callback for the host-side CLI harness, which owns its own PKCE
+# verifier and state rather than consuming state created by the browser API.
+CLI_OAUTH_CALLBACK_PATH: Final[str] = "/oauth/cli-callback"
+
 # The only query parameters this page ever renders; everything else in the
 # callback URL is ignored so unrelated parameters cannot smuggle content in.
 ECHOED_PARAMS: Final[tuple[str, ...]] = ("code", "state", "error", "error_description")
@@ -85,7 +89,7 @@ def build_oauth_callback_router() -> APIRouter:
         OAUTH_CALLBACK_PATH,
         response_class=HTMLResponse,
         include_in_schema=False,
-        summary="Local OAuth callback capture page (development only)",
+        summary="Legacy local OAuth callback capture page (development only)",
     )
     async def oauth_callback(request: Request) -> HTMLResponse:
         """Echo the redirect parameters as escaped page text and nothing else."""
@@ -96,9 +100,29 @@ def build_oauth_callback_router() -> APIRouter:
     return router
 
 
+def build_oauth_cli_callback_router() -> APIRouter:
+    """Return the local-only callback route reserved for the CLI PKCE flow."""
+    router = APIRouter(tags=["oauth-callback-local"])
+
+    @router.get(
+        CLI_OAUTH_CALLBACK_PATH,
+        response_class=HTMLResponse,
+        include_in_schema=False,
+        summary="CLI OAuth callback capture page (development only)",
+    )
+    async def oauth_cli_callback(request: Request) -> HTMLResponse:
+        query = request.query_params
+        values = {name: query[name] for name in ECHOED_PARAMS if name in query}
+        return HTMLResponse(content=_render_page(values), status_code=200)
+
+    return router
+
+
 __all__ = [
     "ECHOED_PARAMS",
+    "CLI_OAUTH_CALLBACK_PATH",
     "OAUTH_CALLBACK_PATH",
     "OAUTH_CALLBACK_URL",
     "build_oauth_callback_router",
+    "build_oauth_cli_callback_router",
 ]

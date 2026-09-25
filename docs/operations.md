@@ -58,8 +58,9 @@ email is gone, so the local Cognito composition needs
 deployed runtime only under the complete session configuration below
 (contract and evidence in
 [docs/phases/11-cognito-authentication-profile-and-session-boundary.md](phases/11-cognito-authentication-profile-and-session-boundary.md)).
-`/v1/*` routes still do not authenticate the `feednow_session` cookie —
-session verification is component-level only. Phase 13 adds the
+The production `/v1/*` entrypoint still uses bearer tokens. The local Cognito
+Compose root wires `SessionManager` into its mounted browser API routers so
+the UI session cookie authenticates local account requests. Phase 13 adds the
 out-of-band administration path — the `python -m feednow_auth.admin` CLI,
 the administration service, the atomic `transition_application_role`
 storage operation on both adapters, and the (unmounted) global-admin

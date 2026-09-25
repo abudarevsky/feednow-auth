@@ -34,6 +34,7 @@ from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_user
 from app.services.identity import ResolvedIdentity
 from app.storage.contract import Storage
+from app.auth.session import SessionManager
 
 #: The frozen §14 entry this router must register exactly.
 _ME_SPEC = endpoint_for("get_current_user")
@@ -44,6 +45,7 @@ def build_me_router(
     verifier: AccessTokenVerifier,
     *,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> APIRouter:
     """Build the ``GET /v1/me`` router bound to ``storage`` and ``verifier``.
 
@@ -54,7 +56,7 @@ def build_me_router(
     first-login miss provisions from the verified user-info profile.
     """
     router = APIRouter(tags=["identity"])
-    current_user = build_current_user(storage, verifier, profile_source)
+    current_user = build_current_user(storage, verifier, profile_source, session_manager)
 
     def get_current_user(
         identity: Annotated[ResolvedIdentity, Depends(current_user)],

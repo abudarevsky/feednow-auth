@@ -120,9 +120,11 @@ GET /oauth/callback
   -> SessionManager.issue          opaque feednow_session cookie, 302 home
 ```
 
-Cookie-based authentication of `/v1/*` is **not** enabled by this phase:
-`SessionManager.verify` is component-level only and `/v1/*` keeps the
-bearer contract. The user-info and token endpoints are fixed approved
+The production API keeps the bearer contract. The local Compose runtime
+enables the browser's same-host `feednow_session` cookie on its mounted `/v1`
+routers so the UI can use the OAuth session; it re-reads the user record and
+organization membership on requests. This local-only wiring does not change
+the frozen production `/v1` manifest. The user-info and token endpoints are fixed approved
 HTTPS configuration (constructor-pinned, redirects refused); the session
 modules import no logging and no code, state, verifier, token, or email
 material appears in logs, error envelopes, or redirect targets.

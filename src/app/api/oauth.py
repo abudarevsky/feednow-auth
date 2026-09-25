@@ -71,7 +71,6 @@ from fastapi.responses import RedirectResponse
 from app.auth.cognito import (
     AccessTokenVerifier,
     ProfileSource,
-    require_provisioning_profile,
 )
 from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 from app.auth.session import SessionManager, build_session_cookie
@@ -300,6 +299,11 @@ def build_oauth_router(
                 "state": state_id,
                 "code_challenge_method": "S256",
                 "code_challenge": _code_challenge(code_verifier),
+                **(
+                    {"prompt": "select_account"}
+                    if request.query_params.get("select_account") == "true"
+                    else {}
+                ),
             }
         )
         return RedirectResponse(url=f"{authorize_base}?{query}", status_code=302)
@@ -342,19 +346,17 @@ def build_oauth_router(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         except TokenValidationError as exc:
             raise HTTPException(status_code=401, detail=exc.reason) from exc
-        # (e) Fetch the authoritative profile and run the provisioning gate
-        # before resolution: shape/subject failures are 401, outages 503.
+        # (e) Resolve-or-provision. Its profile provider is lazy and runs only
+        # when this Cognito subject is new; known identities must not be
+        # rejected because an upstream IdP later changes email verification.
+        # On a miss, resolve_or_provision gates the fetched profile before any
+        # storage write, preserving the verified-email provisioning rule.
         try:
-            profile = profile_source.fetch(access_token, claims.sub)
-            require_provisioning_profile(profile, token_sub=claims.sub)
-        except TokenProviderUnavailableError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
-        except TokenValidationError as exc:
-            raise HTTPException(status_code=401, detail=exc.reason) from exc
-        # (f) Resolve-or-provision exactly as the bearer chain does (the
-        # already-gated profile is the only provisioning input).
-        try:
-            identity = resolve_or_provision(storage, claims, profile_provider=lambda: profile)
+            identity = resolve_or_provision(
+                storage,
+                claims,
+                profile_provider=lambda: profile_source.fetch(access_token, claims.sub),
+            )
         except DisabledUserError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except NoActiveOrganizationError as exc:
