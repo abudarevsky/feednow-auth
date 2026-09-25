@@ -17,6 +17,9 @@ Verify lines covered:
 - The Phase 12 users item carries ``application_role``/``g_email``, an absent
   role (pre-Phase-12 item) reads back as ``user``, and a present-but-invalid
   role fails validation; no constraint kind or mapping names email any more.
+- The Phase 13 users item additionally carries ``g_role`` (the
+  ``by-application-role`` GSI partition attribute, always the exact
+  ``application_role`` value), and the users ``TableSpec`` declares both GSIs.
 - Cursor garbage/tampered/foreign-scope -> ``InvalidCursorError`` with fixed
   messages and no echo of the cursor content.
 - The factory with an injected fake resource constructs without any network
@@ -139,8 +142,8 @@ def test_no_constraint_kind_or_mapping_names_email() -> None:
     assert contract.DuplicateEntityKind.USER_EMAIL not in DUPLICATE_KIND_BY_CONSTRAINT.values()
     # And the users table declares an index, not a constraint, for email.
     users_spec = next(spec for spec in SCHEMA if spec.name == "users")
-    assert [(i.name, i.partition_key, i.sort_key) for i in users_spec.indexes] == [
-        ("by-email", "g_email", "pk")
+    assert ("by-email", "g_email", "pk") in [
+        (index.name, index.partition_key, index.sort_key) for index in users_spec.indexes
     ]
 
 
@@ -270,6 +273,28 @@ def test_user_item_round_trips_role_and_email_lookup_key() -> None:
     assert user_from_item(item) == admin
 
 
+def test_user_item_writes_g_role_as_the_application_role_value() -> None:
+    # Phase 13: g_role is the by-application-role GSI partition attribute and
+    # carries exactly the application_role value on every write path — the
+    # transition's conditional update rewrites both attributes from one value,
+    # so the index can never lag the attribute it mirrors.
+    admin_item = user_item(_user(application_role=ApplicationRole.ADMIN))
+    assert admin_item["g_role"] == "admin" == admin_item["application_role"]
+    user_item_mapping = user_item(_user(application_role=ApplicationRole.USER))
+    assert user_item_mapping["g_role"] == "user" == user_item_mapping["application_role"]
+
+
+def test_user_from_item_ignores_the_g_role_index_attribute() -> None:
+    # g_role is index plumbing, never domain state: reconstruction reads the
+    # application_role attribute, and the extra key does not leak (the model
+    # is extra="forbid", so equality proves it).
+    admin = _user(application_role=ApplicationRole.ADMIN)
+    assert user_from_item(user_item(admin)) == admin
+    drifted = user_item(admin)
+    drifted["g_role"] = "user"  # a hypothetical lagging index copy
+    assert user_from_item(drifted) == admin  # the attribute is not consulted
+
+
 def test_user_item_writes_the_default_role_rather_than_omitting_it() -> None:
     item = user_item(_user())
     # Absence is reserved for pre-Phase-12 items; a fresh write always carries
@@ -325,6 +350,25 @@ def test_phase_11_session_tables_are_pk_keyed_single_tables() -> None:
         spec = by_name[name]
         assert (spec.partition_key, spec.sort_key) == ("pk", None), name
         assert spec.indexes == (), name
+
+
+def test_users_table_declares_the_phase_13_by_application_role_gsi() -> None:
+    # Phase 13 task 6: the active-admin guard needs a real access path, so the
+    # users table carries the by-application-role GSI (g_role partition, pk
+    # sort) alongside by-email — additive index, base keys untouched.
+    users_spec = next(spec for spec in SCHEMA if spec.name == "users")
+    assert [(i.name, i.partition_key, i.sort_key) for i in users_spec.indexes] == [
+        ("by-email", "g_email", "pk"),
+        ("by-application-role", "g_role", "pk"),
+    ]
+    assert users_spec.partition_key == "pk"
+    assert users_spec.sort_key is None
+    # create_parameters keeps both GSI key attributes in the definitions.
+    payload = users_spec.create_parameters("pfx-")
+    defined = {d["AttributeName"] for d in payload["AttributeDefinitions"]}
+    assert {"pk", "g_email", "g_role"} == defined
+    names = [i["IndexName"] for i in payload["GlobalSecondaryIndexes"]]
+    assert names == ["by-email", "by-application-role"]
 
 
 # -- session item codecs (Phase 11 task 7) ------------------------------------

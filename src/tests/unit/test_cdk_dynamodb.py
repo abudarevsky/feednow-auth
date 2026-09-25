@@ -181,18 +181,41 @@ def test_gsi_names_key_schemas_and_projection_match_runtime_schema() -> None:
 def test_users_table_carries_the_phase_12_by_email_gsi() -> None:
     # Phase 12 task 2: the non-unique email lookup needs a real access path, so
     # the users table (the only Phase 06 table with no index before this) now
-    # synthesizes exactly the by-email GSI with the runtime key attributes, and
-    # ``g_email`` joins the attribute definitions.
+    # synthesizes the by-email GSI with the runtime key attributes, and
+    # ``g_email`` joins the attribute definitions. (Phase 13 adds a second
+    # index; this proof pins the by-email half stays byte-exact.)
     users_spec = next(spec for spec in SCHEMA if spec.name == "users")
-    assert [(i.name, i.partition_key, i.sort_key) for i in users_spec.indexes] == [
-        ("by-email", "g_email", "pk")
+    assert ("by-email", "g_email", "pk") in [
+        (i.name, i.partition_key, i.sort_key) for i in users_spec.indexes
     ]
+    by_email = [i for i in users_spec.indexes if i.name == "by-email"]
     for env_name in ENVIRONMENTS:
         properties = _table_by_name(env_name, f"feednow-auth-{env_name}-users")
-        assert properties["GlobalSecondaryIndexes"] == _gsi_schema(users_spec.indexes)
-        assert {
+        assert _gsi_schema(tuple(by_email))[0] in properties["GlobalSecondaryIndexes"]
+        assert {"pk", "g_email"} <= {
             definition["AttributeName"] for definition in properties["AttributeDefinitions"]
-        } == {"pk", "g_email"}
+        }
+
+
+def test_users_table_carries_the_phase_13_by_application_role_gsi() -> None:
+    # Phase 13 task 6: the transition's active-admin guard queries the
+    # by-application-role GSI, so the stack must mirror the runtime
+    # ``user_item`` write of ``g_role`` with a declared index — synthesized
+    # with the runtime key attributes (ALL projection) and ``g_role`` in the
+    # attribute definitions, on every environment.
+    users_spec = next(spec for spec in SCHEMA if spec.name == "users")
+    assert ("by-application-role", "g_role", "pk") in [
+        (i.name, i.partition_key, i.sort_key) for i in users_spec.indexes
+    ]
+    by_role = [i for i in users_spec.indexes if i.name == "by-application-role"]
+    for env_name in ENVIRONMENTS:
+        properties = _table_by_name(env_name, f"feednow-auth-{env_name}-users")
+        assert _gsi_schema(tuple(by_role))[0] in properties["GlobalSecondaryIndexes"]
+        assert "g_role" in {
+            definition["AttributeName"] for definition in properties["AttributeDefinitions"]
+        }
+        # Exactly the two runtime indexes — no drift in either direction.
+        assert properties["GlobalSecondaryIndexes"] == _gsi_schema(users_spec.indexes)
 
 
 # --- Billing, encryption, and capacity drift ---------------------------------

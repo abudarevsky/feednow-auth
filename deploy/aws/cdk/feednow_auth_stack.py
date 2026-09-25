@@ -139,9 +139,13 @@ class _TableSpec:
 
 #: The table schema, transcribed verbatim from ``SCHEMA`` in
 #: ``src/app/storage/dynamodb.py`` (docs/phases/06-dynamodb.md "Table and
-#: index schema"), plus the two additive Phase 11 session tables and the
-#: additive Phase 12 ``users/by-email`` GSI (an access path for the non-unique
-#: email lookup, never a constraint). Duplicated
+#: index schema"), plus the two additive Phase 11 session tables, the additive
+#: Phase 12 ``users/by-email`` GSI (an access path for the non-unique email
+#: lookup, never a constraint), and the additive Phase 13 ``users/
+#: by-application-role`` GSI (``g_role`` = the ``application_role`` value the
+#: runtime ``user_item`` codec writes on every path and the role transition
+#: rewrites in lockstep — the index mirrors that write; a GSI add is online,
+#: tables are never replaced). Duplicated
 #: rather than imported on purpose: the synth path (``requirements.txt``)
 #: carries no boto3, so the CDK app must not import the runtime adapter
 #: module. ``test_cdk_dynamodb.py`` pins this copy against the runtime
@@ -150,7 +154,10 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
     _TableSpec(
         name="users",
         partition_key="pk",
-        indexes=(_IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),),
+        indexes=(
+            _IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),
+            _IndexSpec(name="by-application-role", partition_key="g_role", sort_key="pk"),
+        ),
     ),
     _TableSpec(name="organizations", partition_key="pk"),
     _TableSpec(name="external_identities", partition_key="pk"),

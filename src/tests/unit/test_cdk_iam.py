@@ -89,12 +89,28 @@ STANDALONE_WRITE_TABLES = frozenset({"oauth_login_states", "app_sessions"})
 
 #: GSI ARNs get ``Query`` only (the base-table ``Query`` half of a GSI query
 #: is already inside the table row above).
+#:
+#: Phase 13 least-privilege decision (pinned, do not relitigate in build):
+#: mirroring the ``users/by-application-role`` index into the stack ``_SCHEMA``
+#: **does** extend the Lambda execution role with ``Query`` on that index even
+#: though no Lambda code path queries it — the application-role transition is
+#: CLI-only and the CLI runs outside Lambda under the separately documented
+#: operator role. The grant is accepted because it exposes no data the role
+#: cannot already read (base-table ``GetItem``/``Query`` on the same ``users``
+#: items and attributes are already granted) and excludes nothing writable,
+#: while any exclusion mechanism would fork the stack ``_SCHEMA`` mirror
+#: invariant that ``test_cdk_dynamodb.py`` pins field-for-field. No ``Scan``,
+#: no other table touched, no new Lambda capability beyond this accepted read.
+#: (Restated in the docs/operations.md IAM section with the runbook.)
 INDEX_MATRIX: Mapping[tuple[str, str], frozenset[str]] = {
     ("api_keys", "by-organization"): frozenset({"Query"}),
     ("memberships", "by-organization"): frozenset({"Query"}),
     ("memberships", "by-user"): frozenset({"Query"}),
     # Phase 12: the users/by-email lookup path (Query only, like every GSI).
     ("users", "by-email"): frozenset({"Query"}),
+    # Phase 13: the users/by-application-role guard path (Query only, like
+    # every GSI; the accepted CLI-only read justified above).
+    ("users", "by-application-role"): frozenset({"Query"}),
 }
 
 #: The adapter performs these only inside ``TransactWriteItems``, so every

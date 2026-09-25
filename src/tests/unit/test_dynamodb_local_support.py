@@ -218,10 +218,13 @@ def test_create_parameters_declare_the_phase_12_by_email_gsi() -> None:
     # The users table keeps its pk-only base key (every write is a point
     # PutItem); the email access path is the additive GSI, whose sort key is
     # the base ``pk`` so the index needs no extra attribute definition.
+    # Phase 13 adds the by-application-role GSI the same way (g_role partition,
+    # pk sort): the payload now carries both additive indexes.
     payload = _spec("users").create_parameters("pfx-")
     assert payload["AttributeDefinitions"] == [
         {"AttributeName": "pk", "AttributeType": "S"},
         {"AttributeName": "g_email", "AttributeType": "S"},
+        {"AttributeName": "g_role", "AttributeType": "S"},
     ]
     assert payload["KeySchema"] == [{"AttributeName": "pk", "KeyType": "HASH"}]
     assert payload["GlobalSecondaryIndexes"] == [
@@ -232,7 +235,15 @@ def test_create_parameters_declare_the_phase_12_by_email_gsi() -> None:
                 {"AttributeName": "pk", "KeyType": "RANGE"},
             ],
             "Projection": {"ProjectionType": "ALL"},
-        }
+        },
+        {
+            "IndexName": "by-application-role",
+            "KeySchema": [
+                {"AttributeName": "g_role", "KeyType": "HASH"},
+                {"AttributeName": "pk", "KeyType": "RANGE"},
+            ],
+            "Projection": {"ProjectionType": "ALL"},
+        },
     ]
 
 

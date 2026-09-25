@@ -36,7 +36,14 @@ the attribute is a pre-Phase-12 row and reads back as ``user``), the
 exact lookup, and retired the ``user_email`` constraint item entirely: email is
 a non-unique lookup field now, so a duplicate address is a legal write and the
 :meth:`DynamoDbStorage.provision_user` race converge keys on the identity tuple
-alone.
+alone. **Phase 13 task 6** added the ``users/by-application-role`` GSI
+(``g_role`` = the ``application_role`` value, sort key ``pk``) and
+:meth:`DynamoDbStorage.transition_application_role` — the atomic CAS role write
++ audit append with the last-ACTIVE-admin guard: a strongly consistent target
+read, a ``Query`` on the admin partition for the other-active-admin witness
+set, and one ``TransactWriteItems`` carrying the witness ``ConditionCheck``,
+the CAS ``UpdateItem``, the audit ``PutItem``, and the organizations-parent
+``ConditionCheck`` when the audit event names one.
 
 Design carried from the Phase 06 breakdown (planner decisions 2, 3, 5, 6, 7):
 
@@ -94,7 +101,13 @@ from botocore.exceptions import ClientError
 
 from app.models.api_key import ApiKey, KeyId
 from app.models.audit_event import AuditEvent
-from app.models.enums import ApiKeyStatus, IdentityProvider, MembershipStatus
+from app.models.enums import (
+    ApiKeyStatus,
+    ApplicationRole,
+    IdentityProvider,
+    MembershipStatus,
+    UserStatus,
+)
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
@@ -109,9 +122,12 @@ from app.storage.contract import (
     DuplicateExternalIdentityError,
     EntityNotFoundError,
     InvalidCursorError,
+    LastActiveAdministratorError,
     ProvisionedOrganization,
     ProvisionedUser,
     ReferenceNotFoundError,
+    RoleTransition,
+    RoleTransitionOutcome,
     StorageError,
 )
 
@@ -191,14 +207,22 @@ class TableSpec:
 #: stores ``oauth_login_states`` and ``app_sessions``
 #: (partition key ``pk`` = the caller-minted opaque id, with a numeric
 #: ``expires_at_epoch`` attribute reserved for the Phase 11 task-8 TTL
-#: enablement), and the additive Phase 12 ``users/by-email`` GSI
+#: enablement), the additive Phase 12 ``users/by-email`` GSI
 #: (``g_email`` = the exact stored address, sort key ``pk``) behind the
-#: non-unique email lookup — an access path, never a constraint.
+#: non-unique email lookup — an access path, never a constraint — and the
+#: additive Phase 13 ``users/by-application-role`` GSI (``g_role`` = the
+#: ``application_role`` value, sort key ``pk``) behind the
+#: :meth:`DynamoDbStorage.transition_application_role` active-admin guard —
+#: also an access path only (adding a GSI is an online operation; tables are
+#: never replaced).
 SCHEMA: Final[tuple[TableSpec, ...]] = (
     TableSpec(
         name="users",
         partition_key="pk",
-        indexes=(IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),),
+        indexes=(
+            IndexSpec(name="by-email", partition_key="g_email", sort_key="pk"),
+            IndexSpec(name="by-application-role", partition_key="g_role", sort_key="pk"),
+        ),
     ),
     TableSpec(name="organizations", partition_key="pk"),
     TableSpec(name="external_identities", partition_key="pk"),
@@ -299,6 +323,17 @@ SCAN_BATCH: Final = 100
 #: does.
 _LIST_USERS_BY_EMAIL_MAX: Final = 1 << 62
 
+#: Accumulation bound for the Phase 13 active-admin guard drain of the
+#: ``users/by-application-role`` admin partition
+#: (:meth:`DynamoDbStorage.transition_application_role`): the index sorts by
+#: ``pk``, so the deterministic witness (earliest ``(created_at, id)``) must
+#: be chosen client-side from the **whole** other-active-admin set — the same
+#: unreachable-bound pattern as :data:`_LIST_USERS_BY_EMAIL_MAX`. An empty
+#: drained set refuses the demotion fail-closed; the adapter never falls back
+#: to a ``Scan`` for pre-backfill items missing ``g_role`` (the documented
+#: one-time backfill is the operator's obligation, not a runtime behavior).
+_ACTIVE_ADMIN_GUARD_MAX: Final = 1 << 62
+
 #: Bounded re-requests of ``BatchGetItem`` unprocessed keys (production can
 #: partialize; Local answers completely). Exhaustion is a retryable
 #: :class:`~app.storage.contract.StorageError`.
@@ -397,7 +432,11 @@ def user_item(user: User) -> dict[str, Any]:
     attribute, the exact stored address with no normalization (the SQLite
     ``users_email_lookup`` index matches the raw column too), so
     :meth:`DynamoDbStorage.list_users_by_email` is an exact-key Query and never
-    a Scan.
+    a Scan. Phase 13 adds ``g_role``: the ``by-application-role`` GSI partition
+    attribute, always written as the exact ``application_role`` value in
+    lockstep with the attribute itself (:meth:`transition_application_role`
+    rewrites both in one conditional update), so the active-admin guard Query
+    is an index read and never a Scan.
     """
     return {
         "pk": str(user.id),
@@ -406,6 +445,7 @@ def user_item(user: User) -> dict[str, Any]:
         "status": str(user.status),
         "application_role": str(user.application_role),
         "g_email": user.email,
+        "g_role": str(user.application_role),
         "created_at": encode_timestamp(user.created_at),
         "updated_at": encode_timestamp(user.updated_at),
     }
@@ -857,11 +897,58 @@ class ReferenceConflict:
         return ReferenceNotFoundError("a referenced parent record does not exist")
 
 
+class _RoleCasMiss(StorageError):
+    """Internal signal for the Phase 13 target-CAS position.
+
+    Raised only by :meth:`DynamoDbStorage.transition_application_role`'s own
+    classification of a cancelled transition; the operation converts it to the
+    contract's ``NO_CHANGE`` outcome (a racing transition committed the target
+    to ``new_role``) or to the loud precondition tripwire. It never escapes
+    that method to a caller.
+    """
+
+
+@dataclass(frozen=True)
+class LastAdminGuardConflict:
+    """Descriptor: the Phase 13 deterministic-witness ``ConditionCheck`` failed.
+
+    The witness stopped being an ``ACTIVE`` admin between the guard read and
+    the commit (a racing demotion or disabling shrank the other-active-admin
+    set), so this demotion is refused with exactly the same
+    :class:`~app.storage.contract.LastActiveAdministratorError` as the
+    pre-transaction empty-set check — the transaction rolled back whole.
+    """
+
+    def to_error(self) -> StorageError:
+        return LastActiveAdministratorError(
+            "refusing to demote the last active application administrator"
+        )
+
+
+@dataclass(frozen=True)
+class RoleCasMissConflict:
+    """Descriptor: the Phase 13 target CAS failed (a racing transition committed).
+
+    Maps to the internal :class:`_RoleCasMiss` signal, which
+    :meth:`DynamoDbStorage.transition_application_role` resolves by re-reading
+    stored truth; it is never the error a caller observes.
+    """
+
+    def to_error(self) -> StorageError:
+        return _RoleCasMiss("role transition precondition failed")
+
+
 #: One per submitted item, same order; decides the error when that item's
 #: condition fails. ``membership`` base puts carry ``DuplicateConflict(
 #: MEMBERSHIP)`` (the native org/user pair), every other base put
 #: ``DuplicateConflict(ENTITY_ID)``.
-type ConflictDescriptor = DuplicateConflict | IdentityRaceConflict | ReferenceConflict
+type ConflictDescriptor = (
+    DuplicateConflict
+    | IdentityRaceConflict
+    | ReferenceConflict
+    | LastAdminGuardConflict
+    | RoleCasMissConflict
+)
 
 
 class _RetrySentinel:
@@ -1277,6 +1364,284 @@ class DynamoDbStorage:
         if item is None:
             raise EntityNotFoundError("no external identity matches the given tuple")
         return user_from_item(item)
+
+    # -- Application role administration (Phase 13) -----------------------------
+
+    def _other_active_admins(self, *, exclude_user_id: str) -> list[User]:
+        """Every ``ACTIVE`` admin except the demotion target, deterministically ordered.
+
+        One drain of the ``users/by-application-role`` GSI's ``admin`` partition
+        with a ``status = 'active'`` filter (never a ``Scan``), the target
+        excluded client-side, decoded and sorted by ``(created_at, id)`` — the
+        same deterministic key every ordered read uses, so
+        :meth:`transition_application_role`'s witness selection is stable.
+        Items written before the Phase 13 backfill carry no ``g_role`` and are
+        invisible here; that invisibility fails closed to the refusal, never
+        to a fallback read.
+        """
+        items = self._query_matches(
+            "users",
+            index_name="by-application-role",
+            key_condition="#g_role = :admin_role",
+            filter_expression="#status = :active_status",
+            expression_names={"#g_role": "g_role", "#status": "status"},
+            expression_values={
+                ":admin_role": str(ApplicationRole.ADMIN),
+                ":active_status": str(UserStatus.ACTIVE),
+            },
+            resume=None,
+            stop_after=_ACTIVE_ADMIN_GUARD_MAX,
+        )
+        others = [user_from_item(item) for item in items if str(item["pk"]) != exclude_user_id]
+        return sorted(others, key=lambda user: (user.created_at, str(user.id)))
+
+    def _witness_check(self, witness: User) -> dict[str, Any]:
+        """One ``ConditionCheck`` pinning the deterministic witness's committed truth.
+
+        Asserts ``application_role = 'admin' AND status = 'active'`` on the
+        witness item inside the committing transaction (transaction conditions
+        evaluate against committed data, never this operation's own reads), so
+        a concurrent shrink of the other-active-admin set fails the whole
+        transition. A pre-Phase-12 item *without* ``application_role`` fails
+        the equality — fail-closed, which is correct: such an item was never
+        an admin.
+        """
+        return {
+            "ConditionCheck": {
+                "TableName": self._table_name("users"),
+                "Key": {"pk": str(witness.id)},
+                "ConditionExpression": (
+                    "#application_role = :witness_role AND #status = :witness_status"
+                ),
+                "ExpressionAttributeNames": {
+                    "#application_role": "application_role",
+                    "#status": "status",
+                },
+                "ExpressionAttributeValues": {
+                    ":witness_role": str(ApplicationRole.ADMIN),
+                    ":witness_status": str(UserStatus.ACTIVE),
+                },
+            }
+        }
+
+    def _role_cas_update(
+        self,
+        *,
+        user_id: str,
+        expected_role: ApplicationRole,
+        new_role: ApplicationRole,
+        updated_at: UtcDatetime,
+    ) -> dict[str, Any]:
+        """The CAS ``Update`` transact item: role + ``g_role`` + ``updated_at``.
+
+        The condition mirrors SQLite's ``UPDATE ... WHERE id = ? AND
+        application_role = ?`` (plus ``attribute_exists`` — absence is absence,
+        the :meth:`revoke_api_key` CAS precedent). ``g_role`` is the
+        ``by-application-role`` GSI key and is rewritten from the same value
+        reference as ``application_role``, so the index can never lag the
+        attribute it mirrors.
+        """
+        return {
+            "Update": {
+                "TableName": self._table_name("users"),
+                "Key": {"pk": user_id},
+                "ConditionExpression": (
+                    "attribute_exists(#pk) AND #application_role = :expected_role"
+                ),
+                "UpdateExpression": (
+                    "SET #application_role = :new_role, #g_role = :new_role, "
+                    "#updated_at = :updated_at"
+                ),
+                "ExpressionAttributeNames": {
+                    "#pk": "pk",
+                    "#application_role": "application_role",
+                    "#g_role": "g_role",
+                    "#updated_at": "updated_at",
+                },
+                "ExpressionAttributeValues": {
+                    ":expected_role": str(expected_role),
+                    ":new_role": str(new_role),
+                    ":updated_at": encode_timestamp(updated_at),
+                },
+            }
+        }
+
+    def transition_application_role(
+        self,
+        *,
+        user_id: UserId,
+        expected_role: ApplicationRole,
+        new_role: ApplicationRole,
+        updated_at: UtcDatetime,
+        audit_event: AuditEvent,
+    ) -> RoleTransition:
+        """Atomically CAS the user's ``application_role`` and append the
+        caller-formed audit event in one transaction (contract-pinned).
+
+        Semantics follow the contract docstring exactly; the DynamoDB
+        replication of SQLite's ``BEGIN IMMEDIATE`` serialization is read →
+        guard → conditional-write:
+
+        1. Strongly consistent ``GetItem`` of the target — miss →
+           :class:`EntityNotFoundError`; stored role == ``new_role`` →
+           ``NO_CHANGE`` with **zero writes** (the supplied audit event is not
+           persisted; the returned user is the unchanged stored record).
+        2. Demotion of an ``ACTIVE`` admin (``ADMIN → USER``; a ``DISABLED``
+           admin skips the guard — the active-admin count cannot change) reads
+           the other-active-admin set through the ``by-application-role``
+           ``Query`` (:meth:`_other_active_admins`). An empty set refuses with
+           :class:`LastActiveAdministratorError` and **no transaction is
+           submitted**.
+        3. Otherwise one ``TransactWriteItems`` in submission order: the
+           ``ConditionCheck`` on the **deterministic witness** — the earliest
+           ``(created_at, id)`` other ``ACTIVE`` admin, asserted still
+           ``application_role = 'admin' AND status = 'active'`` at commit time
+           — the CAS ``Update`` on the target (``application_role =
+           expected_role``, writing role + ``g_role`` + ``updated_at``), the
+           audit ``Put`` (record-id conflict → ``kind="entity_id"``, first in
+           submission order ahead of the parent check, mirroring SQLite's
+           PK-before-FK reporting), and — when ``audit_event.organization_id``
+           is not ``None`` — the organizations-parent ``ConditionCheck``
+           (missing parent → :class:`ReferenceNotFoundError` with full
+           rollback, closing the race where the organization is deleted between
+           the caller's anchor read and commit).
+
+        **Witness rationale.** Two concurrent last-pair revocations (demote A
+        while demoting B) serialize at commit time: exactly one transaction
+        sees its witness condition satisfied and commits; the loser's witness
+        ``ConditionCheck`` fails and the whole batch rolls back as
+        :class:`LastActiveAdministratorError` — the DynamoDB analogue of
+        SQLite's blocked-then-re-evaluated guard. The witness must be
+        *deterministic* (earliest ``(created_at, id)``, not "any other admin")
+        so racing writers pin the same item and one provably loses. **Adding
+        admins never invalidates a pending guard**: a promotion touches no
+        witness item the guard asserts, so a queued demotion's conditions stay
+        satisfied and it commits — the guard only fails when the
+        other-active-admin set *shrinks*, which is exactly when the demotion
+        must be refused. A target-CAS miss means a racing transition already
+        committed the target to ``new_role`` (closed two-value vocabulary: no
+        third outcome exists); the operation re-reads stored truth and returns
+        ``NO_CHANGE`` (anything else fails loudly as the precondition
+        tripwire, never a silent partial transition).
+
+        A transient ``TransactionConflict`` cancellation re-runs the **whole**
+        read-guard-write cycle (fresh target read, fresh witness set, freshly
+        built items) within the existing :data:`MAX_TRANSACTION_ATTEMPTS`
+        discipline — the SQLite ``busy_timeout`` analogue; a stable domain
+        conflict propagates immediately without retry. Exhausted retries become
+        the base :class:`StorageError`. On ``TRANSITIONED`` the final stored
+        record is read back strongly consistently (the
+        :meth:`revoke_api_key` read-back precedent; storage still mints
+        nothing — ``updated_at`` is the caller's).
+        """
+        for _attempt in range(MAX_TRANSACTION_ATTEMPTS):
+            outcome = self._attempt_role_transition(
+                user_id=user_id,
+                expected_role=expected_role,
+                new_role=new_role,
+                updated_at=updated_at,
+                audit_event=audit_event,
+            )
+            if outcome is not RETRY:
+                return outcome
+        raise StorageError("role transition aborted by concurrent activity")
+
+    def _attempt_role_transition(
+        self,
+        *,
+        user_id: UserId,
+        expected_role: ApplicationRole,
+        new_role: ApplicationRole,
+        updated_at: UtcDatetime,
+        audit_event: AuditEvent,
+    ) -> RoleTransition | _RetrySentinel:
+        """One read-guard-write cycle of :meth:`transition_application_role`.
+
+        Returns :data:`RETRY` (the caller re-runs the whole cycle) only on a
+        transient cancellation; every stable outcome — ``NO_CHANGE``,
+        ``TRANSITIONED``, or a domain error — is decided here.
+        """
+        key = {"pk": str(user_id)}
+        item = self._get("users", key)
+        if item is None:
+            raise EntityNotFoundError(f"no user with id {user_id!r}")
+        stored = user_from_item(item)
+        if stored.application_role is new_role:
+            # Idempotent no-op (contract-pinned): zero writes, no audit row,
+            # the unchanged stored user echoed with NO_CHANGE.
+            return RoleTransition(user=stored, outcome=RoleTransitionOutcome.NO_CHANGE)
+        demotion = expected_role is ApplicationRole.ADMIN and new_role is ApplicationRole.USER
+        items: list[dict[str, Any]] = []
+        descriptors: list[ConflictDescriptor] = []
+        if demotion and stored.status is UserStatus.ACTIVE:
+            # The guard counts *other* ACTIVE admins: the target itself must
+            # never prop up its own demotion.
+            others = self._other_active_admins(exclude_user_id=str(user_id))
+            if not others:
+                raise LastActiveAdministratorError(
+                    "refusing to demote the last active application administrator"
+                )
+            items.append(self._witness_check(others[0]))
+            descriptors.append(LastAdminGuardConflict())
+        items.append(
+            self._role_cas_update(
+                user_id=str(user_id),
+                expected_role=expected_role,
+                new_role=new_role,
+                updated_at=updated_at,
+            )
+        )
+        descriptors.append(RoleCasMissConflict())
+        items.append(self._put("audit_events", audit_event_item(audit_event), ("pk",)))
+        descriptors.append(DuplicateConflict(DuplicateEntityKind.ENTITY_ID))
+        if audit_event.organization_id is not None:
+            items.append(
+                self._check_parent("organizations", {"pk": str(audit_event.organization_id)})
+            )
+            descriptors.append(ReferenceConflict())
+        try:
+            self._client().transact_write_items(TransactItems=items)
+        except ClientError as exc:
+            verdict = classify_client_error(exc, descriptors)
+            if isinstance(verdict, _RetrySentinel):
+                return RETRY
+            if isinstance(verdict, _RoleCasMiss):
+                return self._resolve_role_cas_miss(user_id=user_id, new_role=new_role)
+            raise verdict from None
+        final = self._get("users", key)
+        if final is None:
+            # The CAS just committed this row and no user-delete path exists
+            # in the frozen contract: absence here is impossible store
+            # corruption, not a lookup miss (the revoke_api_key rule).
+            raise StorageError("a user could not be read after a role transition")
+        return RoleTransition(
+            user=user_from_item(final),
+            outcome=RoleTransitionOutcome.TRANSITIONED,
+        )
+
+    def _resolve_role_cas_miss(
+        self,
+        *,
+        user_id: UserId,
+        new_role: ApplicationRole,
+    ) -> RoleTransition:
+        """Convert a lost target CAS into the contract's observable outcome.
+
+        The transaction rolled back whole (nothing of this operation survived)
+        and a racing transition already committed the target: under the closed
+        two-value role vocabulary the stored role can only be ``new_role`` —
+        the idempotent ``NO_CHANGE`` outcome, echoing the final stored record.
+        Anything else is the contract tripwire (a third role was added without
+        revisiting this operation): fail loudly, never commit a partial
+        transition.
+        """
+        raced = self._get("users", {"pk": str(user_id)})
+        if raced is None:
+            raise EntityNotFoundError(f"no user with id {user_id!r}")
+        user = user_from_item(raced)
+        if user.application_role is new_role:
+            return RoleTransition(user=user, outcome=RoleTransitionOutcome.NO_CHANGE)
+        raise StorageError("role transition precondition failed")
 
     # -- List-read helpers (task 4, decision 5) ------------------------------
 

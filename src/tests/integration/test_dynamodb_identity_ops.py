@@ -13,7 +13,11 @@ the 12 users/identity behaviors on the real transactional path — the
 normalization inside the constraint key (decision 6), and — from Phase 12 — the
 ``application_role``/``g_email`` attributes on the stored item, the coexistence
 of two users sharing an address, and the ``by-email`` ``list_users_by_email``
-read. Domain inputs come from the suite's own deterministic builders so the
+read. From Phase 13 the file also pins the ``g_role`` write and the
+``transition_application_role`` DynamoDB replication — SQLite parity on every
+task-1 suite scenario plus a threaded concurrent double-revocation race
+proving exactly one succeeds. Domain inputs come from the suite's own
+deterministic builders so the
 fixtures match the conformance cases
 exactly. Every failure path asserts the domain error *class*, the conflict *kind*,
 an echo-free message, and — by scanning the tables directly — that the rejected
@@ -22,20 +26,32 @@ batch left no residue.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
-from storage_contract.suite import T0, T1, make_identity, make_user
+from storage_contract.suite import (
+    T0,
+    T1,
+    T2,
+    T4,
+    make_audit_event,
+    make_identity,
+    make_organization,
+    make_user,
+)
 
-from app.models.enums import IdentityProvider
+from app.models.enums import ApplicationRole, IdentityProvider, UserStatus
 from app.models.ids import UserId
 from app.models.user import User
 from app.storage.contract import (
     DuplicateEntityError,
     DuplicateEntityKind,
     EntityNotFoundError,
+    LastActiveAdministratorError,
     ReferenceNotFoundError,
+    RoleTransitionOutcome,
 )
 from app.storage.dynamodb import (
     SCHEMA,
@@ -138,10 +154,13 @@ def test_create_user_returns_and_persists_the_domain_user(ddb: _DynamoDb) -> Non
     assert ddb.tables.items("unique_constraints") == []
     stored = ddb.tables.item("users", str(user.id))
     assert stored is not None
-    # The role is written (never left to a read-side default) and the exact
-    # address is duplicated onto the by-email GSI partition attribute.
+    # The role is written (never left to a read-side default), the exact
+    # address is duplicated onto the by-email GSI partition attribute, and
+    # Phase 13 duplicates the role onto the by-application-role partition
+    # attribute.
     assert stored["application_role"] == "user"
     assert stored["g_email"] == user.email
+    assert stored["g_role"] == "user" == stored["application_role"]
 
 
 def test_get_unknown_user_raises_entity_not_found(ddb: _DynamoDb) -> None:
@@ -400,3 +419,392 @@ def test_identity_constraint_item_is_key_only_and_carries_the_owner(ddb: _Dynamo
     assert set(constraint) == {"pk", "kind", "entity_id", "user_id"}
     assert constraint["user_id"] == str(user.id)
     assert constraint["entity_id"] == str(identity.id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: transition_application_role — parity on every task-1 suite
+# scenario (grant/revoke commit, the idempotent NO_CHANGE, the unknown-user
+# signal, the last-ACTIVE-admin refusal, the DISABLED-admin guard bypass, the
+# other-ACTIVE-admin allowance, and the audit-parent integrity), each also
+# pinning the DynamoDB-specific mechanism: the g_role index key is rewritten
+# in lockstep with application_role, and every refusal leaves zero residue.
+# ---------------------------------------------------------------------------
+
+
+def test_transition_grant_persists_role_index_key_and_audit(ddb: _DynamoDb) -> None:
+    user = make_user()
+    organization = make_organization()
+    ddb.storage.create_user(user)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.granted", created_at=T2)
+    result = ddb.storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.id == user.id
+    assert result.user.application_role is ApplicationRole.ADMIN
+    assert result.user.updated_at == T2
+    assert result.user.created_at == user.created_at
+    assert ddb.storage.get_user(user.id) == result.user
+    # The CAS rewrote the denormalized by-application-role key with the role.
+    stored = ddb.tables.item("users", str(user.id))
+    assert stored is not None
+    assert stored["g_role"] == "admin" == stored["application_role"]
+    # The audit event committed inside the same transaction (duplicate-append
+    # proof: the aud_ id is taken).
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        ddb.storage.append_audit_event(audit)
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+
+
+def test_transition_revoke_persists_role_index_key_and_audit(ddb: _DynamoDb) -> None:
+    first = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    second = make_user(user_id="usr_test_0002", application_role=ApplicationRole.ADMIN)
+    organization = make_organization()
+    ddb.storage.create_user(first)
+    ddb.storage.create_user(second)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(
+        action="user.application_role.revoked",
+        actor_user_id="usr_test_0001",
+        created_at=T2,
+    )
+    result = ddb.storage.transition_application_role(
+        user_id=first.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert result.user.updated_at == T2
+    assert ddb.storage.get_user(first.id) == result.user
+    stored = ddb.tables.item("users", str(first.id))
+    assert stored is not None
+    assert stored["g_role"] == "user" == stored["application_role"]
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        ddb.storage.append_audit_event(audit)
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+
+
+def test_transition_repeat_calls_are_no_change_without_audit(ddb: _DynamoDb) -> None:
+    user = make_user()
+    organization = make_organization()
+    ddb.storage.create_user(user)
+    ddb.storage.create_organization(organization)
+    first_audit = make_audit_event(action="user.application_role.granted", created_at=T2)
+    granted = ddb.storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T2,
+        audit_event=first_audit,
+    )
+    assert granted.outcome is RoleTransitionOutcome.TRANSITIONED
+    # Repeat grant on an ADMIN: NO_CHANGE with *zero* writes — no updated_at
+    # movement, no index-key churn, and the second audit event is NOT
+    # persisted (the caller must not re-append; the adapter already skipped).
+    before = ddb.tables.item("users", str(user.id))
+    repeat_audit = make_audit_event(
+        audit_id="aud_test_0002",
+        action="user.application_role.granted",
+        created_at=T2,
+    )
+    repeated = ddb.storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T4,
+        audit_event=repeat_audit,
+    )
+    assert repeated.outcome is RoleTransitionOutcome.NO_CHANGE
+    assert repeated.user == granted.user
+    assert repeated.user.updated_at == T2
+    assert ddb.tables.item("users", str(user.id)) == before
+    # The skipped aud_ id is still free: appending it proves NO_CHANGE wrote
+    # no audit row (the duplicate-append proof, inverted).
+    assert ddb.storage.append_audit_event(repeat_audit) is None
+    # Revoke of a plain USER is likewise an idempotent NO_CHANGE.
+    plain = make_user(user_id="usr_test_0002")
+    ddb.storage.create_user(plain)
+    revoke_audit = make_audit_event(
+        audit_id="aud_test_0003",
+        actor_user_id="usr_test_0002",
+        action="user.application_role.revoked",
+        created_at=T2,
+    )
+    revoked = ddb.storage.transition_application_role(
+        user_id=plain.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=revoke_audit,
+    )
+    assert revoked.outcome is RoleTransitionOutcome.NO_CHANGE
+    assert revoked.user == plain
+    assert ddb.storage.append_audit_event(revoke_audit) is None
+
+
+def test_transition_unknown_user_raises_entity_not_found(ddb: _DynamoDb) -> None:
+    organization = make_organization()
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.granted")
+    with pytest.raises(EntityNotFoundError) as excinfo:
+        ddb.storage.transition_application_role(
+            user_id=UserId("usr_missing_0001"),
+            expected_role=ApplicationRole.USER,
+            new_role=ApplicationRole.ADMIN,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    ddb.assert_no_leak(excinfo.value)
+    # The refused call submitted nothing: no audit row exists and the audit
+    # id is still unused (the duplicate-append proof, inverted).
+    assert ddb.tables.items("audit_events") == []
+    assert ddb.storage.append_audit_event(audit) is None
+
+
+def test_transition_refuses_demoting_the_last_active_administrator(ddb: _DynamoDb) -> None:
+    admin = make_user(application_role=ApplicationRole.ADMIN)
+    organization = make_organization()
+    ddb.storage.create_user(admin)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.revoked")
+    with pytest.raises(LastActiveAdministratorError) as excinfo:
+        ddb.storage.transition_application_role(
+            user_id=admin.id,
+            expected_role=ApplicationRole.ADMIN,
+            new_role=ApplicationRole.USER,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    ddb.assert_no_leak(excinfo.value)
+    # Full rollback (no transaction was ever submitted): the target keeps
+    # ADMIN — role attribute and index key alike — and the refused event's
+    # aud_ id still appends cleanly.
+    assert ddb.storage.get_user(admin.id) == admin
+    stored = ddb.tables.item("users", str(admin.id))
+    assert stored is not None
+    assert stored["g_role"] == "admin"
+    assert ddb.tables.items("audit_events") == []
+    assert ddb.storage.append_audit_event(audit) is None
+
+
+def test_transition_refuses_demotion_when_only_other_admin_is_disabled(
+    ddb: _DynamoDb,
+) -> None:
+    # The guard counts *ACTIVE* admins only: the status filter on the
+    # by-application-role Query hides the DISABLED co-admin, so demoting the
+    # last ACTIVE admin still refuses (spec 13 required behavior 3).
+    active_admin = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    dormant_admin = make_user(
+        user_id="usr_test_0002",
+        status=UserStatus.DISABLED,
+        application_role=ApplicationRole.ADMIN,
+    )
+    organization = make_organization()
+    ddb.storage.create_user(active_admin)
+    ddb.storage.create_user(dormant_admin)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(
+        actor_user_id="usr_test_0001",
+        action="user.application_role.revoked",
+    )
+    with pytest.raises(LastActiveAdministratorError):
+        ddb.storage.transition_application_role(
+            user_id=active_admin.id,
+            expected_role=ApplicationRole.ADMIN,
+            new_role=ApplicationRole.USER,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    assert ddb.storage.get_user(active_admin.id) == active_admin
+    assert ddb.tables.items("audit_events") == []
+    assert ddb.storage.append_audit_event(audit) is None
+
+
+def test_transition_demotion_allowed_while_another_active_admin_exists(
+    ddb: _DynamoDb,
+) -> None:
+    # The deterministic witness (earliest (created_at, id) other ACTIVE admin)
+    # is checked but never written: its record stays byte-identical.
+    first = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    second = make_user(
+        user_id="usr_test_0002",
+        application_role=ApplicationRole.ADMIN,
+        created_at=T1,
+    )
+    organization = make_organization()
+    ddb.storage.create_user(first)
+    ddb.storage.create_user(second)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(
+        actor_user_id="usr_test_0001",
+        action="user.application_role.revoked",
+    )
+    result = ddb.storage.transition_application_role(
+        user_id=first.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert ddb.storage.get_user(second.id) == second
+    witness_before = ddb.tables.item("users", str(second.id))
+    assert witness_before is not None
+    assert witness_before["g_role"] == "admin"
+
+
+def test_transition_disabled_admin_demotion_skips_the_active_guard(ddb: _DynamoDb) -> None:
+    # A DISABLED admin is the sole admin: demoting it cannot change the
+    # ACTIVE-admin count, so the guard (and its Query) is skipped entirely.
+    admin = make_user(
+        status=UserStatus.DISABLED,
+        application_role=ApplicationRole.ADMIN,
+    )
+    organization = make_organization()
+    ddb.storage.create_user(admin)
+    ddb.storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.revoked")
+    result = ddb.storage.transition_application_role(
+        user_id=admin.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert result.user.status is UserStatus.DISABLED
+    assert ddb.storage.get_user(admin.id) == result.user
+
+
+def test_transition_with_unknown_audit_organization_raises_reference_not_found(
+    ddb: _DynamoDb,
+) -> None:
+    # Audit-parent integrity (contract-pinned): the organizations-parent
+    # ConditionCheck inside the same transaction refuses a missing anchor and
+    # the *role write* rolls back with it.
+    user = make_user()
+    ddb.storage.create_user(user)
+    audit = make_audit_event(
+        organization_id="org_ghost_0001",
+        action="user.application_role.granted",
+    )
+    with pytest.raises(ReferenceNotFoundError) as excinfo:
+        ddb.storage.transition_application_role(
+            user_id=user.id,
+            expected_role=ApplicationRole.USER,
+            new_role=ApplicationRole.ADMIN,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    ddb.assert_no_leak(excinfo.value)
+    # Full rollback: no role write, no index-key churn, and no audit row (the
+    # ghost-organization event can never append on this table either).
+    assert ddb.storage.get_user(user.id) == user
+    stored = ddb.tables.item("users", str(user.id))
+    assert stored is not None
+    assert stored["g_role"] == "user"
+    assert ddb.tables.items("audit_events") == []
+
+
+def test_concurrent_double_revocation_of_the_last_pair_lets_exactly_one_win(
+    ddb: _DynamoDb,
+) -> None:
+    # The DynamoDB analogue of SQLite's BEGIN IMMEDIATE serialization: two
+    # threads demote the only two ACTIVE admins at once. Each guard read sees
+    # the other as witness; commit-time condition evaluation (witness
+    # ConditionCheck + target CAS) serializes the transactions so exactly one
+    # commits and the other is refused with LastActiveAdministratorError —
+    # never two, never zero, and never a partial write.
+    first = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    second = make_user(
+        user_id="usr_test_0002",
+        application_role=ApplicationRole.ADMIN,
+        created_at=T1,
+    )
+    organization = make_organization()
+    ddb.storage.create_user(first)
+    ddb.storage.create_user(second)
+    ddb.storage.create_organization(organization)
+    endpoint = local.require_local_endpoint()
+    challenger = local.make_dynamodb_storage(
+        ddb.tables.prefix, resource=local.make_dynamodb_resource(endpoint)
+    )
+    barrier = threading.Barrier(2, timeout=30)
+    outcomes: dict[str, object] = {}
+
+    def revoke(target_id: str, audit_id: str, storage: DynamoDbStorage) -> None:
+        audit = make_audit_event(
+            audit_id=audit_id,
+            actor_user_id=target_id,
+            action="user.application_role.revoked",
+            created_at=T2,
+        )
+        barrier.wait()
+        try:
+            result = storage.transition_application_role(
+                user_id=UserId(target_id),
+                expected_role=ApplicationRole.ADMIN,
+                new_role=ApplicationRole.USER,
+                updated_at=T2,
+                audit_event=audit,
+            )
+            outcomes[target_id] = result.outcome
+        except LastActiveAdministratorError:
+            outcomes[target_id] = "refused"
+
+    threads = [
+        threading.Thread(target=revoke, args=("usr_test_0001", "aud_race_0001", ddb.storage)),
+        threading.Thread(target=revoke, args=("usr_test_0002", "aud_race_0002", challenger)),
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+        assert not any(thread.is_alive() for thread in threads), "revocation deadlocked"
+        # Both threads reached a terminal outcome; exactly one transitioned.
+        assert len(outcomes) == 2
+        assert list(outcomes.values()).count(RoleTransitionOutcome.TRANSITIONED) == 1
+        assert list(outcomes.values()).count("refused") == 1
+        # Exactly one ACTIVE admin remains, and the loser's audit row never
+        # existed (its aud_ id is still free while the winner's is taken).
+        admins = [
+            user
+            for user in (ddb.storage.get_user(first.id), ddb.storage.get_user(second.id))
+            if user.application_role is ApplicationRole.ADMIN
+        ]
+        assert len(admins) == 1
+        loser_id = next(target for target, outcome in outcomes.items() if outcome == "refused")
+        winner_id = next(target for target in outcomes if target != loser_id)
+        with pytest.raises(DuplicateEntityError):
+            ddb.storage.append_audit_event(
+                make_audit_event(
+                    audit_id=f"aud_race_{winner_id[-4:]}",
+                    actor_user_id=winner_id,
+                    action="user.application_role.revoked",
+                    created_at=T2,
+                )
+            )
+        assert (
+            ddb.storage.append_audit_event(
+                make_audit_event(
+                    audit_id=f"aud_race_{loser_id[-4:]}",
+                    actor_user_id=loser_id,
+                    action="user.application_role.revoked",
+                    created_at=T2,
+                )
+            )
+            is None
+        )
+    finally:
+        challenger.close()
