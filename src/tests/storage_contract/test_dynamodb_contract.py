@@ -5,7 +5,7 @@ the second adapter (Phase 06, AC 2): it provides the ``storage`` fixture
 required by ``suite.py``'s fixture contract — an initialized adapter with all
 tables empty, **per test** — by creating the seven adapter tables under a
 fresh random prefix (harness decision 8) and deleting them on teardown, and
-it re-exports every suite case unchanged so pytest collects the same 73
+it re-exports every suite case unchanged so pytest collects the same 82
 adapter-neutral behaviors that SQLite runs. ``suite.py`` is consumed as a
 frozen oracle: if a case fails here, the **adapter** changes (the entry-local
 hash pin below proves the bytes never drift).
@@ -46,16 +46,18 @@ pytestmark = pytest.mark.dynamodb_local
 
 SUITE_PATH: Path = Path(__file__).resolve().parent / "suite.py"
 
-#: sha256 of ``suite.py``'s exact bytes at the Phase 12 task-2 baseline
-#: (email-uniqueness flip: the duplicate-email and email-fallback cases were
-#: replaced by coexistence/lookup cases; the Phase 11 task-6/7 baseline was
-#: ``f32efc6e...`` before that edit, and the Phase 06 one ``025c879c...``
-#: before it). Phase 12 task 2 landed the adapter side (role codec, the
-#: ``users/by-email`` GSI, ``list_users_by_email``, and the retired email
-#: constraint), so the gated DynamoDB Local run is green again. AC 2: any
+#: sha256 of ``suite.py``'s exact bytes at the Phase 13 task-1 baseline
+#: (the atomic ``transition_application_role`` cases were appended; the
+#: Phase 12 task-2 baseline was ``14b1e04b...`` before that edit, the Phase
+#: 11 task-6/7 one ``f32efc6e...`` before it, and the Phase 06 one
+#: ``025c879c...`` before that). Phase 13 task 1 lands the contract + SQLite
+#: half only, so the gated DynamoDB Local run is **documented-red** until the
+#: Phase 13 DynamoDB transition task lands the adapter half (same Phase 12
+#: pattern); the default ``uv run pytest`` stays green because every
+#: fixture-taking case skips without a reachable DynamoDB Local. AC 2: any
 #: drift here means the shared suite was edited to fit DynamoDB instead of the
 #: adapter changing — this pin fails loudly first.
-SUITE_SHA256_AT_BASELINE = "14b1e04b9dac475d00436686658beef140b5bc232a2b0264864da763ad8ca300"
+SUITE_SHA256_AT_BASELINE = "9b37b815be86976062af9a2bfd792044fd27820dd0ec6f404802161b44f39df3"
 
 
 @pytest.fixture

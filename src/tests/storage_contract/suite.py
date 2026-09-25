@@ -49,6 +49,7 @@ from app.models import (
     User,
     UserStatus,
 )
+from app.models.enums import ApplicationRole
 from app.models.ids import (
     ApiKeyId,
     AuditEventId,
@@ -65,9 +66,12 @@ from app.storage.contract import (
     DuplicateExternalIdentityError,
     EntityNotFoundError,
     InvalidCursorError,
+    LastActiveAdministratorError,
     ProvisionedOrganization,
     ProvisionedUser,
     ReferenceNotFoundError,
+    RoleTransition,
+    RoleTransitionOutcome,
     Storage,
 )
 
@@ -95,16 +99,21 @@ def make_user(
     *,
     user_id: str = "usr_test_0001",
     email: str | None = None,
+    status: UserStatus = UserStatus.ACTIVE,
+    application_role: ApplicationRole = ApplicationRole.USER,
     created_at: datetime = T0,
 ) -> User:
     """Build a fully formed ``User``; the default email derives from the id
     so distinct literal ids never collide on the email constraint by accident
-    (tests that *want* an email conflict pass ``email`` explicitly)."""
+    (tests that *want* an email conflict pass ``email`` explicitly). The
+    Phase 13 ``status``/``application_role`` knobs default to the historical
+    (ACTIVE, USER) shape so existing cases are unchanged."""
     return User(
         id=UserId(user_id),
         display_name=f"Test user {user_id}",
         email=email or f"{user_id}@example.test",
-        status=UserStatus.ACTIVE,
+        status=status,
+        application_role=application_role,
         created_at=created_at,
         updated_at=created_at,
     )
@@ -1968,3 +1977,283 @@ def test_duplicate_app_session_create_raises_entity_id_conflict(
     assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
     # The rejected write left no trace: the original still reads back.
     assert storage.get_app_session(session.session_id) == session
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 task 1 — transition_application_role: the atomic administrator
+# grant/revoke (CAS role write + audit append in one transaction), the
+# idempotent NO_CHANGE no-op (zero writes, no updated_at movement, the audit
+# event NOT persisted), the unknown-user signal, the last-ACTIVE-admin
+# refusal (full rollback: role and audit count untouched), the DISABLED-admin
+# guard bypass, the other-ACTIVE-admin allowance, and the audit-parent
+# integrity guarantee. Audit persistence is proven with the suite's
+# duplicate-append proof (there is no audit read surface); audit *absence* is
+# proven by the refused event's aud_ id still appending cleanly.
+# ---------------------------------------------------------------------------
+
+
+def test_transition_application_role_grant_persists_role_and_audit(storage: Storage) -> None:
+    user = make_user()
+    organization = make_organization()
+    storage.create_user(user)
+    storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.granted", created_at=T2)
+    result = storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert isinstance(result, RoleTransition)
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    # The returned user is the final stored record: new role, caller-supplied
+    # updated_at, untouched created_at (storage mints nothing).
+    assert result.user.id == user.id
+    assert result.user.application_role is ApplicationRole.ADMIN
+    assert result.user.updated_at == T2
+    assert result.user.created_at == user.created_at
+    assert storage.get_user(user.id) == result.user
+    # The audit event committed inside the same transaction (duplicate-append
+    # proof: the aud_ id is taken).
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.append_audit_event(audit)
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+
+
+def test_transition_application_role_revoke_persists_role_and_audit(storage: Storage) -> None:
+    # Two ACTIVE admins: the demotion is allowed (covered in its own case
+    # below) and the revoke half of the transition behaves symmetrically.
+    first = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    second = make_user(user_id="usr_test_0002", application_role=ApplicationRole.ADMIN)
+    organization = make_organization()
+    storage.create_user(first)
+    storage.create_user(second)
+    storage.create_organization(organization)
+    audit = make_audit_event(
+        action="user.application_role.revoked",
+        actor_user_id="usr_test_0001",
+        created_at=T2,
+    )
+    result = storage.transition_application_role(
+        user_id=first.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert result.user.updated_at == T2
+    assert storage.get_user(first.id) == result.user
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.append_audit_event(audit)
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+
+
+def test_transition_application_role_repeat_calls_are_no_change_without_audit(
+    storage: Storage,
+) -> None:
+    user = make_user()
+    organization = make_organization()
+    storage.create_user(user)
+    storage.create_organization(organization)
+    first_audit = make_audit_event(action="user.application_role.granted", created_at=T2)
+    granted = storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T2,
+        audit_event=first_audit,
+    )
+    assert granted.outcome is RoleTransitionOutcome.TRANSITIONED
+    # Repeat grant on an ADMIN: NO_CHANGE with *zero* writes — no updated_at
+    # movement and the second audit event is NOT persisted (the caller must
+    # not re-append; the adapter already skipped it).
+    repeat_audit = make_audit_event(
+        audit_id="aud_test_0002",
+        action="user.application_role.granted",
+        created_at=T4,
+    )
+    repeated = storage.transition_application_role(
+        user_id=user.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.ADMIN,
+        updated_at=T4,
+        audit_event=repeat_audit,
+    )
+    assert repeated.outcome is RoleTransitionOutcome.NO_CHANGE
+    assert repeated.user == granted.user
+    assert repeated.user.updated_at == T2
+    # The skipped aud_ id is still free: appending it proves NO_CHANGE wrote
+    # no audit row (the duplicate-append proof, inverted).
+    assert storage.append_audit_event(repeat_audit) is None
+    # Revoke of a plain USER is likewise an idempotent NO_CHANGE.
+    plain = make_user(user_id="usr_test_0002")
+    storage.create_user(plain)
+    revoke_audit = make_audit_event(
+        audit_id="aud_test_0003",
+        actor_user_id="usr_test_0002",
+        action="user.application_role.revoked",
+        created_at=T4,
+    )
+    revoked = storage.transition_application_role(
+        user_id=plain.id,
+        expected_role=ApplicationRole.USER,
+        new_role=ApplicationRole.USER,
+        updated_at=T4,
+        audit_event=revoke_audit,
+    )
+    assert revoked.outcome is RoleTransitionOutcome.NO_CHANGE
+    assert revoked.user == plain
+    assert storage.append_audit_event(revoke_audit) is None
+
+
+def test_transition_unknown_user_raises_entity_not_found(storage: Storage) -> None:
+    organization = make_organization()
+    storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.granted")
+    with pytest.raises(EntityNotFoundError):
+        storage.transition_application_role(
+            user_id=UserId("usr_missing_0001"),
+            expected_role=ApplicationRole.USER,
+            new_role=ApplicationRole.ADMIN,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    # The refused call wrote nothing: the audit id is still unused.
+    assert storage.append_audit_event(audit) is None
+
+
+def test_transition_refuses_demoting_the_last_active_administrator(storage: Storage) -> None:
+    admin = make_user(application_role=ApplicationRole.ADMIN)
+    organization = make_organization()
+    storage.create_user(admin)
+    storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.revoked")
+    with pytest.raises(LastActiveAdministratorError):
+        storage.transition_application_role(
+            user_id=admin.id,
+            expected_role=ApplicationRole.ADMIN,
+            new_role=ApplicationRole.USER,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    # Full rollback: the target keeps ADMIN (unchanged user, updated_at never
+    # moved) and the audit count is untouched — the refused event's aud_ id
+    # still appends cleanly.
+    assert storage.get_user(admin.id) == admin
+    assert storage.append_audit_event(audit) is None
+
+
+def test_transition_refuses_demotion_when_only_other_admin_is_disabled(
+    storage: Storage,
+) -> None:
+    # The guard counts *ACTIVE* admins only: a DISABLED co-admin does not
+    # license demoting the last ACTIVE one (spec 13 required behavior 3).
+    active_admin = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    dormant_admin = make_user(
+        user_id="usr_test_0002",
+        status=UserStatus.DISABLED,
+        application_role=ApplicationRole.ADMIN,
+    )
+    organization = make_organization()
+    storage.create_user(active_admin)
+    storage.create_user(dormant_admin)
+    storage.create_organization(organization)
+    audit = make_audit_event(
+        actor_user_id="usr_test_0001",
+        action="user.application_role.revoked",
+    )
+    with pytest.raises(LastActiveAdministratorError):
+        storage.transition_application_role(
+            user_id=active_admin.id,
+            expected_role=ApplicationRole.ADMIN,
+            new_role=ApplicationRole.USER,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    assert storage.get_user(active_admin.id) == active_admin
+    assert storage.append_audit_event(audit) is None
+
+
+def test_transition_demotion_allowed_while_another_active_admin_exists(
+    storage: Storage,
+) -> None:
+    # Seeded other-ACTIVE-admin allowing the demotion: the guard counts
+    # *other* admins (the target never props itself up), and the witness
+    # admin's record stays byte-identical.
+    first = make_user(user_id="usr_test_0001", application_role=ApplicationRole.ADMIN)
+    second = make_user(
+        user_id="usr_test_0002",
+        application_role=ApplicationRole.ADMIN,
+        created_at=T1,
+    )
+    organization = make_organization()
+    storage.create_user(first)
+    storage.create_user(second)
+    storage.create_organization(organization)
+    audit = make_audit_event(
+        actor_user_id="usr_test_0001",
+        action="user.application_role.revoked",
+    )
+    result = storage.transition_application_role(
+        user_id=first.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert storage.get_user(second.id) == second
+
+
+def test_transition_disabled_admin_demotion_skips_the_active_guard(
+    storage: Storage,
+) -> None:
+    # A DISABLED admin is the sole admin: demoting it cannot change the
+    # ACTIVE-admin count, so the guard is skipped (contract-pinned).
+    admin = make_user(
+        status=UserStatus.DISABLED,
+        application_role=ApplicationRole.ADMIN,
+    )
+    organization = make_organization()
+    storage.create_user(admin)
+    storage.create_organization(organization)
+    audit = make_audit_event(action="user.application_role.revoked")
+    result = storage.transition_application_role(
+        user_id=admin.id,
+        expected_role=ApplicationRole.ADMIN,
+        new_role=ApplicationRole.USER,
+        updated_at=T2,
+        audit_event=audit,
+    )
+    assert result.outcome is RoleTransitionOutcome.TRANSITIONED
+    assert result.user.application_role is ApplicationRole.USER
+    assert result.user.status is UserStatus.DISABLED
+    assert storage.get_user(admin.id) == result.user
+
+
+def test_transition_with_unknown_audit_organization_raises_reference_not_found(
+    storage: Storage,
+) -> None:
+    # Audit-parent integrity (contract-pinned): the transition enforces the
+    # same organizations-parent guarantee as append_audit_event, and a
+    # missing parent rolls the *role write* back too.
+    user = make_user()
+    storage.create_user(user)
+    audit = make_audit_event(
+        organization_id="org_ghost_0001",
+        action="user.application_role.granted",
+    )
+    with pytest.raises(ReferenceNotFoundError):
+        storage.transition_application_role(
+            user_id=user.id,
+            expected_role=ApplicationRole.USER,
+            new_role=ApplicationRole.ADMIN,
+            updated_at=T2,
+            audit_event=audit,
+        )
+    # Full rollback: no role write survived the refused audit insert.
+    assert storage.get_user(user.id) == user

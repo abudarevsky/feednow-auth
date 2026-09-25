@@ -107,7 +107,7 @@ def storage(tmp_path) -> SQLiteStorage:  # type: ignore[no-untyped-def]
 
 
 # ---------------------------------------------------------------------------
-# 1. The translation table covers every unique constraint in the v2 DDL
+# 1. The translation table covers every unique constraint in the v3 DDL
 # ---------------------------------------------------------------------------
 
 
@@ -301,7 +301,7 @@ def test_non_integrity_driver_errors_translate_to_generic_storage_error() -> Non
     )
     assert isinstance(exact, contract.DuplicateEntityError)
     assert exact.kind is contract.DuplicateEntityKind.ORGANIZATION_SLUG
-    # Phase 12: a synthetic users.email UNIQUE (which the v2 DDL can no
+    # Phase 12: a synthetic users.email UNIQUE (which the v3 DDL can no
     # longer emit) is an unmapped constraint and falls through to the
     # generic StorageError — the USER_EMAIL mapping is gone, so nothing can
     # resurrect a user_email conflict from a driver message.

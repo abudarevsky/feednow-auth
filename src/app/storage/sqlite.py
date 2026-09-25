@@ -84,7 +84,15 @@ table at open (forward-only, data-retaining),
 :meth:`SQLiteStorage.list_users_by_email` lands as the bounded exact-
 lookup read, and the ``provision_user`` race mapping narrows to the
 identity tuple alone (the users-by-email winner-resolution fallback is
-gone — email can no longer name a unique winner).
+gone — email can no longer name a unique winner). Phase 13 task 1 added
+the atomic administrator transition
+:meth:`SQLiteStorage.transition_application_role` (CAS role write +
+audit append in one ``BEGIN IMMEDIATE`` transaction, with the
+last-ACTIVE-admin guard inside the same lock), and the users table is
+now v3: the ``2 → 3`` migration adds the non-unique
+``users_application_role_lookup`` index that backs the active-admin
+guard's role predicate; the ``1 → 2`` file is carried forward through
+the whole chain at open.
 """
 
 from __future__ import annotations
@@ -101,7 +109,13 @@ from typing import Any, Final
 
 from app.models.api_key import ApiKey, KeyId
 from app.models.audit_event import AuditEvent
-from app.models.enums import ApiKeyStatus, IdentityProvider, MembershipStatus
+from app.models.enums import (
+    ApiKeyStatus,
+    ApplicationRole,
+    IdentityProvider,
+    MembershipStatus,
+    UserStatus,
+)
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
@@ -116,9 +130,12 @@ from app.storage.contract import (
     DuplicateExternalIdentityError,
     EntityNotFoundError,
     InvalidCursorError,
+    LastActiveAdministratorError,
     ProvisionedOrganization,
     ProvisionedUser,
     ReferenceNotFoundError,
+    RoleTransition,
+    RoleTransitionOutcome,
     Storage,
     StorageError,
 )
@@ -127,20 +144,22 @@ from app.storage.contract import (
 #: only with a spec-revision-approved migration story recorded in
 #: :data:`_MIGRATIONS`; an unrecognized stamp is rejected loudly rather than
 #: reinterpreted.
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 #: Wall-clock bound (ms) for lock contention under WAL, per the breakdown's
 #: connection model (concurrency tests use barriers + WAL, never sleeps).
 _BUSY_TIMEOUT_MS: Final = 5000
 
 # ---------------------------------------------------------------------------
-# DDL (v2): six base tables, PKs, FKs, the four unique indexes (three domain
-# uniqueness constraints plus the §8 api_keys.key_id credential segment) and
-# the non-unique Phase 12 ``users_email_lookup`` index (email is an
-# exact-lookup field, never a constraint); the additive Phase 11 session
+# DDL (v3): six base tables, PKs, FKs, the four unique indexes (three domain
+# uniqueness constraints plus the §8 api_keys.key_id credential segment), the
+# non-unique Phase 12 ``users_email_lookup`` index (email is an exact-lookup
+# field, never a constraint), and the non-unique Phase 13
+# ``users_application_role_lookup`` index (backs the active-admin guard's role
+# predicate in ``transition_application_role``); the additive Phase 11 session
 # tables live in _SESSION_SCHEMA_STATEMENTS below. A *fresh* database builds
-# this shape directly; a v1 file reaches it through the 1→2 migration in
-# _MIGRATIONS, so both shapes are identical.
+# this shape directly; a v1 or v2 file reaches it through the ordered
+# ``1 → 2 → 3`` chain in _MIGRATIONS, so all shapes converge.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
@@ -156,6 +175,7 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS users_email_lookup ON users (email)",
+    "CREATE INDEX IF NOT EXISTS users_application_role_lookup ON users (application_role)",
     """
     CREATE TABLE IF NOT EXISTS external_identities (
         id               TEXT PRIMARY KEY,
@@ -229,14 +249,17 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
 # ---------------------------------------------------------------------------
 # Ordered schema migrations consumed by :meth:`SQLiteStorage._ensure_schema`.
 # Keys are the ``user_version`` stamp a file carries on open; the value is
-# the ordered statement list that brings it forward, whose final statement
-# re-stamps ``PRAGMA user_version``. Migrations are **forward-only** and
+# the ordered statement list that brings it forward one version, whose final
+# statement re-stamps ``PRAGMA user_version``; the chain is followed until it
+# lands on :data:`SCHEMA_VERSION`. Migrations are **forward-only** and
 # data-retaining; a stamp that is neither ``0`` (fresh init at
 # :data:`SCHEMA_VERSION`), a key here, nor :data:`SCHEMA_VERSION` itself is
-# rejected loudly. Phase 12 added the single ``1 → 2`` migration: the
+# rejected loudly. Phase 12 added the ``1 → 2`` migration: the
 # ``application_role`` column (the column default backfills every existing
 # row to ``'user'``), the retirement of the unique email constraint, and the
-# non-unique ``users_email_lookup`` index.
+# non-unique ``users_email_lookup`` index. Phase 13 adds the ``2 → 3``
+# migration: the non-unique ``users_application_role_lookup`` index backing
+# the active-admin guard in :meth:`SQLiteStorage.transition_application_role`.
 # ---------------------------------------------------------------------------
 
 _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
@@ -245,6 +268,10 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
         "DROP INDEX users_email_unique",
         "CREATE INDEX users_email_lookup ON users (email)",
         "PRAGMA user_version = 2",
+    ),
+    2: (
+        "CREATE INDEX users_application_role_lookup ON users (application_role)",
+        "PRAGMA user_version = 3",
     ),
 }
 
@@ -553,7 +580,7 @@ def app_session_from_row(row: sqlite3.Row) -> AppSession:
 # domain types from app.storage.contract instead).
 # ---------------------------------------------------------------------------
 
-#: Maps every unique constraint the v2 DDL declares to its domain ``kind``.
+#: Maps every unique constraint the v3 DDL declares to its domain ``kind``.
 #: Keys are ``(table, columns)`` exactly as SQLite reports them in
 #: ``UNIQUE constraint failed: <table>.<column>[, ...]`` messages — the four
 #: named unique indexes plus the implicit PRIMARY KEY indexes (a ``id``
@@ -746,11 +773,13 @@ class SQLiteStorage:
         Stamp dispatch: ``0`` is a fresh file (build the current
         :data:`_SCHEMA_STATEMENTS` shape and stamp it); :data:`SCHEMA_VERSION`
         is current (no DDL); any other stamp listed in :data:`_MIGRATIONS` is
-        brought forward by its ordered migration (forward-only,
+        brought forward by the ordered migration chain (forward-only,
         data-retaining — the Phase 12 ``1 → 2`` migration adds the
         ``application_role`` column with its ``'user'`` default backfill,
-        drops ``users_email_unique``, and creates ``users_email_lookup``).
-        Every other stamp is rejected loudly.
+        drops ``users_email_unique``, and creates ``users_email_lookup``; the
+        Phase 13 ``2 → 3`` migration creates
+        ``users_application_role_lookup``). Every other stamp is rejected
+        loudly.
 
         The Phase 11 session tables (:data:`_SESSION_SCHEMA_STATEMENTS`) run
         on every initialization — a pre-Phase-11 file gains them additively
@@ -779,34 +808,46 @@ class SQLiteStorage:
             self._schema_ready = True
 
     def _apply_migration(self, conn: sqlite3.Connection, version: int) -> None:
-        """Apply one ordered migration as a single write-locked transaction.
+        """Apply the ordered migration chain as a single write-locked
+        transaction.
 
         Migration statements are *not* idempotent (bare ``ALTER``/``DROP``/
         ``CREATE``), so — unlike the ``IF NOT EXISTS`` fresh-init path — they
         run under ``BEGIN IMMEDIATE``: a second process initializing the same
         file blocks on ``busy_timeout``, and the stamp re-read after the
         write lock is acquired skips a migration the racing opener already
-        committed; a crash rolls the whole migration back to the old stamp,
+        committed; a crash rolls the whole chain back to the old stamp,
         which simply re-migrates on the next open. Every migration's final
-        statement re-stamps ``user_version``; the postcondition proves the
-        chain landed on :data:`SCHEMA_VERSION` before the file is declared
-        ready. Driver errors are translated — no raw ``sqlite3`` exception
-        escapes initialization either.
+        statement re-stamps ``user_version``; the loop follows the chain
+        (``1 → 2 → 3``) and the postcondition proves it landed on
+        :data:`SCHEMA_VERSION` before the file is declared ready — a stamp
+        that does not advance or leaves the chain is a broken migration and
+        rolls back loudly. Driver errors are translated — no raw ``sqlite3``
+        exception escapes initialization either.
         """
         try:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("PRAGMA user_version").fetchone()[0] != version:
                 conn.rollback()
                 return
-            for statement in _MIGRATIONS[version]:
-                conn.execute(statement)
-            stamped = conn.execute("PRAGMA user_version").fetchone()[0]
-            if stamped != SCHEMA_VERSION:
-                conn.rollback()
-                raise StorageError(
-                    f"schema migration from version {version} left stamp {stamped}; "
-                    f"expected {SCHEMA_VERSION} at {self._path}"
-                )
+            current = version
+            while current != SCHEMA_VERSION:
+                for statement in _MIGRATIONS[current]:
+                    conn.execute(statement)
+                stamped = conn.execute("PRAGMA user_version").fetchone()[0]
+                if stamped == current:
+                    conn.rollback()
+                    raise StorageError(
+                        f"schema migration from version {current} left stamp unchanged "
+                        f"at {self._path}"
+                    )
+                if stamped != SCHEMA_VERSION and stamped not in _MIGRATIONS:
+                    conn.rollback()
+                    raise StorageError(
+                        f"schema migration landed on unsupported stamp {stamped} "
+                        f"from version {current} at {self._path}"
+                    )
+                current = stamped
             conn.commit()
         except sqlite3.Error as exc:
             conn.rollback()
@@ -978,6 +1019,110 @@ class SQLiteStorage:
         if row is None:
             raise EntityNotFoundError("no external identity matches the given tuple")
         return user_from_row(row)
+
+    # -- Application role administration (Phase 13) ----------------------------
+
+    def transition_application_role(
+        self,
+        *,
+        user_id: UserId,
+        expected_role: ApplicationRole,
+        new_role: ApplicationRole,
+        updated_at: UtcDatetime,
+        audit_event: AuditEvent,
+    ) -> RoleTransition:
+        """Atomically CAS the user's ``application_role`` and append the
+        caller-formed audit event in one transaction (contract-pinned).
+
+        ``BEGIN IMMEDIATE`` is the first statement so the write lock is held
+        *before* the guard's read snapshot exists: the last-ACTIVE-admin check
+        and the role write are **one** concurrency-safe operation (spec 13
+        required behavior 3) — a racing demotion blocks on ``busy_timeout``
+        and then re-evaluates the guard against committed truth, so two
+        racing last-pair revocations can never both succeed.
+
+        Semantics follow the contract docstring exactly: unknown user →
+        :class:`~app.storage.contract.EntityNotFoundError`; stored role ==
+        ``new_role`` → ``NO_CHANGE`` with zero writes and the audit event not
+        persisted; demotion of an ``ACTIVE`` admin with no *other* ``ACTIVE``
+        admin → :class:`~app.storage.contract.LastActiveAdministratorError`
+        fully rolled back (the guard counts others, never the target, and a
+        ``DISABLED`` admin skips it); otherwise the CAS
+        ``UPDATE ... WHERE id = ? AND application_role = ?`` plus the shared
+        :meth:`_insert_audit_event_row` commit together, the audit FK closing
+        the organizations-parent race as a translated
+        :class:`~app.storage.contract.ReferenceNotFoundError` with full
+        rollback. The returned user is the final stored record read back
+        inside the committing transaction (``revoke_api_key`` precedent;
+        storage still mints nothing — ``updated_at`` is the caller's).
+        """
+        conn = self._connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM users WHERE id = ?", (str(user_id),)).fetchone()
+            if row is None:
+                conn.rollback()
+                raise EntityNotFoundError(f"no user with id {user_id!r}")
+            stored = user_from_row(row)
+            if stored.application_role is new_role:
+                # Idempotent no-op (contract-pinned): zero writes, no audit
+                # row, the unchanged stored user echoed with NO_CHANGE.
+                conn.rollback()
+                return RoleTransition(user=stored, outcome=RoleTransitionOutcome.NO_CHANGE)
+            demotion = expected_role is ApplicationRole.ADMIN and new_role is ApplicationRole.USER
+            if demotion and stored.status is UserStatus.ACTIVE:
+                # The guard counts *other* ACTIVE admins: the target itself
+                # must never prop up its own demotion. A DISABLED admin skips
+                # this branch — demoting it cannot change the active-admin
+                # count, so no guard is needed (contract-pinned).
+                others = conn.execute(
+                    "SELECT COUNT(*) FROM users"
+                    " WHERE application_role = ? AND status = ? AND id != ?",
+                    (
+                        str(ApplicationRole.ADMIN),
+                        str(UserStatus.ACTIVE),
+                        str(user_id),
+                    ),
+                ).fetchone()[0]
+                if others == 0:
+                    conn.rollback()
+                    raise LastActiveAdministratorError(
+                        "refusing to demote the last active application administrator"
+                    )
+            cas = conn.execute(
+                "UPDATE users SET application_role = ?, updated_at = ?"
+                " WHERE id = ? AND application_role = ?",
+                (
+                    str(new_role),
+                    encode_timestamp(updated_at),
+                    str(user_id),
+                    str(expected_role),
+                ),
+            )
+            if cas.rowcount == 0:
+                # Unreachable while ApplicationRole is the closed two-value
+                # vocabulary (a CAS miss after the NO_CHANGE check can only
+                # mean stored == new_role, handled above): fail loudly as a
+                # domain error and roll back, never commit a partial
+                # transition (contract tripwire).
+                conn.rollback()
+                raise StorageError("role transition precondition failed")
+            self._insert_audit_event_row(conn, audit_event)
+            final = conn.execute("SELECT * FROM users WHERE id = ?", (str(user_id),)).fetchone()
+        except sqlite3.Error as exc:
+            # Covers the audit insert's IntegrityError (translated per
+            # constraint: unknown organization parent → ReferenceNotFoundError,
+            # taken aud_ id → DuplicateEntityError) and every other driver
+            # failure: the whole transaction rolls back — no role write and
+            # no audit row survive a rejected transition — and only domain
+            # errors escape the adapter.
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+        return RoleTransition(
+            user=user_from_row(final),
+            outcome=RoleTransitionOutcome.TRANSITIONED,
+        )
 
     # -- Organizations and memberships (task 4) -------------------------------
 

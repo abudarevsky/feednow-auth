@@ -7,11 +7,13 @@ Covers the task's verify lines:
 2. ``ProvisionedUser`` is frozen and is a pure caller-echo bundle.
 3. A minimal stub class satisfies ``isinstance`` under ``runtime_checkable``;
    a partial stub does not.
-4. The protocol exposes exactly the 24 §11/§12 + Phase 11/12 methods (18
+4. The protocol exposes exactly the 25 §11/§12 + Phase 11/12/13 methods (18
    Phase 02 operations plus the Phase 04 ``provision_organization`` compound
    plus the four additive Phase 11 login-state/session operations plus the
-   additive Phase 12 ``list_users_by_email`` exact-lookup), all synchronous,
-   with signatures that reference only domain/typing types (no driver types).
+   additive Phase 12 ``list_users_by_email`` exact-lookup plus the additive
+   Phase 13 ``transition_application_role`` atomic role transition), all
+   synchronous, with signatures that reference only domain/typing types (no
+   driver types).
 5. Subprocess-isolated import check (fresh interpreter, Phase 01 task-6
    precedent): importing ``app.storage.contract`` and ``app.storage`` pulls in
    neither ``sqlite3``, ``boto3``, nor any adapter module. In-process
@@ -21,6 +23,7 @@ Covers the task's verify lines:
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
 import subprocess
@@ -50,6 +53,7 @@ from app.models import (
     User,
     UserStatus,
 )
+from app.models.enums import ApplicationRole
 from app.models.ids import (
     ApiKeyId,
     AuditEventId,
@@ -64,12 +68,13 @@ from app.models.ids import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 
-#: The 24 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
+#: The 25 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
 #: ``provision_user`` compound), the Phase 04 ``provision_organization``
 #: compound (breakdown decision 2 — an explicit addition to the current
 #: phase's contract), the four additive Phase 11 login-state/session
-#: operations, and the additive Phase 12 ``list_users_by_email`` exact
-#: lookup.
+#: operations, the additive Phase 12 ``list_users_by_email`` exact lookup,
+#: and the additive Phase 13 ``transition_application_role`` atomic role
+#: transition.
 CONTRACT_METHODS = frozenset(
     {
         "create_user",
@@ -77,6 +82,7 @@ CONTRACT_METHODS = frozenset(
         "list_users_by_email",
         "create_external_identity",
         "get_user_by_external_identity",
+        "transition_application_role",
         "create_organization",
         "get_organization",
         "list_user_organizations",
@@ -261,6 +267,7 @@ def test_storage_error_is_the_common_base() -> None:
         contract.DuplicateEntityError,
         contract.ReferenceNotFoundError,
         contract.InvalidCursorError,
+        contract.LastActiveAdministratorError,
     ):
         assert issubclass(cls, contract.StorageError), cls
 
@@ -281,6 +288,8 @@ def test_duplicate_external_identity_nests_under_duplicate_entity() -> None:
         (contract.InvalidCursorError, contract.DuplicateEntityError),
         (contract.DuplicateEntityError, contract.InvalidCursorError),
         (contract.DuplicateExternalIdentityError, contract.EntityNotFoundError),
+        (contract.LastActiveAdministratorError, contract.EntityNotFoundError),
+        (contract.LastActiveAdministratorError, contract.DuplicateEntityError),
     ],
 )
 def test_error_classes_are_distinct_branches(leaf: type, unrelated: type) -> None:
@@ -437,6 +446,53 @@ def test_provisioned_organization_accepts_any_sequence_of_audit_events() -> None
 
 
 # ---------------------------------------------------------------------------
+# 2b. Phase 13: RoleTransitionOutcome / RoleTransition / refusal error
+# ---------------------------------------------------------------------------
+
+
+def test_role_transition_outcome_vocabulary_is_closed() -> None:
+    assert {outcome.value for outcome in contract.RoleTransitionOutcome} == {
+        "transitioned",
+        "no_change",
+    }
+    assert contract.RoleTransitionOutcome.TRANSITIONED == "transitioned"
+    assert contract.RoleTransitionOutcome.NO_CHANGE == "no_change"
+    with pytest.raises(ValueError, match="RoleTransitionOutcome"):
+        contract.RoleTransitionOutcome("partially_applied")
+
+
+def test_role_transition_is_a_frozen_result_pairing_user_and_outcome() -> None:
+    user = make_user()
+    transition = contract.RoleTransition(
+        user=user,
+        outcome=contract.RoleTransitionOutcome.TRANSITIONED,
+    )
+    # Caller-visible identity: the user is the very object the adapter
+    # returns (final stored record), not a copy of driver state.
+    assert transition.user is user
+    assert transition.outcome is contract.RoleTransitionOutcome.TRANSITIONED
+    assert transition == contract.RoleTransition(
+        user=user,
+        outcome=contract.RoleTransitionOutcome.TRANSITIONED,
+    )
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        transition.outcome = contract.RoleTransitionOutcome.NO_CHANGE  # type: ignore[misc]
+
+
+def test_last_active_administrator_error_is_a_plain_storage_refusal() -> None:
+    error = contract.LastActiveAdministratorError("last active administrator")
+    assert isinstance(error, contract.StorageError)
+    assert error.args[0] == "last active administrator"
+    # Constructible with no adapter detail (same discipline as the rest of
+    # the vocabulary) and never a duplicate/reference branch.
+    assert not isinstance(
+        error,
+        (contract.DuplicateEntityError, contract.ReferenceNotFoundError),
+    )
+    assert "sql" not in str(error).lower()
+
+
+# ---------------------------------------------------------------------------
 # 3. runtime_checkable protocol conformance
 # ---------------------------------------------------------------------------
 
@@ -455,14 +511,16 @@ def test_plain_object_does_not_satisfy_isinstance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Protocol surface: 24 methods, sync, domain-only types
+# 4. Protocol surface: 25 methods, sync, domain-only types
 # ---------------------------------------------------------------------------
 
 
 def test_protocol_exposes_exactly_the_24_contract_methods() -> None:
+    # The name keeps its Phase 12 spelling; Phase 13 added the 25th method
+    # (transition_application_role), and the assertion is the truth here.
     members = typing.get_protocol_members(contract.Storage)
     assert members == set(CONTRACT_METHODS)
-    assert len(members) == 24
+    assert len(members) == 25
 
 
 @pytest.mark.parametrize("name", sorted(CONTRACT_METHODS))
@@ -567,6 +625,45 @@ def test_key_read_methods_are_disambiguated_by_type() -> None:
     by_segment = typing.get_type_hints(contract.Storage.get_api_key_by_key_id)["key_id"]
     assert by_identity is ApiKeyId
     assert by_segment is not by_identity
+
+
+def test_transition_application_role_signature_is_pinned() -> None:
+    # Phase 13: fully keyword-only, no defaults (a silently-skipped audit
+    # event or un-named precondition would break the atomic transition).
+    signature = inspect.signature(contract.Storage.transition_application_role)
+    assert list(signature.parameters) == [
+        "self",
+        "user_id",
+        "expected_role",
+        "new_role",
+        "updated_at",
+        "audit_event",
+    ]
+    for name, parameter in signature.parameters.items():
+        if name == "self":
+            continue
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY, name
+        assert parameter.default is inspect.Parameter.empty, name
+    hints = typing.get_type_hints(contract.Storage.transition_application_role)
+    assert hints["user_id"] is UserId
+    assert hints["expected_role"] is ApplicationRole
+    assert hints["new_role"] is ApplicationRole
+    assert hints["audit_event"] is AuditEvent
+    assert hints["return"] is contract.RoleTransition
+
+
+def test_transition_application_role_docstring_pins_the_semantics() -> None:
+    # The contract docstring *is* the spec-13 storage-transition contract;
+    # the breakdown pins these observable guarantees against reinterpretation.
+    doc = contract.Storage.transition_application_role.__doc__ or ""
+    assert "EntityNotFoundError" in doc
+    assert "NO_CHANGE" in doc
+    assert "zero writes" in doc
+    assert "closed" in doc and "two-value vocabulary" in doc
+    assert "LastActiveAdministratorError" in doc
+    assert "DISABLED" in doc
+    assert "one transaction" in doc
+    assert "ReferenceNotFoundError" in doc
 
 
 # ---------------------------------------------------------------------------

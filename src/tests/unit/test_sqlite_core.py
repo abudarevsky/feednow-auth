@@ -9,9 +9,11 @@ deliberately no behavior tests here.
 Verify lines covered:
 
 1. Schema init is idempotent on the same file (plus the four unique indexes
-   and ``user_version`` stamp; an unknown stamped version is rejected, and
-   the Phase 12 ``1 → 2`` migration brings a hand-built v1 file forward with
-   data retained and the email constraint retired).
+   and ``user_version`` stamp; an unknown stamped version is rejected, the
+   Phase 12 ``1 → 2`` migration brings a hand-built v1 file forward with data
+   retained and the email constraint retired, and the Phase 13 ``2 → 3``
+   migration adds the ``users_application_role_lookup`` index — the ordered
+   chain carries a v1 file all the way to the current stamp).
 2. FK enforcement is live even after prior DML on the connection — a raw
    FK-violating insert raises, proving the PRAGMA was not no-oped.
 3. Timestamp round-trip preserves microseconds and zero-µs values stay
@@ -348,10 +350,14 @@ def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStor
         assert ("index", index) in names, index
     # Phase 12: users_email_unique is gone (email is non-unique); the
     # remaining four unique indexes still exist, and the plain
-    # users_email_lookup index backs the exact-lookup read.
+    # users_email_lookup index backs the exact-lookup read. Phase 13 adds a
+    # second plain users index: users_application_role_lookup backs the
+    # active-admin guard in transition_application_role (a lookup, never a
+    # constraint, so UNIQUE_INDEX_NAMES stays at four).
     assert len(sqlite_adapter.UNIQUE_INDEX_NAMES) == 4
     assert ("index", "users_email_lookup") in names
     assert ("index", "users_email_unique") not in names
+    assert ("index", "users_application_role_lookup") in names
     assert len(sqlite_adapter.TABLE_NAMES) == 8
 
 
@@ -534,29 +540,34 @@ def _build_v1_file(path: Path, users: tuple[tuple[str, str], ...]) -> None:
 
 
 def test_v1_file_migrates_to_v2_at_open_backfilling_roles(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # The name keeps its Phase 12 spelling; since Phase 13 the ordered chain
+    # runs 1 → 2 → 3, so the file lands on SCHEMA_VERSION (3) with both the
+    # email-lookup swap and the application-role index applied.
     path = tmp_path / "v1-migration.sqlite"
     _build_v1_file(path, _V1_SEED_USERS)
 
     storage = SQLiteStorage(path)
     try:
         conn = storage._connection()
-        # Reopened at the current stamp.
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # Reopened at the current stamp (the chain landed on SCHEMA_VERSION).
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
         rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         # Roles backfilled to 'user' by the ALTER TABLE column default...
         assert [row["application_role"] for row in rows] == ["user", "user"]
-        # ...and the pre-existing data survived the ALTER/DROP/CREATE intact.
+        # ...and the pre-existing data survived the ALTER/DROP/CREATE chain intact.
         assert [(row["id"], row["email"], row["display_name"]) for row in rows] == [
             ("usr_test_0001", "first@example.test", "Seeded usr_test_0001"),
             ("usr_test_0002", "second@example.test", "Seeded usr_test_0002"),
         ]
         assert [row["created_at"] for row in rows] == [encode_timestamp(_T0)] * 2
-        # Index swap: the non-unique lookup exists, the unique constraint is gone.
+        # Index swaps: the non-unique lookups exist (Phase 12 email, Phase 13
+        # role), the unique email constraint is gone.
         indexes = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
         assert "users_email_lookup" in indexes
+        assert "users_application_role_lookup" in indexes
         assert "users_email_unique" not in indexes
         # Migrated rows read back as domain objects with the default role,
         # and the flipped constraint holds on a migrated file: a second user
@@ -583,22 +594,60 @@ def test_v1_file_migrates_to_v2_at_open_backfilling_roles(tmp_path) -> None:  # 
     reopened = SQLiteStorage(path)
     try:
         conn = reopened._connection()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 3
         indexes = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
         }
         assert "users_email_lookup" in indexes
+        assert "users_application_role_lookup" in indexes
         assert "users_email_unique" not in indexes
     finally:
         reopened.close()
 
 
-@pytest.mark.parametrize("stamped", [3, 7, 42])
+# ---------------------------------------------------------------------------
+# 1c. Phase 13: the ordered 2→3 migration of a hand-built v2 file
+# ---------------------------------------------------------------------------
+
+
+def test_v2_file_migrates_to_v3_at_open_adding_the_role_index(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    # A file at the Phase 12 stamp (v3 DDL minus the role index, stamped 2)
+    # is brought forward by the 2 → 3 migration: the non-unique
+    # users_application_role_lookup index appears, data is retained, and the
+    # stamp lands on SCHEMA_VERSION.
+    path = tmp_path / "v2-migration.sqlite"
+    conn = sqlite3.connect(path)
+    for statement in sqlite_adapter._SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    conn.execute("DROP INDEX users_application_role_lookup")
+    _insert_user(conn, make_user())
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
+
+    storage = SQLiteStorage(path)
+    try:
+        conn = storage._connection()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        indexes = {
+            row["name"]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert "users_application_role_lookup" in indexes
+        assert "users_email_lookup" in indexes
+        # Data retained across the migration.
+        assert storage.get_user(UserId("usr_test_0001")) == make_user()
+    finally:
+        storage.close()
+
+
+@pytest.mark.parametrize("stamped", [4, 7, 42])
 def test_stamps_outside_the_known_set_are_rejected(tmp_path, stamped: int) -> None:  # type: ignore[no-untyped-def]
-    # Only 0 (fresh init), 1 (the single known migration), and 2 (current)
-    # are accepted; anything else still fails loudly, never reinterpreted.
+    # Only 0 (fresh init), 1 and 2 (the known migration stamps), and 3
+    # (current) are accepted; anything else still fails loudly, never
+    # reinterpreted.
     path = tmp_path / f"stamp-{stamped}.sqlite"
     conn = sqlite3.connect(path)
     for statement in _V1_SCHEMA_STATEMENTS:
@@ -925,13 +974,14 @@ def test_contract_surface_has_no_remaining_stubs() -> None:
     # The task-2 skeleton existed so a forgotten method failed loudly with
     # NotImplementedError; task 7 completed the surface with provision_user,
     # Phase 04 task 1 added provision_organization, Phase 11 task 6 added
-    # the four login-state/session operations, and Phase 12 task 2 added
-    # list_users_by_email (all implemented).
+    # the four login-state/session operations, Phase 12 task 2 added
+    # list_users_by_email, and Phase 13 task 1 added
+    # transition_application_role (all implemented).
     # Definition-of-done tripwire (acceptance: "all contract methods
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 24, members
+    assert len(members) == 25, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

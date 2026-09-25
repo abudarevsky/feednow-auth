@@ -3,7 +3,8 @@
 This module is the *only* storage surface application code (Phases 03, 05, 06)
 may depend on. It declares the 19 §11/§12 operations plus the four additive
 Phase 11 login-state/session operations plus the additive Phase 12
-``list_users_by_email`` exact-lookup (24 total) as a
+``list_users_by_email`` exact-lookup plus the additive Phase 13
+``transition_application_role`` atomic role transition (25 total) as a
 :class:`typing.Protocol` plus the domain error vocabulary adapters raise.
 
 Contract-wide rules (pinned by the Phase 02 breakdown; adapters must not
@@ -54,6 +55,7 @@ reinterpret them):
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
@@ -61,7 +63,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.models.api_key import ApiKey, KeyId
 from app.models.audit_event import AuditEvent
-from app.models.enums import IdentityProvider
+from app.models.enums import ApplicationRole, IdentityProvider
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
@@ -181,6 +183,21 @@ class InvalidCursorError(StorageError):
     """
 
 
+class LastActiveAdministratorError(StorageError):
+    """Additive Phase 13 refusal raised by
+    :meth:`Storage.transition_application_role`.
+
+    A demotion ``ADMIN → USER`` whose target is ``ACTIVE`` is refused when no
+    **other** ``ACTIVE`` admin user exists: the system must never be left
+    without an active application administrator (spec 13 required
+    behavior 3). The refusal is fully rolled back — the target keeps
+    ``ADMIN``, no timestamp moves, and no audit row is written. A demotion of
+    a ``DISABLED`` admin never raises it (the active-admin count cannot
+    change). How HTTP/CLI maps this refusal is caller-side work, never a
+    storage concern.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Compound-operation results
 # ---------------------------------------------------------------------------
@@ -223,11 +240,45 @@ class ProvisionedOrganization(BaseModel):
     audit_events: tuple[AuditEvent, ...]
 
 
+class RoleTransitionOutcome(StrEnum):
+    """Stable discriminator for :meth:`Storage.transition_application_role`.
+
+    ``TRANSITIONED`` means the role write and its audit event committed in
+    one transaction; ``NO_CHANGE`` is the idempotent no-op (the stored role
+    already equals the requested role) with **zero writes** and the supplied
+    audit event not persisted. A third outcome cannot exist while
+    :class:`~app.models.enums.ApplicationRole` is the closed two-value
+    vocabulary — a CAS miss on ``expected_role`` can only mean stored equals
+    ``new_role`` (contract tripwire: adding a third role requires revisiting
+    this operation and this enum).
+    """
+
+    TRANSITIONED = "transitioned"
+    NO_CHANGE = "no_change"
+
+
+@dataclass(frozen=True)
+class RoleTransition:
+    """Frozen result returned by :meth:`Storage.transition_application_role`.
+
+    ``user`` is the final stored record: on ``TRANSITIONED`` the updated user
+    (``new_role`` + caller-supplied ``updated_at``, read back inside the
+    committing transaction — the :meth:`Storage.revoke_api_key` read-back
+    precedent), on ``NO_CHANGE`` the untouched stored user. ``outcome`` tells
+    the caller whether the audit event was persisted; a ``NO_CHANGE`` caller
+    must **not** re-append (the adapter already skipped it).
+    """
+
+    user: User
+    outcome: RoleTransitionOutcome
+
+
 # ---------------------------------------------------------------------------
-# The protocol (24 methods: spec §11 surface + the §12 compound
+# The protocol (25 methods: spec §11 surface + the §12 compound
 # ``provision_user`` + the Phase 04 compound ``provision_organization``
 # + the four additive Phase 11 login-state/session operations
-# + the additive Phase 12 ``list_users_by_email`` exact-lookup)
+# + the additive Phase 12 ``list_users_by_email`` exact-lookup
+# + the additive Phase 13 ``transition_application_role`` atomic transition)
 # ---------------------------------------------------------------------------
 
 
@@ -320,6 +371,75 @@ class Storage(Protocol):
 
         Raises:
             EntityNotFoundError: when no identity matches the tuple.
+        """
+        ...
+
+    # -- Application role administration (Phase 13) ---------------------------
+    #
+    # Additive Phase 13 surface backing out-of-band administrator
+    # bootstrap/revocation. The active-admin guard and the transition are
+    # **one** adapter operation (spec 13 required behavior 3): callers must
+    # never compose a check-then-write from the reads above.
+
+    def transition_application_role(
+        self,
+        *,
+        user_id: UserId,
+        expected_role: ApplicationRole,
+        new_role: ApplicationRole,
+        updated_at: UtcDatetime,
+        audit_event: AuditEvent,
+    ) -> RoleTransition:
+        """Atomically CAS the user's global ``application_role`` and append
+        the caller-formed ``audit_event`` in one transaction (Phase 13).
+
+        Pinned semantics (this docstring **is** the spec-13 storage-transition
+        contract; adapters must not reinterpret them):
+
+        - Unknown user → :class:`EntityNotFoundError`.
+        - Stored role == ``new_role`` → :class:`RoleTransitionOutcome.NO_CHANGE`
+          with **zero writes**: no role update, no timestamp movement, and the
+          supplied ``audit_event`` is **not** persisted (idempotent no-op —
+          repeated grant/revoke never create duplicate audits). The returned
+          :class:`RoleTransition` carries the unchanged stored user.
+        - Because :class:`~app.models.enums.ApplicationRole` is a closed
+          two-value vocabulary, a CAS miss on ``expected_role`` can only mean
+          stored == ``new_role``, so no third outcome exists (tripwire: adding
+          a third role requires revisiting this operation).
+        - A demotion ``ADMIN → USER`` whose target is ``ACTIVE`` is refused
+          with :class:`LastActiveAdministratorError` when no **other**
+          ``ACTIVE`` admin user exists, fully rolled back (no role write, no
+          audit row). A demotion of a ``DISABLED`` admin skips the guard: the
+          active-admin count cannot change.
+        - On :class:`RoleTransitionOutcome.TRANSITIONED` the role update and
+          the ``audit_event`` append commit in one transaction; the returned
+          :class:`User` is the final stored record with ``new_role`` and the
+          caller-supplied ``updated_at`` (read-back allowed — the
+          :meth:`revoke_api_key` precedent; storage still mints nothing).
+        - Audit-parent integrity: when ``audit_event.organization_id`` is not
+          ``None`` the transition enforces the same organizations-parent
+          guarantee as :meth:`append_audit_event` — SQLite via the existing
+          FK failure → :class:`ReferenceNotFoundError` mapping, DynamoDB via
+          an additional parent ``ConditionCheck`` inside the same transaction
+          (missing parent → :class:`ReferenceNotFoundError` with full
+          rollback: no role write, no audit row), closing the race where the
+          organization is deleted between the caller's anchor read and commit;
+          ``organization_id=None`` → no parent check (the contract keeps
+          org-less audits legal).
+
+        **Phase 13 replication obligation:** DynamoDB must enforce the same
+        all-or-nothing transition, the same no-op/refusal/guard semantics, and
+        the same parent check inside its conditional transaction; the
+        conformance suite pins the observable behavior, not the mechanism.
+
+        Raises:
+            EntityNotFoundError: when no user has that ``usr_`` identity.
+            LastActiveAdministratorError: demotion of the last ``ACTIVE``
+                admin, fully rolled back.
+            ReferenceNotFoundError: unknown ``audit_event.organization_id``
+                (when present), fully rolled back.
+            DuplicateEntityError: ``kind="entity_id"`` when the ``aud_``
+                record id was already appended.
         """
         ...
 
@@ -677,9 +797,12 @@ __all__ = [
     "DuplicateExternalIdentityError",
     "EntityNotFoundError",
     "InvalidCursorError",
+    "LastActiveAdministratorError",
     "ProvisionedOrganization",
     "ProvisionedUser",
     "ReferenceNotFoundError",
+    "RoleTransition",
+    "RoleTransitionOutcome",
     "Storage",
     "StorageError",
 ]
