@@ -15,13 +15,15 @@ when that behavior is actually implemented and verified.
 - Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
-- Storage is reached only through the 23-method `Storage` protocol and the
+- Storage is reached only through the 25-method `Storage` protocol and the
   documented factories `open_sqlite_storage(path: str | Path) -> Storage`
   and `open_dynamodb_storage(*, endpoint_url=None, region="us-east-1",
   table_prefix="", dynamodb_resource=None) -> DynamoDbStorage` (both with
-  `close()`). Adapters are imported by explicit submodule path only;
-  signatures carry domain types exclusively: no row, driver exception,
-  session, or interpretable cursor may cross the boundary.
+  `close()`); the CLI-facing `app.storage.factory` (`storage_settings_from_env`
+  + `create_storage`, env names below) is the only configuration→adapter
+  seam outside the app entrypoint. Adapters are imported by explicit
+  submodule path only; signatures carry domain types exclusively: no row,
+  driver exception, session, or interpretable cursor may cross the boundary.
 - Storage never mints IDs or timestamps; writes take fully formed domain
   entities and read back unchanged.
 - Every storage failure is a `StorageError` subclass. Missing entities raise
@@ -29,7 +31,9 @@ when that behavior is actually implemented and verified.
   `DuplicateEntityError` with a stable `kind` (`entity_id`,
   `external_identity`, `membership`, `organization_slug`, `user_email`,
   `api_key_id`); unknown parents raise `ReferenceNotFoundError`; bad cursors
-  raise `InvalidCursorError`.
+  raise `InvalidCursorError`; a refused last-active-administrator demotion
+  raises `LastActiveAdministratorError` (Phase 13, see the administration
+  boundary below).
 - Lists are ordered by `(created_at, id)` ascending with `id` as the
   deterministic keyset tiebreaker; out-of-range limits are clamped, not
   rejected.
@@ -234,16 +238,103 @@ Session boundary (Phase 11):
   phase.** Session verification is component-level only; `/v1/*` keeps the
   bearer-token contract exactly as before.
 
+Administration boundary (Phase 13):
+
+- `transition_application_role(*, user_id, expected_role, new_role,
+  updated_at, audit_event) -> RoleTransition` is the only role-change
+  operation and the contract docstring **is** its semantics spec: unknown
+  user → `EntityNotFoundError`; stored role == `new_role` →
+  `RoleTransitionOutcome.NO_CHANGE` with **zero writes** — no role update,
+  no timestamp movement, and the supplied audit event is **not** persisted
+  (idempotent no-op; the caller must not re-append, so repeated
+  grant/revoke never creates duplicate audits). Because `ApplicationRole`
+  is a closed two-value vocabulary, a CAS miss on `expected_role` can only
+  mean stored == `new_role`: no third outcome exists (tripwire: adding a
+  third role requires revisiting this operation). A demotion `ADMIN → USER`
+  whose target is `ACTIVE` is refused with `LastActiveAdministratorError`
+  when no **other** `ACTIVE` admin user exists — fully rolled back (no
+  role write, no audit row); a demotion of a `DISABLED` admin skips the
+  guard (the active-admin count cannot change). On `TRANSITIONED` the role
+  update and the caller-formed audit append commit in one transaction and
+  the returned `User` is the final stored record with `new_role`/
+  `updated_at` (read-back allowed — the `revoke_api_key` precedent;
+  storage still mints nothing). When `audit_event.organization_id` is
+  present the same organizations-parent guarantee as `append_audit_event`
+  applies (missing parent → `ReferenceNotFoundError`, fully rolled back);
+  a reused `aud_` id is `DuplicateEntityError(kind=entity_id)`. Both
+  adapters are behavior-identical (SQLite: one transaction plus the
+  `users_application_role_lookup` index; DynamoDB: strong read, the
+  `by-application-role` witness `Query`, and one `TransactWriteItems`
+  carrying a deterministic-witness `ConditionCheck`, so concurrent
+  last-pair double revocations serialize with exactly one winner).
+- The administration service (`src/app/services/administration.py`) is the
+  only caller, over the `Storage` protocol alone. `resolve_unique_user`
+  maps an exact email via `list_users_by_email`: zero →
+  `AdministratorNotFoundError`, more than one →
+  `AmbiguousAdministratorEmailError` (message carries the count and the
+  `usr_` ids only, never provider material); neither path writes. The
+  audit anchor is the user's earliest **active** organization (the same
+  deterministic anchor `/v1/me` uses); none →
+  `AdministratorAuditAnchorMissingError` raised **before** any transition
+  call, so the refusal mutates nothing. Exactly one clock read and one
+  `aud_` mint per command; `LastActiveAdministratorError` propagates
+  untranslated (mapping is caller-side).
+- The two transition audits are `user.application_role.granted` /
+  `user.application_role.revoked` with `target_type="user"`, `target_id=`
+  the affected `usr_`, metadata **exactly** `{"from_role", "to_role"}`
+  (role values only — no email, no Cognito `sub`, no token, no auth code),
+  `actor_type="user"`, and `actor_id=` the **affected user** — the pinned
+  out-of-band decision, because the CLI carries no operator identity and
+  the `ActorType` vocabulary is frozen. No-op commands write no audit.
+- The operator CLI `python -m feednow_auth.admin grant|revoke --email
+  <addr>` has a pinned exit-code contract (stable operator-facing API):
+  `0` success (stdout distinguishes `granted` / `already granted` /
+  `revoked` / `already revoked`), `2` usage error (argparse) **or**
+  unusable storage configuration (the factory's fixed `ValueError`
+  messages), `3` no user exists for that email, `4` ambiguous email
+  (stderr lists the candidate `usr_` ids), `5` refused: the revoke would
+  remove the last active administrator, `1` any unexpected failure — one
+  fixed safe stderr line, never a traceback. Echoing the operator-supplied
+  email and `usr_` ids is allowed; token, credential, and adapter
+  exception text are not. Module import performs no I/O and no credential
+  lookup; the CLI never provisions users and is never invoked at
+  deployment or container startup.
+- The CLI-facing factory (`src/app/storage/factory.py`) consumes
+  `FEEDNOW_STORAGE_BACKEND` (required, exactly `sqlite` or `dynamodb`);
+  `sqlite` requires `FEEDNOW_SQLITE_PATH`; `dynamodb` requires
+  `FEEDNOW_DYNAMODB_REGION` and `FEEDNOW_TABLE_PREFIX` (present; empty
+  string means no prefix) and takes an optional `FEEDNOW_DYNAMODB_ENDPOINT`
+  (present and non-empty → DynamoDB Local, absent or empty → AWS).
+  Rejections are `ValueError` with fixed, value-free messages. The factory
+  constructs no FastAPI app, never imports `app.main`/`app.auth.cognito`,
+  and reads no Cognito or pepper configuration.
+- The global-administrator dependency
+  `build_application_admin_dependency`
+  (`src/app/auth/application_access.py`) composes `build_current_principal`
+  and grants only when the principal is human **and**
+  `application_role is ApplicationRole.ADMIN`, returning that `Principal`
+  verbatim; every other outcome — ordinary humans and **every** API-key
+  variant, including a key owned by an ADMIN user (the key branch is
+  structurally roleless) — answers the **same uniform 403** with one fixed
+  message echoing no role, key, or identity material. Denials are not
+  audited at this seam. Phase 13 mounts it on **no** production route
+  (the frozen `/v1` manifest is unchanged), and organization-membership
+  administration keeps its separate org-local `organization_access`
+  policy: the global `ApplicationRole` and organization roles never
+  inherit into each other.
+
 Canonical modules:
 
 - Domain: `src/app/models/`
 - API schemas and manifest: `src/app/api/schemas/`
 - App factory: `src/app/main.py`
 - Storage contract (protocol, errors, `ProvisionedUser`,
-  `ProvisionedOrganization`): `src/app/storage/contract.py`
+  `ProvisionedOrganization`, `RoleTransition`): `src/app/storage/contract.py`
 - SQLite adapter and factory: `src/app/storage/sqlite.py`
 - DynamoDB adapter, `SCHEMA`, and factory: `src/app/storage/dynamodb.py`
   (imported only by explicit submodule path)
+- CLI-facing storage factory (env-derived settings):
+  `src/app/storage/factory.py`
 - Adapter-neutral storage conformance suite and its two entries:
   `src/tests/storage_contract/` (DynamoDB Local harness:
   `src/tests/support/dynamodb_local.py`)
@@ -259,11 +350,17 @@ Canonical modules:
   `src/app/auth/api_key_auth.py`, `src/app/auth/principal.py`
 - Resolution/provisioning rules and ID minting:
   `src/app/services/identity.py`, `src/app/services/idgen.py`
+- Administration rules (email resolution, audit formation, transition
+  mapping): `src/app/services/administration.py`
 - Authorization rules and audit builders: `src/app/services/authorization.py`
 - Shared organization-access dependency: `src/app/auth/organization_access.py`
+- Global-administrator dependency (unmounted this phase):
+  `src/app/auth/application_access.py`
 - Tenancy services and routers: `src/app/services/{organization,member}.py`,
   `src/app/api/{organizations,members}.py`
 - API-key service rules and router: `src/app/services/api_key_service.py`,
   `src/app/api/keys.py`
 - First mounted router: `src/app/api/me.py`
 - Session boundary router (outside the `/v1` manifest): `src/app/api/oauth.py`
+- Administrator CLI (the only bootstrap interface; `python -m
+  feednow_auth.admin`): `src/feednow_auth/admin.py`

@@ -1224,15 +1224,16 @@ def test_provision_organization_external_audit_org_enforced_by_condition_check(
 
 # ---------------------------------------------------------------------------
 # Contract surface: with the task-7 compound in place, the four Phase 11
-# login-state/session operations, and the additive Phase 12
-# ``list_users_by_email``, the adapter carries all 24 protocol methods,
-# so the runtime-checkable isinstance proof passes.
+# login-state/session operations, the additive Phase 12
+# ``list_users_by_email``, and the additive Phase 13
+# ``transition_application_role``, the adapter carries all 25 protocol
+# methods, so the runtime-checkable isinstance proof passes.
 # ---------------------------------------------------------------------------
 
 
 def test_adapter_satisfies_the_runtime_checkable_storage_protocol(ddb: _DynamoDb) -> None:
     members = get_protocol_members(Storage)
-    assert len(members) == 24, members
+    assert len(members) == 25, members
     assert all(callable(getattr(DynamoDbStorage, name, None)) for name in members)
     # The same proof the SQLite adapter carries: a constructed adapter is an
     # instance of the protocol, not just a structural look-alike.

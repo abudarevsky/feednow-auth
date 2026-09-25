@@ -1,4 +1,5 @@
-"""Audit-hygiene acceptance sweep (Phase 04 task 6; extended by Phase 05 task 7).
+"""Audit-hygiene acceptance sweep (Phase 04 task 6; extended by Phase 05 task 7,
+Phase 11 task 12, and Phase 13 task 8).
 
 Runs the **full mutation + denial battery** for Phase 04 against the real
 stack (provisioning via ``/v1/me``, organization create, member add/remove,
@@ -27,6 +28,14 @@ The Phase 11 extension (task 12) drives the full ``/oauth/login`` →
 in vocabulary, and the authorization code, login state, PKCE verifier, and
 access token appear in no audit row (the login state is consumed and the
 session row carries only opaque ids).
+
+The Phase 13 extension (task 8) drives the out-of-band administration path
+(the ``app.services.administration`` grant/revoke over the real SQLite
+adapter — the CLI's exact pipeline) and sweeps every
+``user.application_role.*`` audit row it writes: the two new actions stay in
+the §16 vocabulary with the pinned two-key ``{"from_role", "to_role"}``
+metadata, idempotent no-ops and the missing/ambiguous refusals write nothing,
+and no email, provider ``sub``, token, or auth-code material rides any row.
 """
 
 from __future__ import annotations
@@ -69,6 +78,13 @@ from app.models.ids import ExternalIdentityId, MembershipId, OrganizationId, Use
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.user import User
+from app.services.administration import (
+    AdministratorNotFoundError,
+    AmbiguousAdministratorEmailError,
+    grant_administrator,
+    revoke_administrator,
+)
+from app.storage.contract import RoleTransitionOutcome
 from app.storage.sqlite import SQLiteStorage
 
 _T0 = datetime(2026, 9, 13, 17, 0, 0, tzinfo=UTC)
@@ -83,9 +99,12 @@ _PEPPER = b"integration-hygiene-pepper-0123456789ab"
 _SENTINEL_SUB = "123e4567-e89b-12d3-a456-426614174099"
 _SENTINEL_EMAIL = "hygiene-victim@example.test"
 
-#: §16 vocabulary (the full set; Phase 04 can only produce the first five).
+#: §16 vocabulary (the full set; Phase 04 can only produce the first five,
+#: Phase 13 adds the two ``user.application_role.*`` transitions).
 _SPEC_16_ACTIONS = {
     "user.created",
+    "user.application_role.granted",
+    "user.application_role.revoked",
     "organization.created",
     "membership.created",
     "membership.removed",
@@ -95,9 +114,12 @@ _SPEC_16_ACTIONS = {
 }
 
 #: Decision-4/7 pinned metadata key sets, per action (Phase 05 adds the two
-#: ``api_key.*`` shapes pinned by decisions 9/10).
+#: ``api_key.*`` shapes pinned by decisions 9/10; Phase 13 adds the exact
+#: ``{"from_role", "to_role"}`` pair pinned by spec-13 required behavior 7).
 _PINNED_METADATA_KEYS: dict[str, set[str]] = {
     "user.created": {"provider"},
+    "user.application_role.granted": {"from_role", "to_role"},
+    "user.application_role.revoked": {"from_role", "to_role"},
     "organization.created": {"type"},
     "membership.created": {"role"},
     "membership.removed": {"role"},
@@ -639,3 +661,107 @@ def test_oauth_session_flow_audits_stay_in_vocabulary_and_secret_free(
     session_blob = json.dumps([list(row) for row in session_rows])
     for material in (_SENTINEL_EMAIL, token_endpoint.token, _FLOW_CODE, state):
         assert material not in session_blob
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 task-8 extension: the out-of-band administration transitions audit
+# the same way — every user.application_role.* row the integration path can
+# write stays in vocabulary, carries only the pinned two-key metadata, and
+# holds no email / sub / token / auth-code material
+# ---------------------------------------------------------------------------
+
+#: Distinct sentinel identities for the administration battery (the sweep
+#: proves none of them — nor the fake bearer material below — ever rides an
+#: audit row).
+_ROLE_EMAIL_1 = "role-admin-one@example.test"
+_ROLE_SUB_1 = "5b8f6e2d-1c3a-4f7e-9d2b-8a0c1e2f3a4b"
+_ROLE_EMAIL_2 = "role-admin-two@example.test"
+_ROLE_SUB_2 = "6c9a7f3e-2d4b-5a8f-0e3c-9b1d2f3a4b5c"
+_ROLE_FAKE_TOKEN = "eyJhbGciOiJSUzI1NiJ9.NEVER-AUDIT.SflKxwRJSMeKKF2QT4fwpM"
+_ROLE_FAKE_AUTH_CODE = "role-admin-code-NEVER-AUDIT"
+
+
+def test_application_role_transition_audits_stay_in_vocabulary_and_secret_free(
+    env: _HygieneEnv,
+) -> None:
+    """Grant/revoke through the real service pipeline, then sweep.
+
+    ``grant_administrator``/``revoke_administrator`` over the env's SQLite
+    adapter are exactly what the task-5 CLI runs (the CLI adds only exit-code
+    mapping), so the rows written here are the rows the administration path
+    can write. The battery covers both transitions, the idempotent no-op
+    (still one audit), and the two read-only refusals (unknown and ambiguous
+    email — neither may write a row).
+    """
+    _seed_user(env.storage, "usr_role1", _ROLE_SUB_1, _ROLE_EMAIL_1)
+    _seed_user(env.storage, "usr_role2", _ROLE_SUB_2, _ROLE_EMAIL_2)
+    _seed_org(env.storage, "org_anchor", "role-anchor")
+    _seed_membership(env.storage, "org_anchor", "usr_role1", MembershipRole.MEMBER, "mem_role1")
+    _seed_membership(env.storage, "org_anchor", "usr_role2", MembershipRole.MEMBER, "mem_role2")
+
+    # --- battery -------------------------------------------------------------
+    first = grant_administrator(env.storage, _ROLE_EMAIL_1)
+    assert first.outcome is RoleTransitionOutcome.TRANSITIONED
+    repeat = grant_administrator(env.storage, _ROLE_EMAIL_1)
+    assert repeat.outcome is RoleTransitionOutcome.NO_CHANGE
+    second = grant_administrator(env.storage, _ROLE_EMAIL_2)
+    assert second.outcome is RoleTransitionOutcome.TRANSITIONED
+    revoked = revoke_administrator(env.storage, _ROLE_EMAIL_1)
+    assert revoked.outcome is RoleTransitionOutcome.TRANSITIONED
+
+    # Read-only refusals: unknown email, then an ambiguous one (Phase 12 made
+    # email non-unique) — neither may write anything.
+    with pytest.raises(AdministratorNotFoundError):
+        grant_administrator(env.storage, "nobody@example.test")
+    _seed_user(env.storage, "usr_role3", "role3-sub", _ROLE_EMAIL_2)
+    with pytest.raises(AmbiguousAdministratorEmailError):
+        grant_administrator(env.storage, _ROLE_EMAIL_2)
+
+    # --- sweep every audit row -----------------------------------------------
+    rows_a = _all_audit_rows(env.db_path)
+    actions = {row["action"] for row in rows_a}
+    assert actions <= _SPEC_16_ACTIONS, f"off-vocabulary actions: {actions - _SPEC_16_ACTIONS}"
+    assert actions == {"user.application_role.granted", "user.application_role.revoked"}
+    for row in rows_a:
+        assert row["action"] in _PINNED_METADATA_KEYS, row["action"]
+        metadata = json.loads(row["metadata"])
+        assert set(metadata) == _PINNED_METADATA_KEYS[row["action"]], row
+        # The pinned out-of-band shape: the affected user is both target and
+        # actor (the CLI has no operator identity), anchored on the user's
+        # earliest active organization.
+        assert row["target_type"] == "user"
+        assert str(row["target_id"]).startswith("usr_")
+        assert row["actor_type"] == "user"
+        assert row["actor_id"] == row["target_id"]
+        assert row["organization_id"] == "org_anchor"
+    granted = [row for row in rows_a if row["action"] == "user.application_role.granted"]
+    revoked_rows = [row for row in rows_a if row["action"] == "user.application_role.revoked"]
+    # Two grants transitioned, the repeat no-op wrote nothing, refusals wrote
+    # nothing: exactly three rows total.
+    assert len(rows_a) == 3
+    assert [json.loads(row["metadata"]) for row in granted] == [
+        {"from_role": "user", "to_role": "admin"},
+        {"from_role": "user", "to_role": "admin"},
+    ]
+    assert [json.loads(row["metadata"]) for row in revoked_rows] == [
+        {"from_role": "admin", "to_role": "user"}
+    ]
+    assert {row["target_id"] for row in granted} == {"usr_role1", "usr_role2"}
+    assert [row["target_id"] for row in revoked_rows] == ["usr_role1"]
+
+    # No secret/PII material anywhere (AGENTS.md / spec 13 behavior 7): the
+    # emails and provider subs of the seeded users, and fake token/auth-code
+    # sentinels that no code path here even receives, all stay out.
+    serialized_all = json.dumps(rows_a)
+    for material in (
+        _ROLE_EMAIL_1,
+        _ROLE_EMAIL_2,
+        _ROLE_SUB_1,
+        _ROLE_SUB_2,
+        _ROLE_FAKE_TOKEN,
+        _ROLE_FAKE_AUTH_CODE,
+    ):
+        assert material not in serialized_all
+    assert "@" not in serialized_all
+    assert "bearer" not in serialized_all.lower()
+    assert "eyJ" not in serialized_all

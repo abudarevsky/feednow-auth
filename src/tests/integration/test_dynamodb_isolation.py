@@ -12,6 +12,19 @@ names so ``from . import dynamodb`` inside ``app/storage`` cannot smuggle
 it past a substring check). Catching a driver exception requires importing
 it, so the import ban covers AC 1's "catches" clause structurally.
 
+Phase 13 exception (pinned, narrow): ``storage/factory.py`` — the
+CLI-facing configuration→adapter seam — may import the adapter module
+``app.storage.dynamodb`` (in practice its documented
+``open_dynamodb_storage`` factory function), mirroring how the Lambda
+composition root (``deploy/aws/runtime/handler.py``, outside the scanned
+tree) has always consumed it. The carve-out is **module-target-level**: any
+symbol of the adapter module would pass this scan, and the restriction to
+the factory function is by convention plus the companion pin in
+``src/tests/unit/test_storage_factory.py`` (which limits the factory's
+whole import closure to ``app.storage.*``). The driver roots
+``boto3``/``botocore`` stay absolutely banned everywhere except the
+adapter, and the positive control below is unchanged.
+
 The positive-control test proves the scan is not vacuous: the adapter module
 is the **only** file under ``src/app`` whose imports mention the drivers.
 The final test re-runs the established subprocess-isolated proof for the
@@ -33,6 +46,10 @@ SRC_APP: Path = SRC_ROOT / "app"
 
 #: The adapter module is the one place DynamoDB-specific code may live.
 ADAPTER_PATH: Path = SRC_APP / "storage" / "dynamodb.py"
+
+#: Phase 13: the CLI-facing factory may import the adapter module (never the
+#: drivers) — see the module docstring for the pinned, narrow exception.
+FACTORY_PATH: Path = SRC_APP / "storage" / "factory.py"
 
 #: Driver package roots banned everywhere else under ``src/app``.
 BANNED_ROOTS: frozenset[str] = frozenset({"boto3", "botocore"})
@@ -123,7 +140,18 @@ def test_no_app_module_outside_the_adapter_touches_dynamo_or_the_adapter() -> No
     for path in _app_files():
         if path == ADAPTER_PATH:
             continue
-        banned = _banned_targets(_resolved_imports(path))
+        targets = _resolved_imports(path)
+        if path == FACTORY_PATH:
+            # Phase 13 narrow exception (module docstring): the factory may
+            # reach the adapter module by explicit path; driver roots stay
+            # absolutely banned, and test_storage_factory.py pins the
+            # factory's closure to app.storage.* only.
+            targets = {
+                target
+                for target in targets
+                if target != BANNED_MODULE and not target.startswith(f"{BANNED_MODULE}.")
+            }
+        banned = _banned_targets(targets)
         offenders.extend(f"{path.relative_to(REPO_ROOT)}: {name}" for name in sorted(banned))
     assert offenders == [], "AC 1 violated (DynamoDB import above the adapter): " + "; ".join(
         offenders

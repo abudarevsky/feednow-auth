@@ -37,6 +37,15 @@ this order before changing the service:
     behind the all-or-nothing config gate with its rollback seam, and the
     two new TTL-enabled storage tables — with the deployed-settings
     operational proof recorded as pending operator execution.
+12. [Phase 13](phases/13-application-administrator-bootstrap-and-operations.md)
+     — administration handoff: the CLI-only application-administrator
+     bootstrap (`python -m feednow_auth.admin`) over an administration
+     service and the atomic `transition_application_role` storage operation
+     (both adapters), the two reviewed role-transition audits, the
+     unmounted global-admin dependency with its uniform-403 rule, and the
+     operator runbook (Docker exec, migration release ordering, rollback,
+     restricted operator IAM policy) — with the live Cognito/AWS operator
+     checks recorded as pending.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

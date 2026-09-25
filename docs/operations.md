@@ -59,7 +59,14 @@ deployed runtime only under the complete session configuration below
 (contract and evidence in
 [docs/phases/11-cognito-authentication-profile-and-session-boundary.md](phases/11-cognito-authentication-profile-and-session-boundary.md)).
 `/v1/*` routes still do not authenticate the `feednow_session` cookie —
-session verification is component-level only. The service still does not
+session verification is component-level only. Phase 13 adds the
+out-of-band administration path — the `python -m feednow_auth.admin` CLI,
+the administration service, the atomic `transition_application_role`
+storage operation on both adapters, and the (unmounted) global-admin
+dependency — with **no** new HTTP route: the deployed route surface is
+unchanged and the frozen `/v1` manifest still holds ten routes. The
+administrator runbook (Docker exec, migration ordering, rollback, and the
+operator IAM policy) is below. The service still does not
 expose an audit read surface (Phase 08). Do not infer those capabilities
 from a passing health check or a green conformance run.
 
@@ -127,20 +134,132 @@ email, Google IdP) and the two manual dev journeys are runbook §7 of
 [RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md): deployed settings,
 not source, are the operational proof.
 
+## Administrator CLI (Phase 13)
+
+The only administrator-bootstrap interface is the operator CLI; the
+contract (semantics, exit codes, env names) is pinned in
+[docs/phases/13-application-administrator-bootstrap-and-operations.md](phases/13-application-administrator-bootstrap-and-operations.md).
+The user must already exist (registered through the Cognito journey) —
+the CLI never provisions users.
+
+Against the local Cognito composition (app service running; full
+procedure in [RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md) §10):
+
+```bash
+cd deploy/docker
+docker compose --profile cognito exec app \
+  python -m feednow_auth.admin grant --email admin@example.com
+docker compose --profile cognito exec app \
+  python -m feednow_auth.admin revoke --email admin@example.com
+```
+
+The exec'd process inherits the app container's environment; ensure
+`FEEDNOW_STORAGE_BACKEND` (and the backend-specific variables, see the
+phase doc) are present in `deploy/docker/.env` — the CLI derives storage
+solely through `app.storage.factory`. Exit codes: `0` success (stdout
+distinguishes `granted` / `already granted` / `revoked` / `already
+revoked`), `1` unexpected failure, `2` usage or unusable storage
+configuration, `3` no user for that email, `4` ambiguous email, `5`
+last-active-admin refusal. `deploy/docker/admin-cli-smoke.sh` proves the
+whole sequence inside the container (seed, grant, repeat grant, last-admin
+revoke) against a per-run SQLite file on the `/data` volume. Deployment
+and container startup never run the CLI and no environment-driven or
+startup-time promotion exists.
+
+### Migration release ordering
+
+**SQLite (forward-only `2 → 3`).** The phase-13 schema adds the
+non-unique `users_application_role_lookup` index and stamps
+`PRAGMA user_version = 3`. Release order:
+
+1. Take a **file copy of the SQLite database before deploying** (cold or
+   WAL-checkpointed). This copy is the only rollback artifact.
+2. Deploy the new code; the first open migrates `2 → 3` in place
+   (data-retaining).
+3. **Rollback = restore the pre-migration file copy.** Pre-phase-13 code
+   rejects an unrecognized stamp loudly (a `user_version = 3` file is
+   neither its current version nor a known migration key), so restoring
+   the copy is mandatory — there is no downgrade migration and pre-13
+   code must never be pointed at the migrated file.
+
+**DynamoDB (additive; order matters).**
+
+1. **CDK first:** deploy the stack delta that adds the
+   `users/by-application-role` GSI (`g_role`/`pk`). GSI creation is
+   online; tables are never replaced.
+2. **Code second:** deploy the phase-13 runtime. New/updated user items
+   carry `g_role` from this point (the CAS write always rewrites it from
+   the same value as `application_role`, so the index can never lag).
+3. **One-time `g_role` backfill** (operator obligation, not a runtime
+   behavior): scan the users table once and set `g_role` =
+   `application_role` on every item that lacks it — items predating
+   Phase 12 have no `application_role` attribute and backfill to
+   `'user'`. Until an item is backfilled it is **invisible** to the
+   `by-application-role` index, so the active-admin guard can see too few
+   admins; that fails **closed** to `LastActiveAdministratorError` (a
+   demotion is refused, never wrongly allowed) and the adapter never
+   falls back to a `Scan`. Run the backfill before relying on revokes.
+4. **Rollback is code-only:** the `by-application-role` GSI and the
+   `g_role` attribute are purely additive and ignored by pre-phase-13
+   code, so **keep the index online on rollback and never drop it as
+   part of a rollback** (index removal is a separate, deliberate cleanup
+   decision) — the documented equivalent of Phase 12's pinned "GSI add
+   is online and reversible" statement.
+
+### Operator IAM policy (AWS)
+
+The CLI runs **outside** Lambda under a separately restricted operator
+role — it is deliberately **not** added to the Lambda execution role,
+and carries no pepper/Secrets Manager/Cognito access. The policy is
+scoped to exactly the CLI's DynamoDB path (email resolution + audit-anchor
+read + transition), on the environment-prefixed table ARNs (e.g.
+`feednow-auth-<env>-users`):
+
+| Resource | Actions | Why |
+| --- | --- | --- |
+| `users` (base table) | `GetItem`, `Query`, `UpdateItem`, `ConditionCheckItem` | target read, CAS update, in-transaction checks (base `Query` is required because GSI reads authorize against the base ARN too, per the stack's own comment) |
+| `users/by-email` (index) | `Query` | the service's `list_users_by_email` resolution |
+| `users/by-application-role` (index) | `Query` | the active-admin guard |
+| `memberships` (base) + `memberships/by-user` (index) | `Query` | the audit-anchor `list_user_organizations` read |
+| `organizations` | `BatchGetItem`, `ConditionCheckItem` | anchor read reassembly + the transition's in-transaction parent check |
+| `audit_events` | `PutItem` **only** | audit is append-only and no adapter operation ever reads it — no `GetItem`/`Get` grant |
+
+No `Scan`, no writes to `organizations`/`memberships`, no other table
+touched. Separately, the Lambda execution role gained exactly one
+accepted read: mirroring the `by-application-role` index into the stack
+`_SCHEMA` extends it with `Query` on that index even though no Lambda
+code path queries it (the transition is CLI-only); this is accepted
+because the grant exposes no data the role cannot already read (base-table
+`GetItem`/`Query` on the same `users` items are already granted) and
+excludes nothing writable, while an exclusion mechanism would fork the
+`_SCHEMA` mirror invariant pinned field-for-field by
+`src/tests/unit/test_cdk_dynamodb.py` (justification recorded in the
+`INDEX_MATRIX` docstring of `src/tests/unit/test_cdk_iam.py`).
+
 ## Verification
 
 ```bash
 uv run pytest -q --tb=short                       # default env: DynamoDB Local cases skip by name
-uv run pytest src/tests/storage_contract -q       # SQLite conformance entry (74)
+uv run pytest src/tests/storage_contract -q       # SQLite conformance entry (86)
 uv run ruff check .
 uv run ruff format --check .
 git diff --check
+
+# Phase 13 focused (storage transition, factory, service, dependency, CLI, hygiene):
+uv run pytest src/tests/unit/test_storage_contract.py \
+  src/tests/unit/test_sqlite_identity_ops.py src/tests/unit/test_storage_factory.py \
+  src/tests/unit/test_administration_service.py src/tests/integration/test_administration_sqlite.py \
+  src/tests/unit/test_application_access.py src/tests/integration/test_application_admin_dependency.py \
+  src/tests/unit/test_admin_cli.py src/tests/integration/test_admin_cli_sqlite.py \
+  src/tests/integration/test_audit_hygiene.py -q
 
 # With DynamoDB Local running (see above):
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
   uv run pytest -q                                # full suite, gated cases included
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest src/tests/storage_contract -q     # both adapter entries (74 + 73)
+  uv run pytest src/tests/storage_contract -q     # both adapter entries (86 + 85)
+FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
+  uv run pytest src/tests/integration/test_dynamodb_identity_ops.py -q  # transition parity + race
 ```
 
 Report test results, third-party warnings, environment blocks, and any

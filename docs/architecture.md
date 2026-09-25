@@ -9,6 +9,7 @@ src/app/auth       JWT and API-key authentication resolution
 src/app/services   business rules and use cases
 src/app/models     provider-neutral domain entities and value types
 src/app/storage    storage protocol and adapter implementations
+src/feednow_auth   operator CLI shim (out-of-band administration entrypoint)
 ```
 
 Dependencies point inward: API/auth and services use domain models; services
@@ -125,6 +126,33 @@ bearer contract. The user-info and token endpoints are fixed approved
 HTTPS configuration (constructor-pinned, redirects refused); the session
 modules import no logging and no code, state, verifier, token, or email
 material appears in logs, error envelopes, or redirect targets.
+
+Phase 13 adds the administration boundary (see
+[Phase 13](phases/13-application-administrator-bootstrap-and-operations.md)
+for the pinned contract). Application-admin promotion/revocation is
+**CLI-only bootstrap**: the operator runs `python -m feednow_auth.admin`
+(`src/feednow_auth/admin.py`, a behavior-free shim package shipped in the
+wheel next to `app`), and there is deliberately **no** HTTP bootstrap
+route, no default admin credential, and no startup- or deployment-time
+promotion — the CLI is present in the container but never invoked at
+startup. The dependency direction stays inward:
+
+```text
+python -m feednow_auth.admin (operator, out of band)
+  -> app.storage.factory      env-derived settings -> adapter (no app, no Cognito, no pepper)
+  -> app.services.administration  email -> one usr_, audit anchor, one formed AuditEvent
+  -> Storage.transition_application_role  CAS + audit in one adapter transaction
+```
+
+The service knows only the `Storage` protocol; the last-active-admin guard,
+the CAS, and the audit append are one atomic adapter operation (never
+CLI check-then-write). The global `ApplicationRole` is separate from
+organization membership: `src/app/auth/application_access.py` provides the
+server-side global-admin dependency (human + `ADMIN` only, uniform 403 for
+everything else including admin-owned API keys) for a future administration
+surface and is mounted on **no** production route this phase, while
+organization-membership administration keeps its independent org-local
+`organization_access` role policy — the two vocabularies never inherit.
 
 Dependency direction is preserved: `app/auth` and `app/services` use the
 storage contract and domain models; the verifier knows nothing about storage,
