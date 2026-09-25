@@ -441,3 +441,56 @@ complete Phase 11 session configuration is present. The local capture page
 remains a separate development harness. This phase does not enable cookie-based
 authentication on `/v1/*`; those routes continue to use the bearer-token
 contract.
+
+---
+
+## 10. Administrator CLI via Docker Execution
+
+Phase 13 authorizes exactly one administrator-bootstrap interface: the
+operator CLI shipped inside the container as `python -m feednow_auth.admin`.
+The prod image installs the project with `uv sync --frozen --no-dev`, so the
+`feednow_auth` package is present in the running container with **no**
+Dockerfile CMD/ENTRYPOINT change — the CLI is present but **never invoked at
+startup**; deployment and container start only serve uvicorn, and no
+environment-driven or startup-time promotion exists (spec 13 required
+behavior 4). Role changes happen solely when an operator runs a command.
+
+Against the local Cognito composition (app service running):
+
+```bash
+cd deploy/docker
+docker compose --profile cognito exec app \
+  python -m feednow_auth.admin grant --email admin@example.com
+docker compose --profile cognito exec app \
+  python -m feednow_auth.admin revoke --email admin@example.com
+```
+
+The exec'd process inherits the app container's environment. The CLI derives
+its storage from `FEEDNOW_STORAGE_BACKEND` (required, exactly `sqlite` or
+`dynamodb`) plus the backend-specific variables (`FEEDNOW_SQLITE_PATH` for
+SQLite, already `/data/feednow-auth.db` on the shared volume;
+`FEEDNOW_DYNAMODB_REGION`/`FEEDNOW_TABLE_PREFIX` for DynamoDB). Ensure
+`FEEDNOW_STORAGE_BACKEND` is present in `deploy/docker/.env` before using the
+exec form; a missing or unknown value is a usage error (exit 2) and mutates
+nothing. The user must already exist (registered through the Cognito journey);
+the CLI never provisions users.
+
+### Exit codes (stable operator-facing contract)
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. stdout distinguishes `granted` / `already granted` / `revoked` / `already revoked`; idempotent no-ops exit 0 and write no duplicate audit. |
+| `1` | Unexpected failure (`StorageError` or anything else) — one fixed safe stderr line, never a traceback. |
+| `2` | Usage error (missing/unknown subcommand, missing `--email`) or unusable storage configuration. |
+| `3` | No user exists for that email. |
+| `4` | Ambiguous email — stderr lists the candidate `usr_` ids; nothing is written. |
+| `5` | Refused: the revoke would remove the last active administrator; fully rolled back. |
+
+### Container proof
+
+`deploy/docker/admin-cli-smoke.sh` builds the cognito-profile image and runs
+the whole sequence in one-shot `docker compose run --rm` containers against a
+per-run SQLite file on the `/data` volume: seed through the storage API,
+`grant` (exit 0 + persisted `admin` role read back through the storage API),
+repeat `grant` (`already granted`, exit 0), and last-admin `revoke` (exit 5).
+It prints only fixed messages and internal ids.
