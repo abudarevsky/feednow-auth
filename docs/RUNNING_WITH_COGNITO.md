@@ -153,6 +153,32 @@ an email from the token subject or username. Without that profile source, a
 new identity is rejected before storage is changed. Existing identities are
 resolved without another user-info request.
 
+### Google email verification and existing federated profiles
+
+The dev pool maps Google's `email_verified` claim to `custom:g_verified` (the
+short name is required by Cognito's 20-character custom-attribute-name limit).
+The dedicated `FeedNowAuthGoogleFederationFix-dev` CDK overlay attaches the
+trigger to `PreSignUp` and `PreAuthentication`; it does not create or replace
+the existing pool, app client, Google IdP, or hosted domain. `PreAuthentication`
+is a read-only pass-through because Cognito requires synchronous trigger
+responses within five seconds; it must not call the Cognito admin API.
+
+On first Google registration, the trigger auto-confirms the Cognito user and
+marks its email verified only when the Google claim was mapped to the exact
+value `true`. Legacy profiles require a one-time operator repair, and only
+when `custom:g_verified` is exactly `true`; never infer verification from an
+email match. Cognito's `/oauth2/userInfo` endpoint returns `email_verified` as
+the lowercase strings `true`/`false`; the backend normalizes only those exact
+values to booleans before applying the verified-profile gate. Native Cognito
+email/password sign-up keeps its normal email-code verification flow. No
+email-based identity merge occurs.
+
+To exercise this path, rebuild the local service, then run
+`./cognito-login.sh --provider Google` from `deploy/docker`. Finish Google
+sign-in, paste the callback URL into the script, and expect the `/v1/me` JSON
+profile on stdout. Repeat the login for an existing Google account; Cognito
+updates that federated profile in place rather than deleting or recreating it.
+
 ---
 
 ## 3. Run with Docker Compose
@@ -447,7 +473,8 @@ contract.
 ## 10. Administrator CLI via Docker Execution
 
 Phase 13 authorizes exactly one administrator-bootstrap interface: the
-operator CLI shipped inside the container as `python -m feednow_auth.admin`.
+operator CLI shipped inside the container as `python -m feednow_auth.admin`,
+also available through `scripts/feednow-admin.sh`.
 The prod image installs the project with `uv sync --frozen --no-dev`, so the
 `feednow_auth` package is present in the running container with **no**
 Dockerfile CMD/ENTRYPOINT change — the CLI is present but **never invoked at
@@ -455,15 +482,29 @@ startup**; deployment and container start only serve uvicorn, and no
 environment-driven or startup-time promotion exists (spec 13 required
 behavior 4). Role changes happen solely when an operator runs a command.
 
-Against the local Cognito composition (app service running):
+Against the local Cognito composition (run from the repository root):
 
 ```bash
-cd deploy/docker
-docker compose --profile cognito exec app \
-  python -m feednow_auth.admin grant --email admin@example.com
-docker compose --profile cognito exec app \
-  python -m feednow_auth.admin revoke --email admin@example.com
+./scripts/feednow-admin.sh grant --email admin@example.com
+./scripts/feednow-admin.sh revoke --email admin@example.com
+./scripts/feednow-admin.sh list
 ```
+
+With no `--profile`, this wrapper targets the local Cognito Docker app and its
+configured storage. To target AWS explicitly, supply a named AWS CLI profile;
+also export `FEEDNOW_DYNAMODB_REGION` and `FEEDNOW_TABLE_PREFIX` first:
+
+```bash
+FEEDNOW_DYNAMODB_REGION=eu-north-1 FEEDNOW_TABLE_PREFIX=dev \
+  ./scripts/feednow-admin.sh --profile feednow-dev list
+```
+
+The script forces the DynamoDB backend in AWS mode and refuses a configured
+DynamoDB Local endpoint. `list` prints each user's internal ID, email, status,
+application role, and registration time. Last-login time is currently not
+persisted by FeedNow Auth and is reported as `not recorded`; it is not inferred
+from `updated_at` or Cognito. The DynamoDB listing performs a paginated table
+scan and is intended for infrequent operator use only.
 
 The exec'd process inherits the app container's environment. The CLI derives
 its storage from `FEEDNOW_STORAGE_BACKEND` (required, exactly `sqlite` or

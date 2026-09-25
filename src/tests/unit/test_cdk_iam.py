@@ -180,9 +180,12 @@ def _resources(statement: Mapping[str, Any]) -> list[str]:
 def _statements(env_name: str) -> list[Mapping[str, Any]]:
     """The statements of the single inline policy attached to the runtime role."""
     policies = _template(env_name).find_resources("AWS::IAM::Policy")
-    assert len(policies) == 1, "the runtime role must carry exactly one inline policy"
-    policy = next(iter(policies.values()))
-    assert policy["Properties"]["Roles"] == [{"Ref": _role_logical_id(env_name)}]
+    role_ref = {"Ref": _role_logical_id(env_name)}
+    runtime_policies = [
+        policy for policy in policies.values() if role_ref in policy["Properties"]["Roles"]
+    ]
+    assert len(runtime_policies) == 1, "the runtime role must carry exactly one inline policy"
+    policy = runtime_policies[0]
     document = policy["Properties"]["PolicyDocument"]
     assert document["Version"] == "2012-10-17"
     return list(document["Statement"])
@@ -190,8 +193,13 @@ def _statements(env_name: str) -> list[Mapping[str, Any]]:
 
 def _role_logical_id(env_name: str) -> str:
     roles = _template(env_name).find_resources("AWS::IAM::Role")
-    assert len(roles) == 1, "exactly one role (the Lambda execution role) is expected"
-    return next(iter(roles))
+    runtime_roles = [
+        logical_id
+        for logical_id, role in roles.items()
+        if role["Properties"].get("RoleName") == f"feednow-auth-{env_name}-lambda"
+    ]
+    assert len(runtime_roles) == 1, "exactly one runtime Lambda role is expected"
+    return runtime_roles[0]
 
 
 def _secret_logical_id(env_name: str) -> str:

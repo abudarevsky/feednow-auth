@@ -104,6 +104,24 @@ def _template(env_name: str) -> Template:
 
 def _single(env_name: str, resource_type: str) -> tuple[str, Mapping[str, Any]]:
     resources = _template(env_name).find_resources(resource_type)
+    if resource_type == "AWS::Lambda::Function":
+        resources = {
+            logical_id: resource
+            for logical_id, resource in resources.items()
+            if resource["Properties"].get("FunctionName") == f"feednow-auth-{env_name}"
+        }
+    elif resource_type == "AWS::IAM::Role":
+        resources = {
+            logical_id: resource
+            for logical_id, resource in resources.items()
+            if resource["Properties"].get("RoleName") == f"feednow-auth-{env_name}-lambda"
+        }
+    elif resource_type == "AWS::Logs::LogGroup":
+        resources = {
+            logical_id: resource
+            for logical_id, resource in resources.items()
+            if resource["Properties"].get("LogGroupName") == f"/aws/lambda/feednow-auth-{env_name}"
+        }
     assert len(resources) == 1, f"exactly one {resource_type} is expected, got {len(resources)}"
     return next(iter(resources.items()))
 
@@ -239,8 +257,13 @@ def test_invoke_permissions_are_scoped_to_the_function_arn(env_name: str) -> Non
     _api_id, _api = _single(env_name, "AWS::ApiGatewayV2::Api")
     permissions = _template(env_name).find_resources("AWS::Lambda::Permission")
     # One per route (the shared integration binds each route separately).
-    assert len(permissions) == 2
-    for permission in permissions.values():
+    api_permissions = [
+        permission
+        for permission in permissions.values()
+        if permission["Properties"].get("Principal") == "apigateway.amazonaws.com"
+    ]
+    assert len(api_permissions) == 2
+    for permission in api_permissions:
         properties = permission["Properties"]
         assert properties["Action"] == "lambda:InvokeFunction"
         assert properties["FunctionName"] == {"Fn::GetAtt": [function_id, "Arn"]}
@@ -275,10 +298,13 @@ def json_render(value: Any) -> str:
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
 def test_access_log_format_carries_only_the_five_safe_tokens(env_name: str) -> None:
-    _log_id, _log_group = _single(env_name, "AWS::Logs::LogGroup")
     _stage_id, stage = _single(env_name, "AWS::ApiGatewayV2::Stage")
     settings = stage["Properties"]["AccessLogSettings"]
-    assert settings["DestinationArn"] == {"Fn::GetAtt": [_log_id, "Arn"]}
+    destination = settings["DestinationArn"]
+    assert "Fn::GetAtt" in destination
+    log_id, log_attribute = destination["Fn::GetAtt"]
+    assert log_attribute == "Arn"
+    _log_group = _template(env_name).find_resources("AWS::Logs::LogGroup")[log_id]
     assert settings["Format"] == stack_module.API_ACCESS_LOG_FORMAT
     tokens = frozenset(re.findall(r"\$context\.[A-Za-z.]+", settings["Format"]))
     assert tokens == ALLOWED_CONTEXT_TOKENS
@@ -327,6 +353,7 @@ def test_bundling_copies_runtime_modules_app_and_installs_manylinux_wheels(
     # Handler modules land at the bundle root (handler.handler must resolve) ...
     assert (tmp_path / "handler.py").is_file()
     assert (tmp_path / "secrets_pepper.py").is_file()
+    assert (tmp_path / "cognito_trigger_lambda.py").is_file()
     assert not list(tmp_path.rglob("__pycache__"))
     # ... and src/app is copied as app/ (the handler's `from app...` imports).
     assert (tmp_path / "app" / "main.py").is_file()

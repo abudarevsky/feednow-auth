@@ -120,6 +120,23 @@ def test_pool_self_sign_up_is_enabled_and_email_is_auto_verified(env_name: str) 
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
+def test_pool_has_writable_google_verification_claim_and_cognito_triggers(env_name: str) -> None:
+    properties = _pool(env_name)
+    assert any(
+        attribute.get("Name") == "g_verified" and attribute.get("Mutable") is True
+        for attribute in properties["Schema"]
+    )
+    assert "PreSignUp" in properties["LambdaConfig"]
+    assert "PreAuthentication" in properties["LambdaConfig"]
+    trigger = next(
+        resource["Properties"]
+        for resource in _template(env_name).find_resources("AWS::Lambda::Function").values()
+        if resource["Properties"].get("Handler") == "cognito_trigger_lambda.handler"
+    )
+    assert trigger["Handler"] == "cognito_trigger_lambda.handler"
+
+
+@pytest.mark.parametrize("env_name", ENVIRONMENTS)
 def test_pool_recovers_password_by_verified_email_with_default_templates(env_name: str) -> None:
     properties = _pool(env_name)
     assert properties["AccountRecoverySetting"] == {
@@ -152,6 +169,13 @@ def test_client_uses_authorization_code_grant_with_pkce_scopes(env_name: str) ->
     assert properties["AllowedOAuthFlowsUserPoolClient"] is True
     assert properties["AllowedOAuthFlows"] == ["code"]
     assert sorted(properties["AllowedOAuthScopes"]) == ["email", "openid", "profile"]
+
+
+@pytest.mark.parametrize("env_name", ENVIRONMENTS)
+def test_client_limits_profile_attributes_and_never_writes_email_verified(env_name: str) -> None:
+    properties = _client(env_name)
+    assert set(properties["ReadAttributes"]) == {"email", "email_verified", "name"}
+    assert set(properties["WriteAttributes"]) == {"email", "custom:g_verified"}
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)

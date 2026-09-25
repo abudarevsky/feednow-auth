@@ -1,23 +1,27 @@
-"""Unit proofs for internal JWT token generation with role-based claims.
+"""Unit proofs for internal JWT generation and application-role validation.
 
 The module under test (``src/app/auth/tokens.py``) is proven with real
-PyJWT decoding (the tests are the token's only consumer — the module ships
-generation only):
+PyJWT round trips on both halves:
 
 1. Round trip: ``issue`` mints an ``HS256`` JWT whose registered claims are
    the configured ``iss``/``aud``, the internal ``usr_`` ``sub``, and
-   ``exp = iat + ttl`` with a fresh ``jti``.
+   ``exp = iat + ttl`` with a fresh ``jti``; ``JwtTokenVerifier.verify``
+   accepts exactly those tokens and projects typed claims.
 2. Role-based claims: ``application_role`` mirrors the user's global
    :class:`ApplicationRole`; ``roles`` carries the caller-supplied
    organization-local :class:`MembershipRole` values deduplicated and in
    declaration order; the two vocabularies never mix (an
-   ``ApplicationRole.ADMIN`` is rejected as a membership role).
+   ``ApplicationRole.ADMIN`` is rejected as a membership role) — and on the
+   verification side **application roles are validated, never trusted**:
+   anything outside the closed vocabularies rejects with a fixed reason.
 3. Identity/secrecy in claims: email, display name, and provider material
-   never appear in the token; the pinned ``alg`` is always ``HS256``.
-4. Constructor validation: short/blank/zero-ttl config fails fast with fixed
-   messages that echo no key material; a wrong key cannot decode.
+   never appear in the token; the pinned ``alg`` is always ``HS256``;
+   forgeries (wrong key, foreign algorithm/issuer/audience, expiry) reject.
+4. Constructor validation: short/blank/zero-ttl/bad-leeway config fails fast
+   with fixed messages that echo no key material; a wrong key cannot decode.
 5. Secrecy: the module imports no logging (AST proof) and emits zero log
-   records across issuance (caplog proof), like the session module.
+   records across issuance and verification (caplog proof), like the
+   session module.
 """
 
 from __future__ import annotations
@@ -32,18 +36,34 @@ import jwt
 import pytest
 
 import app.auth.tokens as tokens_module
+from app.auth.errors import TokenValidationError
 from app.auth.tokens import (
     APPLICATION_ROLE_CLAIM,
+    APPLICATION_ROLE_CLAIM_INVALID_MESSAGE,
+    APPLICATION_ROLE_CLAIM_MISSING_MESSAGE,
+    AUDIENCE_CLAIM_MESSAGE,
     AUDIENCE_MESSAGE,
+    DEFAULT_JWT_LEEWAY_SECONDS,
     DEFAULT_JWT_TTL_SECONDS,
+    ISSUER_CLAIM_MESSAGE,
     ISSUER_MESSAGE,
     JWT_ALGORITHM,
+    LEEWAY_MESSAGE,
     MEMBERSHIP_ROLES_MESSAGE,
     ROLES_CLAIM,
+    ROLES_CLAIM_INVALID_MESSAGE,
+    ROLES_CLAIM_MISSING_MESSAGE,
     SIGNING_KEY_TOO_SHORT_MESSAGE,
+    TOKEN_ALGORITHM_MESSAGE,
+    TOKEN_EXPIRED_MESSAGE,
+    TOKEN_MALFORMED_MESSAGE,
+    TOKEN_SIGNATURE_MESSAGE,
+    TOKEN_TYPE_MESSAGE,
     TTL_MESSAGE,
     USER_TYPE_MESSAGE,
+    JwtClaims,
     JwtTokenIssuer,
+    JwtTokenVerifier,
 )
 from app.models.enums import ApplicationRole, MembershipRole, UserStatus
 from app.models.ids import UserId

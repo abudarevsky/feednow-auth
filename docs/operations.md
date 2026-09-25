@@ -142,16 +142,21 @@ contract (semantics, exit codes, env names) is pinned in
 The user must already exist (registered through the Cognito journey) —
 the CLI never provisions users.
 
-Against the local Cognito composition (app service running; full
+Against the local Cognito composition (full
 procedure in [RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md) §10):
 
 ```bash
-cd deploy/docker
-docker compose --profile cognito exec app \
-  python -m feednow_auth.admin grant --email admin@example.com
-docker compose --profile cognito exec app \
-  python -m feednow_auth.admin revoke --email admin@example.com
+./scripts/feednow-admin.sh grant --email admin@example.com
+./scripts/feednow-admin.sh revoke --email admin@example.com
+./scripts/feednow-admin.sh list
 ```
+
+The wrapper defaults to the local Docker application. Add
+`--profile <aws-profile>` before the command to explicitly target AWS; set
+`FEEDNOW_DYNAMODB_REGION` and `FEEDNOW_TABLE_PREFIX` in the environment. The
+list prints user id, email, account status, application role, and registration
+date. Last login is not persisted, so it truthfully prints `not recorded`.
+AWS listing paginates a DynamoDB table scan and should be used infrequently.
 
 The exec'd process inherits the app container's environment; ensure
 `FEEDNOW_STORAGE_BACKEND` (and the backend-specific variables, see the

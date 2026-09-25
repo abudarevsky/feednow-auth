@@ -246,9 +246,9 @@ def test_missing_email_verified_rejected(verified: Any) -> None:
     assert excinfo.value.reason == "profile is missing the email_verified claim"
 
 
-@pytest.mark.parametrize("verified", ["true", 1, 0])
-def test_non_boolean_email_verified_rejected(verified: Any) -> None:
-    """The JSON boolean is required; string/number coercions are never accepted."""
+@pytest.mark.parametrize("verified", ["TRUE", "yes", "1", 1, 0])
+def test_malformed_email_verified_rejected(verified: Any) -> None:
+    """Only JSON booleans and Cognito's exact lowercase strings are accepted."""
     opener = _FakeOpener(response=_FakeResponse(_profile_body(email_verified=verified)))
     with pytest.raises(TokenValidationError) as excinfo:
         _client(opener).fetch(ACCESS_TOKEN, SUBJECT)
@@ -259,6 +259,13 @@ def test_false_email_verified_parses_and_is_gated_by_the_consumer() -> None:
     opener = _FakeOpener(response=_FakeResponse(_profile_body(email_verified=False)))
     profile = _client(opener).fetch(ACCESS_TOKEN, SUBJECT)
     assert profile.email_verified is False
+
+
+@pytest.mark.parametrize(("wire_value", "expected"), [("true", True), ("false", False)])
+def test_cognito_string_email_verified_is_normalized(wire_value: str, expected: bool) -> None:
+    opener = _FakeOpener(response=_FakeResponse(_profile_body(email_verified=wire_value)))
+    profile = _client(opener).fetch(ACCESS_TOKEN, SUBJECT)
+    assert profile.email_verified is expected
 
 
 @pytest.mark.parametrize("name", [7, "x" * 256])

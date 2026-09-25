@@ -47,3 +47,31 @@ specs/wip/           Ordered, reviewable implementation phases
 ## Definition of done for a phase
 
 An implementation agent may mark a phase complete only when its acceptance criteria pass, the listed test evidence is recorded, migrations/infrastructure effects are documented, and the handoff boundary is preserved. Do not start a dependent phase by silently changing a completed phase's contract.
+
+
+## Shared tool execution protocol
+
+All agents may delegate tool operations to @run_tool.
+
+Use @run_tool when the operation involves:
+- Shell commands.
+- Repository exploration.
+- File or symbol discovery.
+- Tests and diagnostics.
+- Large or noisy tool output.
+- Environment inspection.
+
+The caller must specify the purpose and expected outcome.
+
+@run_tool returns verified observations, not raw execution history.
+
+The caller retains ownership of its original task.
+
+Do not delegate source-code modifications to @run_tool.
+
+Do not invoke @run_tool recursively.
+
+Direct tool calls remain permitted when exact content is needed,
+the output is predictably small, or delegation adds no value.
+
+Treat @run_tool status as operation status, not task completion.

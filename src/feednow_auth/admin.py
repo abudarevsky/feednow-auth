@@ -83,6 +83,7 @@ _UNEXPECTED_FAILURE = "error: administrator command failed"
 
 _GRANT = "grant"
 _REVOKE = "revoke"
+_LIST = "list"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -92,10 +93,12 @@ def _build_parser() -> argparse.ArgumentParser:
     usage errors, which exit with code 2 — exactly the pinned contract.
     """
     parser = argparse.ArgumentParser(
-        prog="python -m feednow_auth.admin",
-        description="Grant or revoke the FeedNow application administrator role.",
+        prog="feednow-admin",
+        description="Manage FeedNow application administrator roles.",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True, metavar="{grant,revoke}")
+    subparsers = parser.add_subparsers(
+        dest="command", required=True, metavar="{grant,revoke,list}"
+    )
     grant = subparsers.add_parser(_GRANT, help="promote the user for --email to admin")
     revoke = subparsers.add_parser(_REVOKE, help="demote the user for --email to user")
     for command in (grant, revoke):
@@ -105,6 +108,9 @@ def _build_parser() -> argparse.ArgumentParser:
             metavar="<addr>",
             help="exact email address of the (already registered) user",
         )
+    subparsers.add_parser(
+        _LIST, help="list users, roles, registration date, and login availability"
+    )
     return parser
 
 
@@ -153,6 +159,23 @@ def _run_command(storage: Storage, *, command: str, email: str) -> int:
     return EXIT_SUCCESS
 
 
+def _run_list(storage: Storage) -> int:
+    """Print operator-visible account metadata; login time is not persisted."""
+    try:
+        users = storage.list_users()
+    except Exception:
+        print(_UNEXPECTED_FAILURE, file=sys.stderr)
+        return EXIT_UNEXPECTED
+    print("id\temail\tstatus\trole\tregistered_at\tlast_login")
+    for user in users:
+        registered = user.created_at.isoformat().replace("+00:00", "Z")
+        print(
+            f"{user.id}\t{user.email}\t{user.status}\t{user.application_role}"
+            f"\t{registered}\tnot recorded"
+        )
+    return EXIT_SUCCESS
+
+
 def _close_quietly(storage: Storage | None) -> None:
     """Best-effort adapter release; ``close`` is not on the ``Storage`` protocol.
 
@@ -195,6 +218,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         except Exception:
             print(_UNEXPECTED_FAILURE, file=sys.stderr)
             return EXIT_UNEXPECTED
+        if args.command == _LIST:
+            return _run_list(storage)
         return _run_command(storage, command=args.command, email=args.email)
     finally:
         _close_quietly(storage)

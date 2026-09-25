@@ -1298,6 +1298,26 @@ class DynamoDbStorage:
         users = [user_from_item(item) for item in items]
         return sorted(users, key=lambda user: (user.created_at, str(user.id)))
 
+    def list_users(self) -> list[User]:
+        """Drain the users table for an explicit operator-only report.
+
+        This is deliberately not used by request handlers. DynamoDB has no
+        all-users index; the CLI's infrequent administrative listing performs
+        a paginated Scan and sorts the resulting records deterministically.
+        """
+        table = self._table("users")
+        items: list[Mapping[str, Any]] = []
+        scan_args: dict[str, Any] = {"ConsistentRead": True}
+        while True:
+            response = table.scan(**scan_args)
+            items.extend(response.get("Items", ()))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_args["ExclusiveStartKey"] = last_key
+        users = [user_from_item(item) for item in items]
+        return sorted(users, key=lambda user: (user.created_at, str(user.id)))
+
     def create_external_identity(self, identity: ExternalIdentity) -> ExternalIdentity:
         """Attach a provider identity to an existing user (caller-echo).
 

@@ -1,4 +1,4 @@
-"""Cognito user-pool Lambda triggers for registration events.
+"""Cognito user-pool Lambda triggers for registration and federation.
 
 This module is the trigger **handler code** for the two user-pool lifecycle
 points that report a registration: **Pre sign-up** (a new local, admin-created,
@@ -25,10 +25,15 @@ Dispatch is by ``triggerSource`` (the event carries no trigger-name field):
   :data:`TRIGGER_SOURCE_PRE_SIGN_UP_EXTERNAL`) — a registration attempt. The
   envelope is validated and the email attribute is required; a failure raises
   :class:`CognitoTriggerRejectionError`, which makes Cognito deny the
-  sign-up/user creation. The response is returned empty: the handler never
-  auto-confirms or auto-verifies, so the pool's real email-verification flow
-  (``AutoVerifiedAttributes=["email"]``) stays the only path to
-  ``email_verified`` — the invariant Phase 11's provisioning gate depends on.
+  sign-up/user creation. Native registrations return an empty response and
+  retain Cognito's real email-verification flow. Google registrations are
+  auto-confirmed and auto-verified only when the exact upstream
+  ``email_verified=true`` claim is present in the writable
+  ``custom:g_verified`` mapping.
+- ``PreAuthentication_Authentication`` — pass through without network calls.
+  Cognito requires synchronous trigger responses within five seconds; any
+  one-time repair of legacy federated attributes is an explicit operator
+  action, never part of the sign-in path.
 - ``PostConfirmation_ConfirmSignUp`` — a completed registration: validated the
   same way and returned unchanged.
 - :data:`NON_REGISTRATION_POST_CONFIRMATION_SOURCES`
@@ -47,6 +52,7 @@ attribute, subject, or token material.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -91,6 +97,9 @@ EVENT_STRUCTURE_MESSAGE: Final = "cognito trigger event is malformed"
 TRIGGER_UNSUPPORTED_MESSAGE: Final = "cognito trigger source is not a registration event"
 EMAIL_MISSING_MESSAGE: Final = "registration requires an email attribute"
 EMAIL_TOO_LONG_MESSAGE: Final = "registration email exceeds the supported length"
+GOOGLE_VERIFICATION_MISSING_MESSAGE: Final = "Google email verification evidence is missing"
+GOOGLE_VERIFICATION_ATTRIBUTE: Final = "custom:g_verified"
+PRE_AUTHENTICATION_SOURCE: Final = "PreAuthentication_Authentication"
 
 
 class CognitoTriggerRejectionError(Exception):
@@ -214,19 +223,18 @@ def _event_with_response(event: Mapping[str, Any]) -> dict[str, Any]:
     proceed with pool defaults (no auto-confirm, no auto-verify).
     """
     result = dict(event)
-    if not isinstance(result.get("response"), dict):
-        result["response"] = {}
+    response = result.get("response")
+    result["response"] = dict(response) if isinstance(response, dict) else {}
     return result
 
 
 def handle_pre_sign_up(event: Mapping[str, Any]) -> dict[str, Any]:
     """Validate a sign-up attempt and return the event for Cognito.
 
-    Every ``PreSignUp_*`` source (self-service, admin-created, external
-    first sign-in) is a registration and must carry a bounded email
-    attribute. Rejection denies the sign-up; acceptance returns the event
-    with an empty ``response`` so the pool's own confirmation and real email
-    verification proceed unchanged.
+    Native/admin registrations require a bounded email and leave the response
+    untouched. A Google external registration additionally requires the
+    exact mapped verification claim and asks Cognito to auto-confirm and
+    auto-verify that address. No native registration is auto-verified.
 
     Raises:
         CognitoTriggerRejectionError: malformed event, non-pre-sign-up source,
@@ -235,7 +243,60 @@ def handle_pre_sign_up(event: Mapping[str, Any]) -> dict[str, Any]:
     parsed = parse_cognito_trigger_event(event)
     _require_registration_source(parsed, prefix=PRE_SIGN_UP_SOURCE_PREFIX)
     _require_valid_registration_email(parsed)
+    result = _event_with_response(event)
+    if parsed.trigger_source == TRIGGER_SOURCE_PRE_SIGN_UP_EXTERNAL and _is_google_username(
+        parsed.user_name
+    ):
+        _require_google_verification(parsed)
+        result["response"]["autoConfirmUser"] = True
+        result["response"]["autoVerifyEmail"] = True
+    return result
+
+
+def handle_pre_authentication(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Pass through pre-authentication without delaying or mutating sign-in.
+
+    Cognito requires trigger responses within five seconds. Google proof is
+    handled during first registration by ``PreSignUp_ExternalProvider``;
+    legacy profile repair belongs in an explicit operator workflow.
+    """
+    parsed = parse_cognito_trigger_event(event)
+    if parsed.trigger_source != PRE_AUTHENTICATION_SOURCE:
+        raise CognitoTriggerRejectionError(TRIGGER_UNSUPPORTED_MESSAGE)
     return _event_with_response(event)
+
+
+def _is_google_username(user_name: str) -> bool:
+    """Recognize Cognito's stable external username prefix, case-sensitively."""
+    return user_name.startswith("Google_") and len(user_name) > len("Google_")
+
+
+def _has_google_identity(parsed: CognitoRegistrationEvent) -> bool:
+    """Return true only for a Cognito identities entry from Google."""
+    raw_identities = parsed.user_attributes.get("identities")
+    if not isinstance(raw_identities, str):
+        return False
+    try:
+        identities = json.loads(raw_identities)
+    except ValueError:
+        return False
+    return (
+        _is_google_username(parsed.user_name)
+        and isinstance(identities, list)
+        and any(
+            isinstance(identity, Mapping)
+            and identity.get("providerName") == "Google"
+            and isinstance(identity.get("userId"), str)
+            and bool(identity["userId"])
+            for identity in identities
+        )
+    )
+
+
+def _require_google_verification(parsed: CognitoRegistrationEvent) -> None:
+    """Require Google's verified-email claim after Cognito attribute mapping."""
+    if parsed.user_attributes.get(GOOGLE_VERIFICATION_ATTRIBUTE) != "true":
+        raise CognitoTriggerRejectionError(GOOGLE_VERIFICATION_MISSING_MESSAGE)
 
 
 def handle_post_confirmation(event: Mapping[str, Any]) -> dict[str, Any]:
@@ -259,23 +320,27 @@ def handle_post_confirmation(event: Mapping[str, Any]) -> dict[str, Any]:
     return _event_with_response(event)
 
 
-def cognito_trigger_handler(event: Mapping[str, Any], context: object = None) -> dict[str, Any]:
+def cognito_trigger_handler(
+    event: Mapping[str, Any],
+    context: object = None,
+) -> dict[str, Any]:
     """Lambda entry point: dispatch a registration trigger event by source.
 
-    Bind the deployed function to the user pool's **pre sign-up** and **post
-    confirmation** triggers only. ``context`` is the Lambda context object,
-    unused by design (the handler needs no runtime credentials — it touches no
-    AWS service).
+    Bind the deployed function to **pre sign-up**, **pre authentication**, and
+    **post confirmation**. Trigger handlers never call AWS APIs synchronously;
+    Cognito's hard response deadline is five seconds.
 
     Raises:
         CognitoTriggerRejectionError: anything not routed by the two
             registration trigger prefixes, or the routed handlers' failures.
     """
-    del context  # the registration handlers perform no runtime interaction
+    del context  # the Lambda context contains no business input
     if isinstance(event, Mapping) and isinstance(event.get("triggerSource"), str):
         source: str = event["triggerSource"]
         if source.startswith(PRE_SIGN_UP_SOURCE_PREFIX):
             return handle_pre_sign_up(event)
+        if source == PRE_AUTHENTICATION_SOURCE:
+            return handle_pre_authentication(event)
         if source.startswith(POST_CONFIRMATION_SOURCE_PREFIX):
             return handle_post_confirmation(event)
     raise CognitoTriggerRejectionError(TRIGGER_UNSUPPORTED_MESSAGE)
@@ -286,8 +351,11 @@ __all__ = [
     "EMAIL_MISSING_MESSAGE",
     "EMAIL_TOO_LONG_MESSAGE",
     "EVENT_STRUCTURE_MESSAGE",
+    "GOOGLE_VERIFICATION_ATTRIBUTE",
+    "GOOGLE_VERIFICATION_MISSING_MESSAGE",
     "NON_REGISTRATION_POST_CONFIRMATION_SOURCES",
     "POST_CONFIRMATION_SOURCE_PREFIX",
+    "PRE_AUTHENTICATION_SOURCE",
     "PRE_SIGN_UP_SOURCE_PREFIX",
     "TRIGGER_EVENT_VERSION",
     "TRIGGER_SOURCE_POST_CONFIRMATION_SIGN_UP",
@@ -299,6 +367,7 @@ __all__ = [
     "CognitoTriggerRejectionError",
     "cognito_trigger_handler",
     "handle_post_confirmation",
+    "handle_pre_authentication",
     "handle_pre_sign_up",
     "parse_cognito_trigger_event",
 ]

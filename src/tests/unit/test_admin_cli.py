@@ -102,6 +102,9 @@ class StubStorage:
     def list_users_by_email(self, email: str) -> list[User]:
         return [user for user in self.users if user.email == email]
 
+    def list_users(self) -> list[User]:
+        return sorted(self.users, key=lambda user: (user.created_at, str(user.id)))
+
     def list_user_organizations(self, user_id: UserId, page: PageParams) -> Page[Organization]:
         return Page(items=self.organizations[: page.limit], limit=page.limit, next_cursor=None)
 
@@ -475,6 +478,31 @@ def test_storage_open_failure_exits_one(
     assert captured.out == ""
     assert captured.err.strip() == admin._UNEXPECTED_FAILURE
     assert "cannot open adapter" not in captured.err
+
+
+def test_list_prints_user_role_registration_and_unavailable_login(
+    monkeypatch: pytest.MonkeyPatch, sqlite_env: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    storage = StubStorage(
+        [
+            _user("usr_list_user"),
+            _user(
+                "usr_list_admin",
+                email="admin@example.test",
+                application_role=ApplicationRole.ADMIN,
+            ),
+        ]
+    )
+    _install(monkeypatch, storage)
+
+    code = admin.main(["list"])
+
+    assert code == admin.EXIT_SUCCESS
+    output = capsys.readouterr().out
+    assert "id\temail\tstatus\trole\tregistered_at\tlast_login" in output
+    assert "usr_list_user\tadmin@example.test\tactive\tuser\t" in output
+    assert "usr_list_admin\tadmin@example.test\tactive\tadmin\t" in output
+    assert output.count("not recorded") == 2
 
 
 def test_anchor_error_class_is_not_special_cased() -> None:

@@ -79,9 +79,11 @@ def test_sensitive_values_are_not_printed_or_written_as_output(script: str) -> N
 
 
 def test_access_token_is_used_only_for_the_v1_me_response(script: str) -> None:
-    uses = [line.strip() for line in script.splitlines() if "${ACCESS_TOKEN}" in line]
-
-    assert uses == ['curl -fsS "${API_URL}/v1/me" -H "Authorization: Bearer ${ACCESS_TOKEN}"']
+    uses = [line for line in script.splitlines() if "${ACCESS_TOKEN}" in line]
+    assert len(uses) == 1
+    assert '"${API_URL}/v1/me"' in script
+    assert '"Authorization: Bearer ${ACCESS_TOKEN}"' in uses[0]
+    assert "${ACCESS_TOKEN}" not in script.replace(uses[0], "")
 
 
 def test_token_response_is_not_persisted(script: str) -> None:

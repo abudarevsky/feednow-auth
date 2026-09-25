@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import json
 import logging
 from pathlib import Path
 from typing import Any, Final
@@ -35,12 +36,16 @@ from app.auth.cognito_triggers import (
     EMAIL_MISSING_MESSAGE,
     EMAIL_TOO_LONG_MESSAGE,
     EVENT_STRUCTURE_MESSAGE,
+    GOOGLE_VERIFICATION_ATTRIBUTE,
+    GOOGLE_VERIFICATION_MISSING_MESSAGE,
     NON_REGISTRATION_POST_CONFIRMATION_SOURCES,
+    PRE_AUTHENTICATION_SOURCE,
     TRIGGER_UNSUPPORTED_MESSAGE,
     CognitoRegistrationEvent,
     CognitoTriggerRejectionError,
     cognito_trigger_handler,
     handle_post_confirmation,
+    handle_pre_authentication,
     handle_pre_sign_up,
     parse_cognito_trigger_event,
 )
@@ -80,6 +85,20 @@ def _event(trigger_source: str, *, email: object = USER_EMAIL) -> dict[str, Any]
         "request": {"userAttributes": attributes},
         "response": {},
     }
+
+
+def _google_event(trigger_source: str) -> dict[str, Any]:
+    event = _event(trigger_source)
+    event["userName"] = "Google_112527735823543416336"
+    event["request"]["userAttributes"].update(
+        {
+            "identities": json.dumps(
+                [{"providerName": "Google", "userId": "112527735823543416336"}]
+            ),
+            GOOGLE_VERIFICATION_ATTRIBUTE: "true",
+        }
+    )
+    return event
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +177,21 @@ def test_pre_sign_up_accepts_email_at_the_bound() -> None:
     assert handle_pre_sign_up(_event("PreSignUp_SignUp", email=email))
 
 
+def test_google_pre_sign_up_auto_confirms_and_verifies_only_with_verified_claim() -> None:
+    event = _google_event("PreSignUp_ExternalProvider")
+    result = handle_pre_sign_up(event)
+    assert result["response"] == {"autoConfirmUser": True, "autoVerifyEmail": True}
+    assert event["response"] == {}
+
+
+def test_google_pre_sign_up_fails_closed_without_verified_claim() -> None:
+    event = _google_event("PreSignUp_ExternalProvider")
+    del event["request"]["userAttributes"][GOOGLE_VERIFICATION_ATTRIBUTE]
+    with pytest.raises(CognitoTriggerRejectionError) as excinfo:
+        handle_pre_sign_up(event)
+    assert str(excinfo.value) == GOOGLE_VERIFICATION_MISSING_MESSAGE
+
+
 @pytest.mark.parametrize("source", PRE_SIGN_UP_SOURCES)
 @pytest.mark.parametrize("email", [..., "", "   x" * 200, 42, True, ["a@example.com"]])
 def test_pre_sign_up_rejects_bad_email_attributes(source: str, email: object) -> None:
@@ -231,9 +265,25 @@ def test_handler_dispatches_post_confirmation_sources() -> None:
     assert cognito_trigger_handler(_event("PostConfirmation_ConfirmSignUp"), None)
 
 
+def test_google_pre_authentication_is_a_fast_read_only_passthrough() -> None:
+    event = _google_event(PRE_AUTHENTICATION_SOURCE)
+    assert handle_pre_authentication(event) == event
+
+
+def test_native_pre_authentication_remains_a_passthrough() -> None:
+    event = _event(PRE_AUTHENTICATION_SOURCE)
+    assert handle_pre_authentication(event) == event
+
+
+def test_pre_authentication_does_not_change_verification_claims() -> None:
+    event = _google_event(PRE_AUTHENTICATION_SOURCE)
+    event["request"]["userAttributes"][GOOGLE_VERIFICATION_ATTRIBUTE] = "false"
+    assert handle_pre_authentication(event) == event
+
+
 @pytest.mark.parametrize(
     "source",
-    ["CustomMessage_SignUp", "PreAuthentication_Authentication", "Define_Auth_Challenge"],
+    ["CustomMessage_SignUp", "Define_Auth_Challenge"],
 )
 def test_handler_fails_closed_on_foreign_triggers(source: str) -> None:
     with pytest.raises(CognitoTriggerRejectionError) as excinfo:

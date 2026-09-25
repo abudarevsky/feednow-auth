@@ -131,5 +131,31 @@ if not isinstance(token, str) or not token:
 print(token)
 ')"
 
-curl -fsS "${API_URL}/v1/me" -H "Authorization: Bearer ${ACCESS_TOKEN}"
-echo
+if ! ME_RESPONSE="$(curl -sS -w $'\n%{http_code}' "${API_URL}/v1/me" \
+    -H "Authorization: Bearer ${ACCESS_TOKEN}")"; then
+    echo "FeedNow /v1/me request failed before receiving an HTTP response" >&2
+    exit 1
+fi
+ME_STATUS="${ME_RESPONSE##*$'\n'}"
+ME_BODY="${ME_RESPONSE%$'\n'*}"
+if [[ "${ME_STATUS}" != "200" ]]; then
+    ME_ERROR="$(printf '%s' "${ME_BODY}" | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+    code = payload.get("code") if isinstance(payload, dict) else None
+    message = payload.get("message") if isinstance(payload, dict) else None
+except (ValueError, TypeError):
+    code = message = None
+
+if isinstance(code, str) and isinstance(message, str):
+    print(f"{code}: {message[:240]}")
+else:
+    print("API returned an unreadable error response")
+')"
+    echo "FeedNow /v1/me returned HTTP ${ME_STATUS}: ${ME_ERROR}" >&2
+    exit 1
+fi
+printf '%s\n' "${ME_BODY}"

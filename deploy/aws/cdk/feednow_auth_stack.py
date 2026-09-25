@@ -34,14 +34,17 @@ from aws_cdk.aws_apigatewayv2_integrations import HttpLambdaIntegration
 from aws_cdk.aws_cognito import (
     AccountRecovery,
     AuthFlow,
+    ClientAttributes,
     CognitoDomainOptions,
     OAuthFlows,
     OAuthScope,
     OAuthSettings,
     SignInAliases,
+    StringAttribute,
     UserPool,
     UserPoolClient,
     UserPoolDomain,
+    UserPoolOperation,
 )
 from aws_cdk.aws_dynamodb import (
     Attribute,
@@ -315,6 +318,10 @@ class _LocalBundling:
 
         for module in sorted((project_root / "deploy" / "aws" / "runtime").glob("*.py")):
             shutil.copy(module, out / module.name)
+        shutil.copy(
+            project_root / "src" / "cognito_trigger_lambda.py",
+            out / "cognito_trigger_lambda.py",
+        )
         shutil.copytree(
             project_root / "src" / "app",
             out / "app",
@@ -538,7 +545,54 @@ class FeedNowAuthStack(cdk.Stack):
             sign_in_aliases=SignInAliases(email=True),
             self_sign_up_enabled=True,
             account_recovery=AccountRecovery.EMAIL_ONLY,
+            custom_attributes={
+                # email_verified is read-only to app clients. Keep Google's
+                # upstream proof in a writable immutable-in-meaning (but
+                # Cognito-mapped/mutable) attribute; the trigger alone may
+                # translate verified=true into Cognito's standard flag.
+                "g_verified": StringAttribute(min_len=4, max_len=5, mutable=True),
+            },
             removal_policy=removal_policy,
+        )
+
+        # Cognito must translate trusted upstream verification into its own
+        # read-only email_verified field. First-time Google identities are
+        # handled in PreSignUp; legacy profile repair is an operator action.
+        trigger_log_group = LogGroup(
+            self,
+            "CognitoTriggerLogs",
+            log_group_name=f"/aws/lambda/{resolved.resource_prefix}cognito-trigger",
+            retention=RetentionDays.ONE_WEEK,
+            removal_policy=cdk.RemovalPolicy.DESTROY,
+        )
+        trigger_role = Role(
+            self,
+            "CognitoTriggerRole",
+            assumed_by=cast(IPrincipal, cast(object, ServicePrincipal("lambda.amazonaws.com"))),
+            description="Least-privilege Cognito registration trigger role.",
+        )
+        trigger_role.add_to_policy(
+            PolicyStatement(
+                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
+                resources=[f"{trigger_log_group.log_group_arn}:*"],
+            )
+        )
+        self.cognito_trigger_function = Function(
+            self,
+            "CognitoTriggerFunction",
+            function_name=f"{resolved.resource_prefix}cognito-trigger",
+            runtime=Runtime.PYTHON_3_13,
+            architecture=Architecture.X86_64,
+            memory_size=128,
+            timeout=cdk.Duration.seconds(10),
+            handler="cognito_trigger_lambda.handler",
+            code=_runtime_lambda_code(),
+            role=cast(IRole, cast(object, trigger_role)),
+            log_group=trigger_log_group,
+        )
+        self.user_pool.add_trigger(UserPoolOperation.PRE_SIGN_UP, self.cognito_trigger_function)
+        self.user_pool.add_trigger(
+            UserPoolOperation.PRE_AUTHENTICATION, self.cognito_trigger_function
         )
 
         # Public (no-secret) client: PKCE is the only safe authorization-code
@@ -554,6 +608,16 @@ class FeedNowAuthStack(cdk.Stack):
             user_pool_client_name=resolved.cognito_client_name,
             generate_secret=False,
             auth_flows=AuthFlow(user_password=True),
+            read_attributes=(
+                ClientAttributes().with_standard_attributes(
+                    email=True, email_verified=True, fullname=True
+                )
+            ),
+            write_attributes=(
+                ClientAttributes()
+                .with_standard_attributes(email=True)
+                .with_custom_attributes("g_verified")
+            ),
             o_auth=OAuthSettings(
                 callback_urls=list(callback_urls),
                 logout_urls=list(callback_urls),

@@ -941,6 +941,13 @@ class SQLiteStorage:
         ).fetchall()
         return [user_from_row(row) for row in rows]
 
+    def list_users(self) -> list[User]:
+        """Return all users in deterministic registration order for operators."""
+        rows = self._connection().execute(
+            "SELECT * FROM users ORDER BY created_at, id"
+        ).fetchall()
+        return [user_from_row(row) for row in rows]
+
     def _insert_external_identity_row(
         self,
         conn: sqlite3.Connection,

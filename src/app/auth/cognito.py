@@ -671,8 +671,18 @@ class CognitoUserInfoClient:
 
         if "email_verified" not in payload or payload["email_verified"] is None:
             raise TokenValidationError("profile is missing the email_verified claim")
-        email_verified = payload["email_verified"]
-        if not isinstance(email_verified, bool):
+        raw_email_verified = payload["email_verified"]
+        # OIDC defines email_verified as a JSON boolean, but Cognito's
+        # /oauth2/userInfo endpoint serializes it as the lowercase string
+        # "true" or "false". Accept those exact wire values and normalize
+        # them; arbitrary strings and numeric values still fail closed.
+        if isinstance(raw_email_verified, bool):
+            email_verified = raw_email_verified
+        elif raw_email_verified == "true":
+            email_verified = True
+        elif raw_email_verified == "false":
+            email_verified = False
+        else:
             raise TokenValidationError("profile email_verified claim is invalid")
 
         raw_name = payload.get("name")

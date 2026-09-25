@@ -26,7 +26,9 @@ issuance; no password storage or custom password endpoint was added.
   ≤320, `email_verified` exactly `True`, display name bounded or `None`),
   the `ProfileSource` protocol, and `CognitoUserInfoClient` (constructor-
   pinned absolute-HTTPS user-info endpoint, bearer-only GET, redirects
-  refused, fixed safe reasons). `CognitoClaims.email` is now `str | None`
+  refused, fixed safe reasons); its wire parser normalizes Cognito's exact
+  lowercase `email_verified` strings (`"true"`/`"false"`) to booleans and
+  rejects every other representation. `CognitoClaims.email` is now `str | None`
   — the `sub@cognito.invalid` placeholder is gone.
 - `src/app/auth/session.py`: `SessionManager` (opaque
   `secrets.token_urlsafe(32)` session ids over the storage contract;

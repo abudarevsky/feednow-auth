@@ -337,6 +337,14 @@ class Storage(Protocol):
         """
         ...
 
+    def list_users(self) -> list[User]:
+        """Return all users ordered by ``(created_at, id)`` for operator reports.
+
+        This read-only administrative operation is intentionally unfiltered;
+        callers must not expose it as a public endpoint.
+        """
+        ...
+
     def create_external_identity(self, identity: ExternalIdentity) -> ExternalIdentity:
         """Attach a provider identity to an existing user.
 
