@@ -177,9 +177,14 @@ value `true`. Legacy profiles require a one-time operator repair, and only
 when `custom:g_verified` is exactly `true`; never infer verification from an
 email match. Cognito's `/oauth2/userInfo` endpoint returns `email_verified` as
 the lowercase strings `true`/`false`; the backend normalizes only those exact
-values to booleans before applying the verified-profile gate. Native Cognito
-email/password sign-up keeps its normal email-code verification flow. No
-email-based identity merge occurs.
+values to booleans before applying the verified-profile gate. Cognito can
+nevertheless leave the standard attribute false on a newly created Google
+profile even when the mapped Google proof is true. With the configured
+`openid profile` scope, `/oauth2/userInfo` also returns readable custom
+attributes; the backend therefore accepts the exact `custom:g_verified=true`
+proof when the standard value is false. Missing or non-exact proof does not
+pass the gate. Native Cognito email/password sign-up keeps its normal
+email-code verification flow. No email-based identity merge occurs.
 
 To exercise this path, rebuild the local service, then run
 `./cognito-login.sh --provider Google` from `deploy/docker`. Finish Google

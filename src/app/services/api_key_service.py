@@ -278,6 +278,7 @@ def create_api_key(
     api_key = ApiKey(
         id=minted.api_key_id,
         organization_id=organization_id,
+        service_id="vispector",
         created_by_user_id=actor_user_id,
         name=name,
         key_id=minted.key_id,

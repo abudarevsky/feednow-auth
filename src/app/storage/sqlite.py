@@ -144,7 +144,7 @@ from app.storage.contract import (
 #: only with a spec-revision-approved migration story recorded in
 #: :data:`_MIGRATIONS`; an unrecognized stamp is rejected loudly rather than
 #: reinterpreted.
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 5
 
 #: Wall-clock bound (ms) for lock contention under WAL, per the breakdown's
 #: connection model (concurrency tests use barriers + WAL, never sleeps).
@@ -158,8 +158,8 @@ _BUSY_TIMEOUT_MS: Final = 5000
 # ``users_application_role_lookup`` index (backs the active-admin guard's role
 # predicate in ``transition_application_role``); the additive Phase 11 session
 # tables live in _SESSION_SCHEMA_STATEMENTS below. A *fresh* database builds
-# this shape directly; a v1 or v2 file reaches it through the ordered
-# ``1 → 2 → 3`` chain in _MIGRATIONS, so all shapes converge.
+# this shape directly; a v1/v2/v3/v4 file reaches it through the ordered
+# ``1 → 2 → 3 → 4 → 5`` chain in _MIGRATIONS, so all shapes converge.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
@@ -195,6 +195,8 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         slug       TEXT NOT NULL,
         type       TEXT NOT NULL,
         status     TEXT NOT NULL,
+        name_status TEXT NOT NULL DEFAULT 'confirmed',
+        suspended_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
@@ -216,6 +218,7 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     CREATE TABLE IF NOT EXISTS api_keys (
         id                 TEXT PRIMARY KEY,
         organization_id    TEXT NOT NULL REFERENCES organizations (id),
+        service_id         TEXT NOT NULL DEFAULT 'vispector',
         created_by_user_id TEXT NOT NULL REFERENCES users (id),
         name               TEXT NOT NULL,
         key_id             TEXT NOT NULL,
@@ -272,6 +275,17 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     2: (
         "CREATE INDEX users_application_role_lookup ON users (application_role)",
         "PRAGMA user_version = 3",
+    ),
+    3: (
+        "ALTER TABLE organizations ADD COLUMN name_status TEXT NOT NULL DEFAULT 'confirmed'",
+        "ALTER TABLE api_keys ADD COLUMN service_id TEXT NOT NULL DEFAULT 'vispector'",
+        "UPDATE organizations SET name_status = CASE WHEN type = 'personal' "
+        "THEN 'placeholder' ELSE 'confirmed' END",
+        "PRAGMA user_version = 4",
+    ),
+    4: (
+        "ALTER TABLE organizations ADD COLUMN suspended_at TEXT",
+        "PRAGMA user_version = 5",
     ),
 }
 
@@ -486,6 +500,10 @@ def organization_from_row(row: sqlite3.Row) -> Organization:
             "slug": row["slug"],
             "type": row["type"],
             "status": row["status"],
+            "name_status": row["name_status"],
+            "suspended_at": None
+            if row["suspended_at"] is None
+            else decode_timestamp(row["suspended_at"]),
             "created_at": decode_timestamp(row["created_at"]),
             "updated_at": decode_timestamp(row["updated_at"]),
         }
@@ -512,6 +530,7 @@ def api_key_from_row(row: sqlite3.Row) -> ApiKey:
         {
             "id": row["id"],
             "organization_id": row["organization_id"],
+            "service_id": row["service_id"],
             "created_by_user_id": row["created_by_user_id"],
             "name": row["name"],
             "key_id": row["key_id"],
@@ -923,6 +942,18 @@ class SQLiteStorage:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_row(row)
 
+    def update_user(self, user: User) -> User:
+        conn = self._connection()
+        cursor = conn.execute(
+            "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
+            (user.display_name, encode_timestamp(user.updated_at), str(user.id)),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            raise EntityNotFoundError("user not found")
+        conn.commit()
+        return user
+
     def list_users_by_email(self, email: str) -> list[User]:
         """Exact-match lookup of every user carrying ``email`` (Phase 12).
 
@@ -943,9 +974,7 @@ class SQLiteStorage:
 
     def list_users(self) -> list[User]:
         """Return all users in deterministic registration order for operators."""
-        rows = self._connection().execute(
-            "SELECT * FROM users ORDER BY created_at, id"
-        ).fetchall()
+        rows = self._connection().execute("SELECT * FROM users ORDER BY created_at, id").fetchall()
         return [user_from_row(row) for row in rows]
 
     def _insert_external_identity_row(
@@ -1146,14 +1175,15 @@ class SQLiteStorage:
         """
         conn.execute(
             "INSERT INTO organizations"
-            " (id, name, slug, type, status, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " (id, name, slug, type, status, name_status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(organization.id),
                 organization.name,
                 organization.slug,
                 str(organization.type),
                 str(organization.status),
+                str(organization.name_status),
                 encode_timestamp(organization.created_at),
                 encode_timestamp(organization.updated_at),
             ),
@@ -1194,6 +1224,23 @@ class SQLiteStorage:
             raise EntityNotFoundError(f"no organization with id {organization_id!r}")
         return organization_from_row(row)
 
+    def update_organization(self, organization: Organization) -> Organization:
+        conn = self._connection()
+        cursor = conn.execute(
+            "UPDATE organizations SET name = ?, name_status = ?, updated_at = ? WHERE id = ?",
+            (
+                organization.name,
+                str(organization.name_status),
+                encode_timestamp(organization.updated_at),
+                str(organization.id),
+            ),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            raise EntityNotFoundError("organization not found")
+        conn.commit()
+        return organization
+
     def list_user_organizations(self, user_id: UserId, page: PageParams) -> Page[Organization]:
         """Page through organizations where the user holds an **active**
         membership (contract-pinned domain operation: ``disabled`` is a
@@ -1232,6 +1279,142 @@ class SQLiteStorage:
             limit=limit,
             position=lambda organization: (organization.created_at, str(organization.id)),
         )
+
+    def admin_summary(self) -> dict[str, int]:
+        """Global local-admin counts; memberships are counted independently."""
+        conn = self._connection()
+        organizations = conn.execute("SELECT COUNT(*) FROM organizations").fetchone()[0]
+        memberships = conn.execute(
+            "SELECT COUNT(*) FROM memberships m "
+            "JOIN organizations o ON o.id = m.organization_id "
+            "WHERE m.status = 'active' AND o.status = 'active'"
+        ).fetchone()[0]
+        return {
+            "organization_count": int(organizations),
+            "active_membership_count": int(memberships),
+        }
+
+    def admin_search_organizations(self, query: str, page: PageParams) -> Page[Organization]:
+        """Case-insensitive, server-paginated organization name search."""
+        conn = self._connection()
+        scope = "admin_organizations:" + query.casefold()
+        limit = clamp_limit(page.limit)
+        after = decode_cursor(scope, page.cursor) if page.cursor is not None else None
+        sql = "SELECT * FROM organizations WHERE lower(name) LIKE ?"
+        params: list[object] = [f"%{query.casefold()}%"]
+        if after is not None:
+            sql += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+            position = encode_timestamp(after[0])
+            params.extend([position, position, after[1]])
+        sql += " ORDER BY created_at ASC, id ASC LIMIT ?"
+        params.append(limit + 1)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        return _build_page(
+            [organization_from_row(row) for row in rows],
+            scope=scope,
+            limit=limit,
+            position=lambda item: (item.created_at, str(item.id)),
+        )
+
+    def admin_suspend_organization(self, organization_id: OrganizationId, at: UtcDatetime) -> None:
+        """Suspend one tenant atomically, disabling grants and revoking keys."""
+        conn = self._connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            exists = conn.execute(
+                "SELECT 1 FROM organizations WHERE id = ?", (organization_id,)
+            ).fetchone()
+            if exists is None:
+                raise EntityNotFoundError("organization not found")
+            stored_at = encode_timestamp(at)
+            conn.execute(
+                "UPDATE organizations SET status = 'disabled', "
+                "suspended_at = COALESCE(suspended_at, ?), updated_at = ? WHERE id = ?",
+                (stored_at, stored_at, str(organization_id)),
+            )
+            # Keep users and membership links login-capable. The disabled
+            # organization is the authorization boundary for all scoped
+            # operations; preserving these records lets members see its status.
+            conn.execute(
+                "UPDATE api_keys SET status = 'revoked', "
+                "revoked_at = COALESCE(revoked_at, ?) "
+                "WHERE organization_id = ? AND status = 'active'",
+                (stored_at, str(organization_id)),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def admin_reactivate_organization(
+        self, organization_id: OrganizationId, at: UtcDatetime
+    ) -> None:
+        """Restore organization access without reactivating revoked API keys."""
+        conn = self._connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                "UPDATE organizations SET status = 'active', suspended_at = NULL, updated_at = ? "
+                "WHERE id = ?",
+                (encode_timestamp(at), str(organization_id)),
+            )
+            if cursor.rowcount == 0:
+                raise EntityNotFoundError("organization not found")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def admin_delete_organization(self, organization_id: OrganizationId) -> None:
+        """Suspend then permanently remove an organization and its users."""
+        conn = self._connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            organization_id = str(organization_id)
+            exists = conn.execute(
+                "SELECT 1 FROM organizations WHERE id = ?", (organization_id,)
+            ).fetchone()
+            if exists is None:
+                raise EntityNotFoundError("organization not found")
+            user_ids = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT user_id FROM memberships WHERE organization_id = ?", (organization_id,)
+                ).fetchall()
+            ]
+            stored_at = encode_timestamp(datetime.now().astimezone())
+            conn.execute(
+                "UPDATE organizations SET status = 'disabled', "
+                "suspended_at = COALESCE(suspended_at, ?), updated_at = ? WHERE id = ?",
+                (stored_at, stored_at, organization_id),
+            )
+            conn.execute(
+                "UPDATE memberships SET status = 'disabled' WHERE organization_id = ?",
+                (organization_id,),
+            )
+            conn.execute(
+                "UPDATE api_keys SET status = 'revoked', revoked_at = COALESCE(revoked_at, ?) "
+                "WHERE organization_id = ? AND status = 'active'",
+                (stored_at, organization_id),
+            )
+            conn.execute("DELETE FROM audit_events WHERE organization_id = ?", (organization_id,))
+            conn.execute("DELETE FROM api_keys WHERE organization_id = ?", (organization_id,))
+            conn.execute("DELETE FROM memberships WHERE organization_id = ?", (organization_id,))
+            conn.execute("DELETE FROM organizations WHERE id = ?", (organization_id,))
+            for user_id in user_ids:
+                conn.execute("DELETE FROM api_keys WHERE created_by_user_id = ?", (user_id,))
+                conn.execute(
+                    "DELETE FROM audit_events WHERE actor_id = ? OR target_id = ?",
+                    (user_id, user_id),
+                )
+                conn.execute("DELETE FROM memberships WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM app_sessions WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM external_identities WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _insert_membership_row(self, conn: sqlite3.Connection, membership: Membership) -> None:
         """Insert one membership row inside the **caller's** transaction.
@@ -1375,13 +1558,14 @@ class SQLiteStorage:
         try:
             conn.execute(
                 "INSERT INTO api_keys"
-                " (id, organization_id, created_by_user_id, name, key_id, key_prefix,"
+                " (id, organization_id, service_id, created_by_user_id, name, key_id, key_prefix,"
                 " secret_hash, environment, scopes, status, created_at, last_used_at,"
                 " expires_at, revoked_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(api_key.id),
                     str(api_key.organization_id),
+                    api_key.service_id,
                     str(api_key.created_by_user_id),
                     api_key.name,
                     api_key.key_id,

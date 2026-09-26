@@ -81,6 +81,7 @@ from app.models.enums import (
     IdentityProvider,
     MembershipRole,
     MembershipStatus,
+    OrganizationNameStatus,
     OrganizationStatus,
     OrganizationType,
     UserStatus,
@@ -303,6 +304,7 @@ def build_provisioning_batch(
         slug=f"personal-{ids.user_id}",
         type=OrganizationType.PERSONAL,
         status=OrganizationStatus.ACTIVE,
+        name_status=OrganizationNameStatus.PLACEHOLDER,
         created_at=now,
         updated_at=now,
     )
@@ -394,6 +396,24 @@ def resolve_or_provision(
         TokenValidationError: the provisioning profile failed the gate, or
             no profile provider was supplied for a first-login miss.
     """
+    user = resolve_user(storage, claims, now=now, ids=ids, profile_provider=profile_provider)
+    context = build_user_context(storage, user)
+    return ResolvedIdentity(user=user, context=context)
+
+
+def resolve_user(
+    storage: Storage,
+    claims: CognitoClaims,
+    *,
+    now: datetime | None = None,
+    ids: ProvisioningIds | None = None,
+    profile_provider: Callable[[], CognitoProfile] | None = None,
+) -> User:
+    """Resolve/provision the verified user without requiring an active tenant.
+
+    Global administration uses this for application administrators who may
+    need to restore or remove their last suspended organization.
+    """
     try:
         user = _lookup_external_identity(storage, claims)
     except EntityNotFoundError:
@@ -402,8 +422,7 @@ def resolve_or_provision(
         )
     if user.status is not UserStatus.ACTIVE:
         raise DisabledUserError()
-    context = build_user_context(storage, user)
-    return ResolvedIdentity(user=user, context=context)
+    return user
 
 
 def _provision_or_converge(

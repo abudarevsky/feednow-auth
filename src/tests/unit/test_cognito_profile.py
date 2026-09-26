@@ -261,6 +261,29 @@ def test_false_email_verified_parses_and_is_gated_by_the_consumer() -> None:
     assert profile.email_verified is False
 
 
+def test_google_verified_proof_covers_cognito_false_standard_attribute() -> None:
+    """Cognito may not copy Google's proof into email_verified for new users."""
+    opener = _FakeOpener(
+        response=_FakeResponse(
+            _profile_body(email_verified="false", **{"custom:g_verified": "true"})
+        )
+    )
+    profile = _client(opener).fetch(ACCESS_TOKEN, SUBJECT)
+    assert profile.email_verified is True
+    assert require_provisioning_profile(profile, token_sub=SUBJECT) is profile
+
+
+@pytest.mark.parametrize("proof", ["false", "TRUE", 1, None])
+def test_google_verified_proof_must_be_exact_true(proof: Any) -> None:
+    opener = _FakeOpener(
+        response=_FakeResponse(
+            _profile_body(email_verified="false", **{"custom:g_verified": proof})
+        )
+    )
+    profile = _client(opener).fetch(ACCESS_TOKEN, SUBJECT)
+    assert profile.email_verified is False
+
+
 @pytest.mark.parametrize(("wire_value", "expected"), [("true", True), ("false", False)])
 def test_cognito_string_email_verified_is_normalized(wire_value: str, expected: bool) -> None:
     opener = _FakeOpener(response=_FakeResponse(_profile_body(email_verified=wire_value)))

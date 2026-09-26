@@ -578,7 +578,9 @@ def test_profile_gate_failures_are_401_before_resolution(
     envelope = Error.model_validate(response.json())
     assert envelope.code == "unauthenticated"
     assert envelope.message == reason
-    assert "get_user_by_external_identity" not in env.storage.calls
+    # The identity-tuple read decides whether profile fetching is needed; the
+    # invalid profile must prevent the first-user provisioning batch.
+    assert "get_user_by_external_identity" in env.storage.calls
     assert "provision_user" not in env.storage.calls
 
 

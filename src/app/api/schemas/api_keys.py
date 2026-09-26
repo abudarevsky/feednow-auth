@@ -70,6 +70,7 @@ class ApiKeySummary(ApiSchema):
 
     id: ApiKeyId
     name: ApiKeyName
+    service_id: str
     environment: ApiKeyEnvironment
     key_prefix: KeyPrefix
     status: ApiKeyStatus

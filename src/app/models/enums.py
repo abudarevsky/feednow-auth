@@ -29,6 +29,13 @@ class OrganizationStatus(StrEnum):
     DISABLED = "disabled"
 
 
+class OrganizationNameStatus(StrEnum):
+    """Whether an organization name is an initial placeholder or user-confirmed."""
+
+    PLACEHOLDER = "placeholder"
+    CONFIRMED = "confirmed"
+
+
 class MembershipStatus(StrEnum):
     """Status of a :class:`~app.models.membership.Membership`.
 
@@ -118,6 +125,7 @@ __all__ = [
     "IdentityProvider",
     "MembershipRole",
     "MembershipStatus",
+    "OrganizationNameStatus",
     "OrganizationStatus",
     "OrganizationType",
     "UserStatus",

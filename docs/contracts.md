@@ -15,7 +15,7 @@ when that behavior is actually implemented and verified.
 - Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
 - Product APIs must not require a synchronous auth-service call for every
   protected request.
-- Storage is reached only through the 25-method `Storage` protocol and the
+- Storage is reached only through the 27-method `Storage` protocol and the
   documented factories `open_sqlite_storage(path: str | Path) -> Storage`
   and `open_dynamodb_storage(*, endpoint_url=None, region="us-east-1",
   table_prefix="", dynamodb_resource=None) -> DynamoDbStorage` (both with
@@ -319,11 +319,37 @@ Administration boundary (Phase 13):
   variant, including a key owned by an ADMIN user (the key branch is
   structurally roleless) — answers the **same uniform 403** with one fixed
   message echoing no role, key, or identity material. Denials are not
-  audited at this seam. Phase 13 mounts it on **no** production route
-  (the frozen `/v1` manifest is unchanged), and organization-membership
+  audited at this seam. Phase 13 mounts it on **no** production route;
+  local Docker mounts read-only admin routes in the frozen `/v1` manifest.
+  Organization-membership
   administration keeps its separate org-local `organization_access`
   policy: the global `ApplicationRole` and organization roles never
   inherit into each other.
+
+Local account milestone additions:
+
+- `Organization.name_status` is `placeholder` for automatically provisioned
+  personal workspaces and `confirmed` for named organizations. The owner-only
+  `PATCH /v1/organizations/{organization_id}` trims and stores the submitted
+  name, returns `name_status=confirmed`, and preserves the original creation
+  timestamp. SQLite schema v4 adds this value and `api_keys.service_id` through
+  a forward-only migration; existing personal workspaces are backfilled as
+  placeholders.
+- `Organization.suspended_at` is null until first suspension, then preserves
+  that UTC timestamp. Suspension disables ordinary member accounts and
+  memberships and revokes the organization's keys; global application admins
+  retain access to the admin surfaces.
+- API keys store `service_id` (currently `vispector`) and masked key summaries
+  expose that identifier. The literal secret remains available once at
+  creation only.
+- The local Docker runtime mounts read-only global admin routes: summary
+  counts, paginated case-insensitive organization search, organization details,
+  and paginated actual memberships. Each route uses the backend application
+  role gate; API-key principals receive the same fixed 403 as non-admin users.
+- `GET /v1/local/vispector/protected` is a local-only acceptance probe outside
+  the public manifest. It requires an active Vispector service key through
+  normal API-key verification and returns a credential-free authenticated
+  result. It is mounted only by Docker local runtime.
 
 Canonical modules:
 

@@ -8,27 +8,31 @@ production application factory never imports or mounts that route.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import os
 from urllib.parse import urlencode
 
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, RedirectResponse
+from oauth_callback import build_oauth_cli_callback_router
 
+from app.api.admin import build_admin_router
 from app.api.keys import build_api_keys_router
 from app.api.me import build_me_router
 from app.api.members import build_members_router
+from app.api.oauth import build_oauth_router
 from app.api.organizations import build_organizations_router
+from app.auth.api_key_auth import ApiKeyAuthenticationError, verify_api_key
 from app.auth.cognito import CognitoAccessTokenVerifier, CognitoUserInfoClient, ProfileSource
+from app.auth.dependencies import build_current_user
 from app.auth.jwks import CognitoJwksSource
 from app.auth.pepper import StaticPepper
-from app.auth.session import SessionManager, SESSION_COOKIE_NAME
+from app.auth.session import SESSION_COOKIE_NAME, SessionManager, read_session_cookie
 from app.auth.token_exchange import CognitoTokenEndpoint
-from app.auth.dependencies import build_current_user
 from app.main import create_app
+from app.models.errors import Error, ErrorCode
 from app.storage.sqlite import open_sqlite_storage
-from app.api.oauth import build_oauth_router
-from fastapi import APIRouter, Request, Response
-from oauth_callback import build_oauth_cli_callback_router
 
 
 def _values(*names: str) -> tuple[str, ...]:
@@ -53,6 +57,11 @@ def _pepper() -> bytes:
         return base64.b64decode(raw, validate=True)
     except ValueError as exc:
         raise RuntimeError("FEEDNOW_PEPPER_SECRET must be valid base64") from exc
+
+
+def _session_csrf_token(secret: bytes, session_id: str) -> str:
+    """Derive an opaque CSRF token bound to one opaque browser session."""
+    return hmac.new(secret, f"feednow-csrf:{session_id}".encode(), hashlib.sha256).hexdigest()
 
 
 def _profile_source() -> ProfileSource | None:
@@ -84,7 +93,9 @@ def build_app() -> FastAPI:
     verifier = CognitoAccessTokenVerifier(CognitoJwksSource(issuers), issuers, client_ids)
     pepper = StaticPepper(_pepper())
     profile_source = _profile_source()
-    session_manager = SessionManager(storage, int(os.getenv("FEEDNOW_SESSION_TTL_SECONDS", "28800")))
+    session_manager = SessionManager(
+        storage, int(os.getenv("FEEDNOW_SESSION_TTL_SECONDS", "28800"))
+    )
     domain = os.getenv("FEEDNOW_COGNITO_DOMAIN", "").rstrip("/")
     client_id = os.getenv("FEEDNOW_COGNITO_CLIENT_ID", "")
     redirect_uri = os.getenv("FEEDNOW_COGNITO_REDIRECT_URI", "http://localhost:8000/oauth/callback")
@@ -107,12 +118,52 @@ def build_app() -> FastAPI:
     @session_router.get("/v1/services", include_in_schema=False)
     def services(request: Request) -> dict[str, list[dict[str, str]]]:
         local_user(request)
-        return {"items": [{
-            "id": "vispector", "name": "Vispector",
-            "description": "Visual analysis and inspection",
-            "url": os.getenv("FEEDNOW_VISPECTOR_URL", "http://localhost:5173"),
-            "status": "active",
-        }]}
+        return {
+            "items": [
+                {
+                    "id": "vispector",
+                    "name": "Vispector",
+                    "description": "Visual analysis and inspection",
+                    "url": os.getenv("FEEDNOW_VISPECTOR_URL", "http://localhost:5173"),
+                    "status": "active",
+                }
+            ]
+        }
+
+    @session_router.get("/v1/csrf", include_in_schema=False, status_code=204)
+    def csrf_bootstrap(request: Request, response: Response) -> Response:
+        """Issue the readable same-origin token expected by the account UI."""
+        local_user(request)
+        session_id = read_session_cookie(request)
+        if session_id is None:
+            raise HTTPException(status_code=401, detail="session is required")
+        token = _session_csrf_token(pepper.current(), session_id)
+        response.set_cookie(
+            "feednow_csrf",
+            token,
+            max_age=int(os.getenv("FEEDNOW_SESSION_TTL_SECONDS", "28800")),
+            path="/",
+            secure=os.getenv("FEEDNOW_COOKIE_SECURE", "false").lower() == "true",
+            httponly=False,
+            samesite="strict",
+        )
+        response.status_code = 204
+        return response
+
+    @session_router.get("/v1/local/vispector/protected", include_in_schema=False)
+    def protected_vispector_probe(request: Request) -> dict[str, str]:
+        """Local acceptance endpoint proving regular API-key authentication."""
+        authorization = request.headers.get("authorization", "")
+        scheme, _, literal = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not literal:
+            raise HTTPException(status_code=401, detail="invalid API key credentials")
+        try:
+            verified = verify_api_key(storage, pepper, literal)
+        except ApiKeyAuthenticationError as exc:
+            raise HTTPException(status_code=401, detail="invalid API key credentials") from exc
+        if verified.api_key.service_id != "vispector":
+            raise HTTPException(status_code=403, detail="service access denied")
+        return {"service_id": "vispector", "status": "authenticated"}
 
     @session_router.post("/logout", include_in_schema=False)
     def logout(response: Response) -> dict[str, str]:
@@ -127,25 +178,79 @@ def build_app() -> FastAPI:
         """Return Cognito's allowed sign-out redirect to the local UI."""
         return RedirectResponse(f"{frontend_url}/login", status_code=302)
 
-    return create_app(
+    application = create_app(
         routers=[
-            build_me_router(storage, verifier, profile_source=profile_source, session_manager=session_manager),
-            build_organizations_router(storage, verifier, profile_source=profile_source, session_manager=session_manager),
-            build_members_router(storage, verifier, profile_source=profile_source, session_manager=session_manager),
-            build_api_keys_router(storage, verifier, pepper, profile_source=profile_source, session_manager=session_manager),
+            build_admin_router(
+                storage,
+                verifier,
+                profile_source=profile_source,
+                session_manager=session_manager,
+                pepper_source=pepper,
+            ),
+            build_me_router(
+                storage, verifier, profile_source=profile_source, session_manager=session_manager
+            ),
+            build_organizations_router(
+                storage, verifier, profile_source=profile_source, session_manager=session_manager
+            ),
+            build_members_router(
+                storage, verifier, profile_source=profile_source, session_manager=session_manager
+            ),
+            build_api_keys_router(
+                storage,
+                verifier,
+                pepper,
+                profile_source=profile_source,
+                session_manager=session_manager,
+            ),
             build_oauth_router(
-                storage, verifier, CognitoTokenEndpoint(
-                    f"{domain}/oauth2/token", client_id,
+                storage,
+                verifier,
+                CognitoTokenEndpoint(
+                    f"{domain}/oauth2/token",
+                    client_id,
                     client_secret=os.getenv("FEEDNOW_COGNITO_CLIENT_SECRET") or None,
                 ),
-                profile_source, session_manager, authorize_url=f"{domain}/oauth2/authorize",
-                client_id=client_id, redirect_uri=redirect_uri, landing_url=f"{frontend_url}/account",
-                allowed_return_origins=(frontend_url,), cookie_secure=False,
+                profile_source,
+                session_manager,
+                authorize_url=f"{domain}/oauth2/authorize",
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                landing_url=f"{frontend_url}/account",
+                allowed_return_origins=(frontend_url,),
+                cookie_secure=False,
             ),
             build_oauth_cli_callback_router(),
             session_router,
         ]
     )
+
+    @application.middleware("http")
+    async def enforce_session_csrf(request: Request, call_next):
+        """Require the session-bound double-submit value for cookie writes."""
+        session_id = read_session_cookie(request)
+        unsafe = request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        if (
+            unsafe
+            and request.url.path.startswith("/v1/")
+            and session_id
+            and session_manager.verify(session_id) is not None
+        ):
+            expected = _session_csrf_token(pepper.current(), session_id)
+            cookie_token = request.cookies.get("feednow_csrf", "")
+            header_token = request.headers.get("X-CSRF-Token", "")
+            if not hmac.compare_digest(cookie_token, expected) or not hmac.compare_digest(
+                header_token, expected
+            ):
+                error = Error(
+                    code=ErrorCode.FORBIDDEN,
+                    message="CSRF validation failed",
+                    request_id=request.headers.get("X-Request-ID"),
+                )
+                return JSONResponse(status_code=403, content=error.model_dump(mode="json"))
+        return await call_next(request)
+
+    return application
 
 
 app = build_app()

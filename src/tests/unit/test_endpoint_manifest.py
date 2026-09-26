@@ -37,12 +37,22 @@ SPEC_14_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/v1/organizations"),
         ("POST", "/v1/organizations"),
         ("GET", "/v1/organizations/{organization_id}"),
+        ("PATCH", "/v1/organizations/{organization_id}"),
         ("GET", "/v1/organizations/{organization_id}/members"),
         ("POST", "/v1/organizations/{organization_id}/members"),
         ("DELETE", "/v1/organizations/{organization_id}/members/{user_id}"),
         ("GET", "/v1/organizations/{organization_id}/api-keys"),
         ("POST", "/v1/organizations/{organization_id}/api-keys"),
         ("DELETE", "/v1/organizations/{organization_id}/api-keys/{key_id}"),
+        ("PATCH", "/v1/organizations/{organization_id}"),
+        ("GET", "/v1/admin/summary"),
+        ("GET", "/v1/admin/organizations"),
+        ("GET", "/v1/admin/organizations/{organization_id}"),
+        ("GET", "/v1/admin/organizations/{organization_id}/members"),
+        ("PATCH", "/v1/me"),
+        ("POST", "/v1/admin/organizations/{organization_id}/suspend"),
+        ("POST", "/v1/admin/organizations/{organization_id}/reactivate"),
+        ("POST", "/v1/admin/organizations/{organization_id}/delete"),
     }
 )
 
@@ -51,7 +61,7 @@ def _routes() -> set[tuple[str, str]]:
     return {(spec.method, spec.path) for spec in ENDPOINTS}
 
 
-def test_manifest_covers_every_section_14_endpoint_exactly() -> None:
+def test_manifest_covers_every_versioned_endpoint_exactly() -> None:
     assert _routes() == set(SPEC_14_ROUTES)
     assert len(ENDPOINTS) == len(SPEC_14_ROUTES)
 
@@ -88,7 +98,7 @@ def test_gets_are_200_and_creates_are_201() -> None:
             assert spec.success_status == 200, spec
             assert spec.request_model is None, spec
         elif spec.method == "POST":
-            assert spec.success_status == 201, spec
+            assert spec.success_status in {201, 204}, spec
             assert spec.request_model is not None, spec
 
 
@@ -98,10 +108,12 @@ def test_list_endpoints_declare_pagination_and_page_models() -> None:
         ("GET", "/v1/organizations"),
         ("GET", "/v1/organizations/{organization_id}/members"),
         ("GET", "/v1/organizations/{organization_id}/api-keys"),
+        ("GET", "/v1/admin/organizations"),
+        ("GET", "/v1/admin/organizations/{organization_id}/members"),
     }
     for spec in ENDPOINTS:
         if spec.paginated:
-            assert spec.query_model is PageParams, spec
+            assert issubclass(spec.query_model, PageParams), spec
             assert issubclass(spec.response_model, Page), spec
         else:
             assert spec.query_model is None, spec
@@ -117,6 +129,7 @@ def test_page_parameterizations_match_resource_models() -> None:
     assert by_route[("GET", "/v1/organizations/{organization_id}")].response_model is (
         OrganizationResponse
     )
+    assert by_route[("PATCH", "/v1/organizations/{organization_id}")].request_model is not None
     members = "/v1/organizations/{organization_id}/members"
     assert by_route[("GET", members)].item_model is MemberResponse
     assert by_route[("POST", members)].request_model is MemberCreateRequest
@@ -163,7 +176,7 @@ def test_endpoint_spec_rejects_contract_violations() -> None:
         EndpointSpec(
             "x", "GET", f"{API_V1_PREFIX}/x", 200, response_model=MeResponse, paginated=True
         )
-    with pytest.raises(ValueError, match="query_model"):
+    with pytest.raises(ValueError, match="derive from PageParams"):
         EndpointSpec(
             "x",
             "GET",

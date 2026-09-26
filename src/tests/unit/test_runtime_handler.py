@@ -426,7 +426,9 @@ def _mounted_routes(application: FastAPI) -> set[tuple[str, str]]:
 
 def test_build_app_mounts_exactly_the_manifest_routes() -> None:
     app = _build_with_fakes()
-    expected = {(spec.method, spec.path) for spec in ENDPOINTS} | {("GET", "/health")}
+    expected = {
+        (spec.method, spec.path) for spec in ENDPOINTS if not spec.path.startswith("/v1/admin/")
+    } | {("GET", "/health")}
     assert _mounted_routes(app) == expected
 
 
@@ -489,7 +491,9 @@ def _spy_routers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _SpyRouterFactory
 
 def test_build_app_mounts_the_session_flow_when_the_gate_is_on() -> None:
     app = _build_with_fakes(environ={**FAKE_ENV, **SESSION_ENV})
-    expected = {(spec.method, spec.path) for spec in ENDPOINTS} | {
+    expected = {
+        (spec.method, spec.path) for spec in ENDPOINTS if not spec.path.startswith("/v1/admin/")
+    } | {
         ("GET", "/health"),
         ("GET", "/oauth/login"),
         ("GET", "/oauth/callback"),

@@ -19,7 +19,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from app.models.enums import OrganizationStatus, OrganizationType
+from app.models.enums import OrganizationNameStatus, OrganizationStatus, OrganizationType
 from app.models.ids import OrganizationId
 from app.models.timestamps import UtcDatetime
 
@@ -41,6 +41,8 @@ class Organization(BaseModel):
     slug: OrganizationSlug
     type: OrganizationType
     status: OrganizationStatus
+    name_status: OrganizationNameStatus = OrganizationNameStatus.CONFIRMED
+    suspended_at: UtcDatetime | None = None
     created_at: UtcDatetime
     updated_at: UtcDatetime
 

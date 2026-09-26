@@ -66,17 +66,19 @@ from app.auth.credentials import ENVIRONMENT_PREFIXES
 from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 from app.auth.pepper import PepperSource
 from app.auth.principal import Principal
+from app.auth.session import SessionManager, read_session_cookie
+from app.models.enums import UserStatus
+from app.models.user import User
 from app.services.identity import (
     DisabledUserError,
     NoActiveOrganizationError,
     ProvisioningConflictError,
     ResolvedIdentity,
+    build_user_context,
     resolve_or_provision,
+    resolve_user,
 )
 from app.storage.contract import EntityNotFoundError, Storage
-from app.auth.session import SessionManager, read_session_cookie
-from app.services.identity import build_user_context
-from app.models.enums import UserStatus
 
 #: Fixed safe messages for header-level failures (no caller text is echoed).
 MISSING_HEADER_MESSAGE: Final = "authentication credentials not provided"
@@ -199,6 +201,50 @@ def build_current_user(
     return current_user
 
 
+def build_current_user_without_organization(
+    storage: Storage,
+    verifier: AccessTokenVerifier,
+    profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
+) -> Callable[..., User]:
+    """Authenticate and resolve a user without requiring active membership.
+
+    This is reserved for global administration, which must remain reachable
+    when an administrator suspends their final organization.
+    """
+
+    def current_user(request: Request) -> User:
+        if session_manager is not None and not request.headers.get("authorization"):
+            session_id = read_session_cookie(request)
+            user_id = session_manager.verify(session_id) if session_id else None
+            if user_id is not None:
+                try:
+                    user = storage.get_user(user_id)
+                except EntityNotFoundError as exc:
+                    raise HTTPException(status_code=401, detail=MISSING_HEADER_MESSAGE) from exc
+                if user.status is not UserStatus.ACTIVE:
+                    raise HTTPException(status_code=403, detail="user account is disabled")
+                return user
+        token = _extract_bearer_token(request)
+        claims = _verify_token(verifier, token)
+        try:
+            return resolve_user(
+                storage,
+                claims,
+                profile_provider=_profile_provider_for(profile_source, token, claims),
+            )
+        except DisabledUserError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ProvisioningConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TokenProviderUnavailableError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except TokenValidationError as exc:
+            raise HTTPException(status_code=401, detail=exc.reason) from exc
+
+    return current_user
+
+
 def build_current_principal(
     storage: Storage,
     verifier: AccessTokenVerifier,
@@ -232,7 +278,9 @@ def build_current_principal(
     def current_principal(request: Request) -> Principal:
         """Authenticate one request and wrap the outcome in a ``Principal``."""
         if session_manager is not None and not request.headers.get("authorization"):
-            identity = build_current_user(storage, verifier, profile_source, session_manager)(request)
+            identity = build_current_user(storage, verifier, profile_source, session_manager)(
+                request
+            )
             return Principal(user=identity.user, api_key=None, context=identity.context)
         token = _extract_bearer_token(request)
         if token.startswith(API_KEY_BEARER_PREFIXES):

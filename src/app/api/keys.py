@@ -65,13 +65,13 @@ from app.auth.organization_access import (
     build_organization_member_dependency,
 )
 from app.auth.pepper import PepperSource
+from app.auth.session import SessionManager
 from app.models.api_key import ApiKey
 from app.models.ids import ApiKeyId, OrganizationId
 from app.models.pagination import Page, PageParams
 from app.services import api_key_service
 from app.services.api_key_service import ApiKeyConflictError, ApiKeyNotFoundError
 from app.storage.contract import InvalidCursorError, Storage
-from app.auth.session import SessionManager
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_api_keys")
@@ -93,6 +93,7 @@ def _to_summary(api_key: ApiKey) -> ApiKeySummary:
     return ApiKeySummary(
         id=api_key.id,
         name=api_key.name,
+        service_id=api_key.service_id,
         environment=api_key.environment,
         key_prefix=api_key.key_prefix,
         status=api_key.status,

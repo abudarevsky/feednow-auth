@@ -391,6 +391,20 @@ def test_create_201_exact_body_and_literal_verifies(matrix: _Env, caller: str) -
     assert created[0]["organization_id"] == "org_team"
 
 
+
+def test_suspended_organization_user_cannot_create_keys(matrix: _Env) -> None:
+    before = rows(matrix.db_path, "api_keys")
+    matrix.storage.admin_suspend_organization(OrganizationId("org_team"), _T0)
+    response = matrix.client.post(
+        "/v1/organizations/org_team/api-keys",
+        headers=matrix.headers_for("owner"),
+        json={"name": "after suspension", "environment": "live", "scopes": [RUN_SCOPE]},
+    )
+    assert response.status_code == 403
+    assert rows(matrix.db_path, "api_keys") == before
+    assert matrix.storage.get_user(UserId("usr_owner")).status is UserStatus.ACTIVE
+
+
 def test_create_persists_no_plaintext_anywhere(matrix: _Env) -> None:
     body = matrix.create_key()
     literal = body["key"]
@@ -509,6 +523,7 @@ def test_list_shows_all_statuses_org_scoped_and_masked(matrix: _Env) -> None:
         assert set(item) == {
             "id",
             "name",
+            "service_id",
             "environment",
             "key_prefix",
             "status",
@@ -518,6 +533,7 @@ def test_list_shows_all_statuses_org_scoped_and_masked(matrix: _Env) -> None:
             "expires_at",
             "revoked_at",
         }
+        assert item["service_id"] == "vispector"
         assert item["key_prefix"].endswith("...")
     # The full literal and its secret appear in no list body (one-crossing sweep).
     serialized = json.dumps(page)

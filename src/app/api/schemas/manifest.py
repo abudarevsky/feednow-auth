@@ -51,10 +51,24 @@ from types import MappingProxyType
 
 from pydantic import BaseModel
 
+from app.api.schemas.admin import (
+    AdminDeleteRequest,
+    AdminMember,
+    AdminOrganization,
+    AdminOrganizationDetail,
+    AdminOrganizationQuery,
+    AdminReactivateRequest,
+    AdminSummary,
+    AdminSuspendRequest,
+)
 from app.api.schemas.api_keys import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeySummary
-from app.api.schemas.me import MeResponse
+from app.api.schemas.me import MeResponse, ProfileUpdateRequest
 from app.api.schemas.members import MemberCreateRequest, MemberResponse
-from app.api.schemas.organizations import OrganizationCreateRequest, OrganizationResponse
+from app.api.schemas.organizations import (
+    OrganizationCreateRequest,
+    OrganizationRenameRequest,
+    OrganizationResponse,
+)
 from app.models.ids import ApiKeyId, OrganizationId, UserId
 from app.models.pagination import Page, PageParams
 
@@ -95,10 +109,16 @@ class EndpointSpec:
             raise ValueError(f"{self.operation_id}: paginated endpoints must return Page[...]")
         if self.is_list and not self.paginated:
             raise ValueError(f"{self.operation_id}: Page[...] responses must be paginated")
-        if self.paginated and self.query_model is not PageParams:
+        if (
+            self.paginated
+            and self.query_model is not PageParams
+            and (
+                not isinstance(self.query_model, type)
+                or not issubclass(self.query_model, PageParams)
+            )
+        ):
             raise ValueError(
-                f"{self.operation_id}: paginated endpoints must declare PageParams "
-                "as their query_model"
+                f"{self.operation_id}: paginated endpoints must derive from PageParams"
             )
         if not self.paginated and self.query_model is not None:
             raise ValueError(f"{self.operation_id}: only paginated endpoints may declare a query")
@@ -143,6 +163,14 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         response_model=MeResponse,
     ),
     EndpointSpec(
+        operation_id="update_current_user_profile",
+        method="PATCH",
+        path=f"{API_V1_PREFIX}/me",
+        success_status=200,
+        request_model=ProfileUpdateRequest,
+        response_model=MeResponse,
+    ),
+    EndpointSpec(
         operation_id="list_organizations",
         method="GET",
         path=f"{API_V1_PREFIX}/organizations",
@@ -164,6 +192,15 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         method="GET",
         path=f"{API_V1_PREFIX}/organizations/{{organization_id}}",
         success_status=200,
+        response_model=OrganizationResponse,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="rename_organization",
+        method="PATCH",
+        path=f"{API_V1_PREFIX}/organizations/{{organization_id}}",
+        success_status=200,
+        request_model=OrganizationRenameRequest,
         response_model=OrganizationResponse,
         path_params=_ORG_PATH_PARAMS,
     ),
@@ -218,6 +255,64 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/api-keys/{{key_id}}",
         success_status=204,
         path_params=_KEY_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="get_admin_summary",
+        method="GET",
+        path=f"{API_V1_PREFIX}/admin/summary",
+        success_status=200,
+        response_model=AdminSummary,
+    ),
+    EndpointSpec(
+        operation_id="search_admin_organizations",
+        method="GET",
+        path=f"{API_V1_PREFIX}/admin/organizations",
+        success_status=200,
+        response_model=Page[AdminOrganization],
+        query_model=AdminOrganizationQuery,
+        paginated=True,
+    ),
+    EndpointSpec(
+        operation_id="get_admin_organization",
+        method="GET",
+        path=f"{API_V1_PREFIX}/admin/organizations/{{organization_id}}",
+        success_status=200,
+        response_model=AdminOrganizationDetail,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="list_admin_organization_members",
+        method="GET",
+        path=f"{API_V1_PREFIX}/admin/organizations/{{organization_id}}/members",
+        success_status=200,
+        response_model=Page[AdminMember],
+        query_model=PageParams,
+        paginated=True,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="suspend_admin_organization",
+        method="POST",
+        path=f"{API_V1_PREFIX}/admin/organizations/{{organization_id}}/suspend",
+        success_status=204,
+        request_model=AdminSuspendRequest,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="reactivate_admin_organization",
+        method="POST",
+        path=f"{API_V1_PREFIX}/admin/organizations/{{organization_id}}/reactivate",
+        success_status=204,
+        request_model=AdminReactivateRequest,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="delete_admin_organization",
+        method="POST",
+        path=f"{API_V1_PREFIX}/admin/organizations/{{organization_id}}/delete",
+        success_status=204,
+        request_model=AdminDeleteRequest,
+        path_params=_ORG_PATH_PARAMS,
     ),
 )
 

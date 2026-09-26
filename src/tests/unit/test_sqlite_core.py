@@ -52,6 +52,7 @@ from app.models import (
     MembershipRole,
     MembershipStatus,
     Organization,
+    OrganizationNameStatus,
     OrganizationStatus,
     OrganizationType,
     User,
@@ -66,6 +67,7 @@ from app.models.ids import (
     OrganizationId,
     UserId,
 )
+from app.models.pagination import PageParams
 from app.storage import sqlite as sqlite_adapter
 from app.storage.sqlite import (
     CURSOR_SCOPE_API_KEYS,
@@ -331,6 +333,40 @@ def test_schema_init_is_idempotent_on_the_same_file(tmp_path) -> None:  # type: 
     second.close()
 
 
+def test_local_admin_counts_search_and_organization_rename(storage: SQLiteStorage) -> None:
+    storage.create_user(make_user())
+    organization = make_organization()
+    storage.create_organization(organization)
+    storage.create_membership(make_membership())
+    second = organization.model_copy(
+        update={
+            "id": OrganizationId("org_test_0002"),
+            "name": "Acme Construction",
+            "slug": "acme-construction",
+            "created_at": _T1,
+            "updated_at": _T1,
+        }
+    )
+    storage.create_organization(second)
+
+    page = storage.admin_search_organizations("CONSTRUCT", PageParams(limit=1))
+    assert [item.name for item in page.items] == ["Acme Construction"]
+    assert page.next_cursor is None
+    assert storage.admin_summary() == {"organization_count": 2, "active_membership_count": 1}
+
+    renamed = organization.model_copy(
+        update={
+            "name": "Confirmed Name",
+            "name_status": OrganizationNameStatus.CONFIRMED,
+            "updated_at": _T1,
+        }
+    )
+    stored = storage.update_organization(renamed)
+    assert stored.name == "Confirmed Name"
+    assert stored.name_status is OrganizationNameStatus.CONFIRMED
+    assert stored.created_at == _T0
+
+
 def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStorage) -> None:
     conn = storage._connection()
     objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
@@ -550,7 +586,7 @@ def test_v1_file_migrates_to_v2_at_open_backfilling_roles(tmp_path) -> None:  # 
     try:
         conn = storage._connection()
         # Reopened at the current stamp (the chain landed on SCHEMA_VERSION).
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
         rows = conn.execute("SELECT * FROM users ORDER BY id").fetchall()
         # Roles backfilled to 'user' by the ALTER TABLE column default...
         assert [row["application_role"] for row in rows] == ["user", "user"]
@@ -607,6 +643,40 @@ def test_v1_file_migrates_to_v2_at_open_backfilling_roles(tmp_path) -> None:  # 
         reopened.close()
 
 
+def test_v4_file_migrates_suspension_timestamp_as_null(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    path = tmp_path / "v4-suspension.sqlite"
+    conn = sqlite3.connect(path)
+    for statement in sqlite_adapter._SCHEMA_STATEMENTS:
+        conn.execute(statement)
+    conn.execute("ALTER TABLE organizations DROP COLUMN suspended_at")
+    organization = make_organization()
+    conn.execute(
+        "INSERT INTO organizations "
+        "(id, name, slug, type, status, name_status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            str(organization.id),
+            organization.name,
+            organization.slug,
+            str(organization.type),
+            str(organization.status),
+            str(organization.name_status),
+            encode_timestamp(organization.created_at),
+            encode_timestamp(organization.updated_at),
+        ),
+    )
+    conn.execute("PRAGMA user_version = 4")
+    conn.commit()
+    conn.close()
+
+    storage = SQLiteStorage(path)
+    try:
+        assert storage.get_organization(organization.id).suspended_at is None
+        assert storage._connection().execute("PRAGMA user_version").fetchone()[0] == 5
+    finally:
+        storage.close()
+
+
 # ---------------------------------------------------------------------------
 # 1c. Phase 13: the ordered 2→3 migration of a hand-built v2 file
 # ---------------------------------------------------------------------------
@@ -621,6 +691,9 @@ def test_v2_file_migrates_to_v3_at_open_adding_the_role_index(tmp_path) -> None:
     conn = sqlite3.connect(path)
     for statement in sqlite_adapter._SCHEMA_STATEMENTS:
         conn.execute(statement)
+    conn.execute("ALTER TABLE organizations DROP COLUMN suspended_at")
+    conn.execute("ALTER TABLE organizations DROP COLUMN name_status")
+    conn.execute("ALTER TABLE api_keys DROP COLUMN service_id")
     conn.execute("DROP INDEX users_application_role_lookup")
     _insert_user(conn, make_user())
     conn.execute("PRAGMA user_version = 2")
@@ -630,7 +703,7 @@ def test_v2_file_migrates_to_v3_at_open_adding_the_role_index(tmp_path) -> None:
     storage = SQLiteStorage(path)
     try:
         conn = storage._connection()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 5
         indexes = {
             row["name"]
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -643,9 +716,9 @@ def test_v2_file_migrates_to_v3_at_open_adding_the_role_index(tmp_path) -> None:
         storage.close()
 
 
-@pytest.mark.parametrize("stamped", [4, 7, 42])
+@pytest.mark.parametrize("stamped", [6, 7, 42])
 def test_stamps_outside_the_known_set_are_rejected(tmp_path, stamped: int) -> None:  # type: ignore[no-untyped-def]
-    # Only 0 (fresh init), 1 and 2 (the known migration stamps), and 3
+    # Only 0 (fresh init), 1 through 4 (known migration stamps), and 5
     # (current) are accepted; anything else still fails loudly, never
     # reinterpreted.
     path = tmp_path / f"stamp-{stamped}.sqlite"
@@ -981,7 +1054,7 @@ def test_contract_surface_has_no_remaining_stubs() -> None:
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 25, members
+    assert len(members) == 28, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

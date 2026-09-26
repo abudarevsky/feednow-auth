@@ -46,6 +46,10 @@ this order before changing the service:
      operator runbook (Docker exec, migration release ordering, rollback,
      restricted operator IAM policy) — with the live Cognito/AWS operator
      checks recorded as pending.
+13. [Local account milestone](phases/15-local-account-milestone.md) — current
+    organization naming, profile onboarding/editing, local admin APIs and
+    organization lifecycle actions, service-bound API keys, and Docker
+    key-authentication probe. Subscription and usage are out of scope.
 
 These documents are the source of truth for the application that exists in
 this repository. They describe implemented paths, behavior, contracts,

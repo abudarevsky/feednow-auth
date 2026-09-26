@@ -32,6 +32,7 @@ SPEC_FIELD_LISTS = {
     ApiKey: [
         "id",
         "organization_id",
+        "service_id",
         "created_by_user_id",
         "name",
         "key_id",
@@ -67,6 +68,7 @@ VALID_PAYLOADS = {
     ApiKey: {
         "id": "key_01JXYZ7K",
         "organization_id": "org_01JXYZ7K",
+        "service_id": "vispector",
         "created_by_user_id": "usr_01JXYZ7K",
         "name": "CI pipeline",
         "key_id": "01JXYZ7K",

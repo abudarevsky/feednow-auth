@@ -36,25 +36,36 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.schemas.manifest import endpoint_for
-from app.api.schemas.organizations import OrganizationCreateRequest, OrganizationResponse
+from app.api.schemas.organizations import (
+    OrganizationCreateRequest,
+    OrganizationRenameRequest,
+    OrganizationResponse,
+)
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_user
-from app.auth.organization_access import OrganizationAccess, build_organization_member_dependency
+from app.auth.organization_access import (
+    OrganizationAccess,
+    build_organization_admin_dependency,
+    build_organization_member_dependency,
+)
+from app.auth.session import SessionManager
+from app.models.enums import OrganizationNameStatus, OrganizationStatus
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams
+from app.models.timestamps import utc_now
 from app.services import organization as organization_service
 from app.services.authorization import (
     OrganizationSlugConflictError,
     OrganizationTypeNotSelectableError,
 )
 from app.services.identity import ResolvedIdentity
-from app.storage.contract import InvalidCursorError, Storage
-from app.auth.session import SessionManager
+from app.storage.contract import EntityNotFoundError, InvalidCursorError, Storage
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_organizations")
 _CREATE_SPEC = endpoint_for("create_organization")
 _GET_SPEC = endpoint_for("get_organization")
+_PATCH_SPEC = endpoint_for("rename_organization")
 
 #: Fixed safe message for a rejected client cursor (decision 6; the adapter's
 #: cursor text never echoes upward).
@@ -69,6 +80,8 @@ def _to_response(organization: Organization) -> OrganizationResponse:
         slug=organization.slug,
         type=organization.type,
         status=organization.status,
+        name_status=organization.name_status,
+        suspended_at=organization.suspended_at,
         created_at=organization.created_at,
         updated_at=organization.updated_at,
     )
@@ -89,7 +102,18 @@ def build_organizations_router(
     router = APIRouter(tags=["organizations"])
     current_user = build_current_user(storage, verifier, profile_source, session_manager)
     get_access = build_organization_member_dependency(
-        storage, verifier, "get_organization", profile_source=profile_source, session_manager=session_manager
+        storage,
+        verifier,
+        "get_organization",
+        profile_source=profile_source,
+        session_manager=session_manager,
+    )
+    rename_access = build_organization_admin_dependency(
+        storage,
+        verifier,
+        "rename_organization",
+        profile_source=profile_source,
+        session_manager=session_manager,
     )
 
     def list_organizations(
@@ -113,6 +137,12 @@ def build_organizations_router(
     ) -> OrganizationResponse:
         """Atomically create the customer organization with the caller as owner."""
         try:
+            current_organization = storage.get_organization(identity.context.organization_id)
+        except EntityNotFoundError as exc:
+            raise HTTPException(status_code=403, detail="organization access is suspended") from exc
+        if current_organization.status is not OrganizationStatus.ACTIVE:
+            raise HTTPException(status_code=403, detail="organization access is suspended")
+        try:
             created = organization_service.create_organization(
                 storage,
                 identity.user.id,
@@ -131,6 +161,21 @@ def build_organizations_router(
     ) -> OrganizationResponse:
         """One organization, already authorized by the member dependency."""
         return _to_response(access.organization)
+
+    def rename_organization(
+        body: OrganizationRenameRequest,
+        access: Annotated[OrganizationAccess, Depends(rename_access)],
+    ) -> OrganizationResponse:
+        updated = access.organization.model_copy(
+            update={
+                "name": body.name.strip(),
+                "name_status": OrganizationNameStatus.CONFIRMED,
+                "updated_at": utc_now(),
+            }
+        )
+        if not updated.name:
+            raise HTTPException(status_code=422, detail="organization name is required")
+        return _to_response(storage.update_organization(updated))
 
     router.add_api_route(
         _LIST_SPEC.path,
@@ -152,6 +197,13 @@ def build_organizations_router(
         methods=[_GET_SPEC.method],
         status_code=_GET_SPEC.success_status,
         response_model=_GET_SPEC.response_model,
+    )
+    router.add_api_route(
+        _PATCH_SPEC.path,
+        rename_organization,
+        methods=[_PATCH_SPEC.method],
+        status_code=_PATCH_SPEC.success_status,
+        response_model=_PATCH_SPEC.response_model,
     )
     return router
 

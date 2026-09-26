@@ -231,7 +231,19 @@ def test_create_returns_org_and_writes_owner_batch_atomically(caller: tuple[_Env
     assert body["type"] == "customer"
     assert body["status"] == "active"
     assert body["id"].startswith("org_")
-    assert {"id", "name", "slug", "type", "status", "created_at", "updated_at"} == set(body)
+    assert {
+        "id",
+        "name",
+        "slug",
+        "type",
+        "status",
+        "name_status",
+        "suspended_at",
+        "created_at",
+        "updated_at",
+    } == set(body)
+    assert body["name_status"] == "confirmed"
+    assert body["suspended_at"] is None
 
     # Direct SQLite reads: exactly the batch, nothing else.
     org_rows = [row for row in rows(env.db_path, "organizations") if row["id"] == body["id"]]
@@ -441,6 +453,20 @@ def test_get_organization_200_for_every_active_role(matrix: _Env, role: str) -> 
     assert response.status_code == 200
     assert response.json()["id"] == "org_matrix"
     assert _denial_rows(matrix) == []  # grants are never denial-audited
+
+
+def test_owner_can_rename_organization_and_confirms_name(matrix: _Env) -> None:
+    headers = matrix.auth(matrix.token("owner-sub", "owner@example.test"))
+    before = matrix.storage.get_organization(OrganizationId("org_matrix"))
+    response = matrix.client.patch(
+        "/v1/organizations/org_matrix", headers=headers, json={"name": "Acme Construction"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "Acme Construction"
+    assert body["name_status"] == "confirmed"
+    assert body["created_at"] == before.created_at.isoformat().replace("+00:00", "Z")
+    assert body["updated_at"] >= before.updated_at.isoformat().replace("+00:00", "Z")
 
 
 @pytest.mark.parametrize("role", ["owner", "admin", "member", "viewer"])

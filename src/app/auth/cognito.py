@@ -681,7 +681,14 @@ class CognitoUserInfoClient:
         elif raw_email_verified == "true":
             email_verified = True
         elif raw_email_verified == "false":
-            email_verified = False
+            # Cognito can leave the standard attribute false for a freshly
+            # federated Google profile even when Google's verified-email
+            # claim was mapped into our dedicated proof attribute. The
+            # custom claim is returned by /oauth2/userInfo under `profile`
+            # scope and is populated only by the configured Google mapping.
+            # Keep this exact, source-specific proof as a narrow fallback;
+            # missing/false/malformed claims still fail closed.
+            email_verified = payload.get("custom:g_verified") == "true"
         else:
             raise TokenValidationError("profile email_verified claim is invalid")
 

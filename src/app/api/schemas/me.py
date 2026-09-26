@@ -12,6 +12,10 @@ phases cannot close without breaking consumers.
 
 from __future__ import annotations
 
+from typing import Annotated
+
+from pydantic import StringConstraints, field_validator
+
 from app.api.schemas.common import ApiSchema
 from app.models.enums import ApplicationRole, UserStatus
 from app.models.ids import UserId
@@ -31,4 +35,13 @@ class MeResponse(ApiSchema):
     updated_at: UtcDatetime
 
 
-__all__ = ["MeResponse"]
+class ProfileUpdateRequest(ApiSchema):
+    display_name: Annotated[str, StringConstraints(min_length=2, max_length=255)]
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def trim_display_name(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+
+__all__ = ["MeResponse", "ProfileUpdateRequest"]

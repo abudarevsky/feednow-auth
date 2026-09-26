@@ -57,6 +57,7 @@ CREATED_AT = "2026-09-12T10:00:00Z"
 VALID_SUMMARY: dict[str, Any] = {
     "id": "key_01JXYZ7K",
     "name": "CI pipeline",
+    "service_id": "vispector",
     "environment": "test",
     "key_prefix": "fn_test_01JXYZ7K_a8f3",
     "status": "active",
@@ -180,6 +181,7 @@ def test_summary_field_list_is_masked_only() -> None:
     assert list(ApiKeySummary.model_fields) == [
         "id",
         "name",
+        "service_id",
         "environment",
         "key_prefix",
         "status",
@@ -271,6 +273,8 @@ def test_organization_response_shape_and_unknown_field_rejection() -> None:
         "slug",
         "type",
         "status",
+        "name_status",
+        "suspended_at",
         "created_at",
         "updated_at",
     ]
@@ -280,6 +284,8 @@ def test_organization_response_shape_and_unknown_field_rejection() -> None:
         "slug": "acme",
         "type": "customer",
         "status": "active",
+        "name_status": "confirmed",
+        "suspended_at": None,
         "created_at": CREATED_AT,
         "updated_at": CREATED_AT,
     }
@@ -326,6 +332,7 @@ def test_list_pages_validate_and_clamp_limit() -> None:
                     "slug": "acme",
                     "type": "personal",
                     "status": "active",
+                    "name_status": "confirmed",
                     "created_at": CREATED_AT,
                     "updated_at": CREATED_AT,
                 }

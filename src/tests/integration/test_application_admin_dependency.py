@@ -27,6 +27,7 @@ Proofs:
 # ``Annotated[..., Depends(admin_dep)]`` references a closure local that
 # PEP 563 stringification could not resolve at import time.
 
+import json
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -39,6 +40,7 @@ from fastapi import APIRouter, Depends
 from fastapi.testclient import TestClient
 from support.cognito import JwksTestServer, TestKey, generate_test_key, sign_token
 
+from app.api.admin import build_admin_router
 from app.auth.application_access import (
     APPLICATION_ADMIN_FORBIDDEN_MESSAGE,
     build_application_admin_dependency,
@@ -66,6 +68,7 @@ from app.models.external_identity import ExternalIdentity
 from app.models.ids import ApiKeyId, ExternalIdentityId, MembershipId, OrganizationId, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
+from app.models.pagination import PageParams
 from app.models.user import User
 from app.storage.sqlite import SQLiteStorage
 
@@ -117,7 +120,8 @@ class _GateEnv:
             return {"actor": str(principal.context.actor_id)}
 
         probe.add_api_route("/v1/probe/application-admin", admin_probe, methods=["GET"])
-        app = create_app(routers=[probe])
+        admin_router = build_admin_router(self.storage, verifier, pepper_source=self.pepper)
+        app = create_app(routers=[probe, admin_router])
         self.client = TestClient(app, raise_server_exceptions=False)
         self.issuer = issuer
         self.key = key
@@ -274,6 +278,97 @@ def test_admin_human_grant_mutates_nothing(env: _GateEnv) -> None:
     assert response.status_code == 200
     after = {t: table_dump(env.db_path, t) for t in ("users", "api_keys", "audit_events")}
     assert after == before
+
+
+def test_admin_read_api_returns_distinct_counts_search_and_real_members(env: _GateEnv) -> None:
+    headers = env.auth(env.token("admin-sub", "admin@example.test"))
+    summary = env.client.get("/v1/admin/summary", headers=headers)
+    assert summary.status_code == 200
+    assert summary.json() == {"organization_count": 1, "active_membership_count": 2}
+
+    search = env.client.get("/v1/admin/organizations?q=GATE&limit=10", headers=headers)
+    assert search.status_code == 200, search.json()
+    page = search.json()
+    assert len(page["items"]) == 1
+    organization = page["items"][0]
+    assert organization["name"] == "seed org_gate"
+    assert organization["member_count"] == 2
+    assert {member["email"] for member in organization["members"]} == {
+        "admin@example.test",
+        "regular@example.test",
+    }
+
+    detail = env.client.get("/v1/admin/organizations/org_gate", headers=headers)
+    assert detail.status_code == 200
+    body = detail.json()
+    assert body["members"][0]["registered_at"]
+    assert body["members"][0]["joined_at"]
+    assert body["services"] == [{"id": "vispector", "name": "Vispector"}]
+    assert len(body["api_keys"]) == 2
+    assert "secret_hash" not in json.dumps(body)
+    assert SECRET not in json.dumps(body)
+
+
+def test_admin_can_suspend_then_delete_organization_with_confirmation(env: _GateEnv) -> None:
+    headers = env.auth(env.token("admin-sub", "admin@example.test"))
+    mismatch = env.client.post(
+        "/v1/admin/organizations/org_gate/delete",
+        headers=headers,
+        json={"organization_name": "wrong name"},
+    )
+    assert mismatch.status_code == 409
+    suspended = env.client.post(
+        "/v1/admin/organizations/org_gate/suspend",
+        headers=headers,
+        json={"confirmation": "SUSPEND"},
+    )
+    assert suspended.status_code == 204
+    organization = env.storage.get_organization(OrganizationId("org_gate"))
+    assert organization.status is OrganizationStatus.DISABLED
+    assert organization.suspended_at is not None
+    assert env.storage.get_user(UserId("usr_regular")).status is UserStatus.ACTIVE
+    # Platform administrators retain their global administration access.
+    assert env.storage.get_user(UserId("usr_admin")).status is UserStatus.ACTIVE
+    memberships = env.storage.list_memberships(OrganizationId("org_gate"), PageParams(limit=20))
+    assert all(membership.status is MembershipStatus.ACTIVE for membership in memberships.items)
+    assert all(
+        key.status is ApiKeyStatus.REVOKED
+        for key in env.storage.list_api_keys(OrganizationId("org_gate"), PageParams(limit=20)).items
+    )
+    reactivated = env.client.post(
+        "/v1/admin/organizations/org_gate/reactivate",
+        headers=headers,
+        json={"confirmation": "REACTIVATE"},
+    )
+    assert reactivated.status_code == 204
+    restored = env.storage.get_organization(OrganizationId("org_gate"))
+    assert restored.status is OrganizationStatus.ACTIVE
+    assert restored.suspended_at is None
+    # Reactivation restores organization access without reviving revoked keys.
+    assert all(
+        key.status is ApiKeyStatus.REVOKED
+        for key in env.storage.list_api_keys(OrganizationId("org_gate"), PageParams(limit=20)).items
+    )
+    # Global admin authorization remains usable when this was their final
+    # active membership, so the same admin can complete the removal.
+    assert env.client.get("/v1/admin/summary", headers=headers).status_code == 200
+    deleted = env.client.post(
+        "/v1/admin/organizations/org_gate/delete",
+        headers=headers,
+        json={"organization_name": "seed org_gate"},
+    )
+    assert deleted.status_code == 204
+    assert table_dump(env.db_path, "organizations") == []
+    assert table_dump(env.db_path, "users") == []
+
+
+def test_ordinary_user_is_denied_from_admin_read_api(env: _GateEnv) -> None:
+    response = env.client.get(
+        "/v1/admin/summary",
+        headers=env.auth(env.token("regular-sub", "regular@example.test")),
+    )
+    assert response.status_code == 403
+    assert Error.model_validate(response.json()).message == APPLICATION_ADMIN_FORBIDDEN_MESSAGE
 
 
 # ---------------------------------------------------------------------------

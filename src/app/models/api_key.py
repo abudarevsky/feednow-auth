@@ -62,6 +62,7 @@ class ApiKey(BaseModel):
 
     id: ApiKeyId
     organization_id: OrganizationId
+    service_id: str = "vispector"
     created_by_user_id: UserId
     name: ApiKeyName
     key_id: KeyId

@@ -508,15 +508,19 @@ def external_identity_from_item(item: Mapping[str, Any]) -> ExternalIdentity:
 
 def organization_item(organization: Organization) -> dict[str, Any]:
     """The ``organizations`` item for one domain organization (``pk`` is ``org_``)."""
-    return {
+    item = {
         "pk": str(organization.id),
         "name": organization.name,
         "slug": organization.slug,
         "type": str(organization.type),
         "status": str(organization.status),
+        "name_status": str(organization.name_status),
         "created_at": encode_timestamp(organization.created_at),
         "updated_at": encode_timestamp(organization.updated_at),
     }
+    if organization.suspended_at is not None:
+        item["suspended_at"] = encode_timestamp(organization.suspended_at)
+    return item
 
 
 def organization_from_item(item: Mapping[str, Any]) -> Organization:
@@ -528,6 +532,10 @@ def organization_from_item(item: Mapping[str, Any]) -> Organization:
             "slug": item["slug"],
             "type": item["type"],
             "status": item["status"],
+            "name_status": item.get("name_status", "confirmed"),
+            "suspended_at": None
+            if item.get("suspended_at") is None
+            else decode_timestamp(item["suspended_at"]),
             "created_at": decode_timestamp(item["created_at"]),
             "updated_at": decode_timestamp(item["updated_at"]),
         }
@@ -593,6 +601,7 @@ def api_key_item(api_key: ApiKey) -> dict[str, Any]:
     item: dict[str, Any] = {
         "pk": str(api_key.id),
         "organization_id": str(api_key.organization_id),
+        "service_id": api_key.service_id,
         "created_by_user_id": str(api_key.created_by_user_id),
         "name": api_key.name,
         "key_id": api_key.key_id,
@@ -625,6 +634,7 @@ def api_key_from_item(item: Mapping[str, Any]) -> ApiKey:
     payload: dict[str, Any] = {
         "id": item["pk"],
         "organization_id": item["organization_id"],
+        "service_id": item.get("service_id", "vispector"),
         "created_by_user_id": item["created_by_user_id"],
         "name": item["name"],
         "key_id": item["key_id"],
@@ -1269,6 +1279,24 @@ class DynamoDbStorage:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_item(item)
 
+    def update_user(self, user: User) -> User:
+        try:
+            self._client().update_item(
+                TableName=self._table("users"),
+                Key={"pk": str(user.id)},
+                UpdateExpression="SET display_name = :name, updated_at = :updated_at",
+                ExpressionAttributeValues={
+                    ":name": user.display_name,
+                    ":updated_at": encode_timestamp(user.updated_at),
+                },
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("user not found") from None
+            raise StorageError("storage update failed") from None
+        return user
+
     def list_users_by_email(self, email: str) -> list[User]:
         """Exact-match lookup of every user that carries ``email`` (Phase 12).
 
@@ -1815,6 +1843,28 @@ class DynamoDbStorage:
         if item is None:
             raise EntityNotFoundError(f"no organization with id {organization_id!r}")
         return organization_from_item(item)
+
+    def update_organization(self, organization: Organization) -> Organization:
+        try:
+            self._client().update_item(
+                TableName=self._table("organizations"),
+                Key={"pk": str(organization.id)},
+                UpdateExpression=(
+                    "SET #name = :name, name_status = :name_status, updated_at = :updated_at"
+                ),
+                ExpressionAttributeNames={"#name": "name"},
+                ExpressionAttributeValues={
+                    ":name": organization.name,
+                    ":name_status": str(organization.name_status),
+                    ":updated_at": encode_timestamp(organization.updated_at),
+                },
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("organization not found") from None
+            raise StorageError("storage update failed") from None
+        return organization
 
     def create_membership(self, membership: Membership) -> Membership:
         """Grant a user a role in an organization (caller-echo).

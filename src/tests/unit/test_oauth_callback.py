@@ -162,6 +162,8 @@ def test_route_matches_the_pinned_wip09_callback_uri() -> None:
 def _load_local_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> ModuleType:
     monkeypatch.setenv("FEEDNOW_COGNITO_ISSUERS", "https://cognito.example.invalid")
     monkeypatch.setenv("FEEDNOW_COGNITO_CLIENT_IDS", "localclient123456")
+    monkeypatch.setenv("FEEDNOW_COGNITO_CLIENT_ID", "localclient123456")
+    monkeypatch.setenv("FEEDNOW_COGNITO_DOMAIN", "https://local.auth.example.test")
     monkeypatch.setenv("FEEDNOW_PEPPER_SECRET", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     monkeypatch.setenv("FEEDNOW_SQLITE_PATH", str(tmp_path / "runtime.db"))
 
@@ -180,10 +182,34 @@ def test_local_runtime_mounts_the_callback_route(
     runtime = _load_local_runtime(monkeypatch, tmp_path)
     client = TestClient(runtime.app)
 
-    # The capture page shares the app with the real API routers.
-    assert client.get(f"/oauth/callback?code={SECRET_CODE}&state={STATE}").status_code == 200
+    # OAuth callback now consumes only backend-created single-use state.
+    # An unsolicited code is rejected and never reflected into the response.
+    response = client.get(f"/oauth/callback?code={SECRET_CODE}&state={STATE}")
+    assert response.status_code == 401
+    assert SECRET_CODE not in response.text
     assert client.get("/health").status_code == 200
     assert client.get("/v1/me").status_code == 401
+    csrf = client.get("/v1/csrf")
+    assert csrf.status_code == 401
+    assert "feednow_csrf=" not in csrf.headers.get("set-cookie", "")
+
+
+@pytest.mark.skipif(
+    not LOCAL_RUNTIME_PATH.exists(),
+    reason="deploy/docker/local_runtime.py not restored yet (Phase 10 task 2)",
+)
+def test_local_csrf_token_is_opaque_and_bound_to_its_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    runtime = _load_local_runtime(monkeypatch, tmp_path)
+    first = runtime._session_csrf_token(b"k" * 32, "session-one-long-random-id")
+    same_session = runtime._session_csrf_token(b"k" * 32, "session-one-long-random-id")
+    another_session = runtime._session_csrf_token(b"k" * 32, "session-two-long-random-id")
+
+    assert first == same_session
+    assert first != another_session
+    assert "session-one" not in first
+    assert len(first) == 64
 
 
 @pytest.mark.skipif(
@@ -203,7 +229,7 @@ def test_local_runtime_access_log_never_carries_the_code(
     with caplog.at_level(logging.INFO), caplog.filtering(_SilenceLogger("httpx")):
         response = client.get(f"/oauth/callback?code={SECRET_CODE}&state={STATE}")
 
-    assert response.status_code == 200
+    assert response.status_code == 401
     assert SECRET_CODE not in caplog.text
     assert caplog.records == []
 

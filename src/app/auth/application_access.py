@@ -46,10 +46,12 @@ from typing import Annotated, Final
 from fastapi import Depends, HTTPException
 
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
-from app.auth.dependencies import build_current_principal
+from app.auth.dependencies import build_current_principal, build_current_user_without_organization
 from app.auth.pepper import PepperSource
 from app.auth.principal import Principal
+from app.auth.session import SessionManager
 from app.models.enums import ApplicationRole
+from app.models.user import User
 from app.storage.contract import Storage
 
 #: The one fixed 403 message for every denial shape (uniform, existence-
@@ -64,6 +66,7 @@ def build_application_admin_dependency(
     verifier: AccessTokenVerifier,
     pepper_source: PepperSource,
     profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
 ) -> Callable[..., Principal]:
     """Return the ``Principal`` dependency restricted to application admins.
 
@@ -81,7 +84,9 @@ def build_application_admin_dependency(
     verbatim — handlers reach the admin's ``usr_`` through its unchanged
     §10 context.
     """
-    current_principal = build_current_principal(storage, verifier, pepper_source, profile_source)
+    current_principal = build_current_principal(
+        storage, verifier, pepper_source, profile_source, session_manager
+    )
 
     def application_admin_principal(
         principal: Annotated[Principal, Depends(current_principal)],
@@ -94,7 +99,30 @@ def build_application_admin_dependency(
     return application_admin_principal
 
 
+def build_application_admin_user_dependency(
+    storage: Storage,
+    verifier: AccessTokenVerifier,
+    pepper_source: PepperSource,
+    profile_source: ProfileSource | None = None,
+    session_manager: SessionManager | None = None,
+) -> Callable[..., User]:
+    """Authorize global admins independently of organization membership."""
+    current_user = build_current_user_without_organization(
+        storage, verifier, profile_source, session_manager
+    )
+
+    def application_admin_user(
+        user: Annotated[User, Depends(current_user)],
+    ) -> User:
+        if user.application_role is ApplicationRole.ADMIN:
+            return user
+        raise HTTPException(status_code=403, detail=APPLICATION_ADMIN_FORBIDDEN_MESSAGE)
+
+    return application_admin_user
+
+
 __all__ = [
     "APPLICATION_ADMIN_FORBIDDEN_MESSAGE",
     "build_application_admin_dependency",
+    "build_application_admin_user_dependency",
 ]

@@ -68,23 +68,27 @@ from app.models.ids import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src"
 
-#: The 25 §11/§12 operations: the 18 Phase 02 methods (spec surface plus the
+#: The 28 storage operations: the 18 Phase 02 methods (spec surface plus the
 #: ``provision_user`` compound), the Phase 04 ``provision_organization``
 #: compound (breakdown decision 2 — an explicit addition to the current
 #: phase's contract), the four additive Phase 11 login-state/session
 #: operations, the additive Phase 12 ``list_users_by_email`` exact lookup,
 #: and the additive Phase 13 ``transition_application_role`` atomic role
-#: transition.
+#: transition, plus local account organization update, user profile update,
+#: and user listing.
 CONTRACT_METHODS = frozenset(
     {
         "create_user",
         "get_user",
+        "update_user",
+        "list_users",
         "list_users_by_email",
         "create_external_identity",
         "get_user_by_external_identity",
         "transition_application_role",
         "create_organization",
         "get_organization",
+        "update_organization",
         "list_user_organizations",
         "create_membership",
         "get_membership",
@@ -511,16 +515,14 @@ def test_plain_object_does_not_satisfy_isinstance() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Protocol surface: 25 methods, sync, domain-only types
+# 4. Protocol surface: 27 methods, sync, domain-only types
 # ---------------------------------------------------------------------------
 
 
-def test_protocol_exposes_exactly_the_24_contract_methods() -> None:
-    # The name keeps its Phase 12 spelling; Phase 13 added the 25th method
-    # (transition_application_role), and the assertion is the truth here.
+def test_protocol_exposes_exactly_the_28_contract_methods() -> None:
     members = typing.get_protocol_members(contract.Storage)
     assert members == set(CONTRACT_METHODS)
-    assert len(members) == 25
+    assert len(members) == 28
 
 
 @pytest.mark.parametrize("name", sorted(CONTRACT_METHODS))

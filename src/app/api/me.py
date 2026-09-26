@@ -29,15 +29,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 
 from app.api.schemas.manifest import endpoint_for
-from app.api.schemas.me import MeResponse
+from app.api.schemas.me import MeResponse, ProfileUpdateRequest
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_user
+from app.auth.session import SessionManager
+from app.models.timestamps import utc_now
 from app.services.identity import ResolvedIdentity
 from app.storage.contract import Storage
-from app.auth.session import SessionManager
 
 #: The frozen §14 entry this router must register exactly.
 _ME_SPEC = endpoint_for("get_current_user")
+_PROFILE_SPEC = endpoint_for("update_current_user_profile")
 
 
 def build_me_router(
@@ -79,6 +81,24 @@ def build_me_router(
         methods=[_ME_SPEC.method],
         status_code=_ME_SPEC.success_status,
         response_model=_ME_SPEC.response_model,
+    )
+
+    def update_current_user(
+        request: ProfileUpdateRequest,
+        identity: Annotated[ResolvedIdentity, Depends(current_user)],
+    ) -> MeResponse:
+        user = identity.user.model_copy(
+            update={"display_name": request.display_name.strip(), "updated_at": utc_now()}
+        )
+        stored = storage.update_user(user)
+        return MeResponse(**stored.model_dump())
+
+    router.add_api_route(
+        _PROFILE_SPEC.path,
+        update_current_user,
+        methods=[_PROFILE_SPEC.method],
+        status_code=_PROFILE_SPEC.success_status,
+        response_model=_PROFILE_SPEC.response_model,
     )
     return router
 

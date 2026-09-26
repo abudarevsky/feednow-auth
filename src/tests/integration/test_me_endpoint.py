@@ -181,7 +181,7 @@ def env(tmp_path: Path, key: TestKey) -> Iterator[_Env]:
 def test_me_provisions_once_and_returns_internal_identity(env: _Env) -> None:
     response = env.client.get("/v1/me", headers=env.auth(env.token()))
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     body = response.json()
     assert body["id"].startswith("usr_")
     assert body["display_name"] == "me-user"
@@ -219,6 +219,19 @@ def test_me_provisions_once_and_returns_internal_identity(env: _Env) -> None:
     assert env.storage.calls.count("provision_user") == 1  # still exactly once
     assert env.storage.calls.count("get_user_by_external_identity") == 2  # hit path
     assert env.profile_source.fetched_subjects == [SUBJECT]  # zero fetches on the hit
+
+
+def test_me_profile_patch_updates_display_name_only(env: _Env) -> None:
+    headers = env.auth(env.token())
+    current = env.client.get("/v1/me", headers=headers)
+    user_id = current.json()["id"]
+    response = env.client.patch(
+        "/v1/me", headers=headers, json={"display_name": "  Ada Lovelace  "}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "Ada Lovelace"
+    assert response.json()["email"] == EMAIL
+    assert env.storage.get_user(UserId(user_id)).display_name == "Ada Lovelace"
 
 
 def test_first_login_provisions_with_profile_email_not_claims_email(env: _Env) -> None:

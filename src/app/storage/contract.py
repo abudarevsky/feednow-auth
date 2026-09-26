@@ -321,6 +321,10 @@ class Storage(Protocol):
         """
         ...
 
+    def update_user(self, user: User) -> User:
+        """Persist caller-owned mutable profile fields and timestamp."""
+        ...
+
     def list_users_by_email(self, email: str) -> list[User]:
         """Exact-match lookup of every user that carries ``email`` (Phase 12).
 
@@ -469,6 +473,10 @@ class Storage(Protocol):
         Raises:
             EntityNotFoundError: when no such organization exists.
         """
+        ...
+
+    def update_organization(self, organization: Organization) -> Organization:
+        """Persist mutable organization name/status/timestamp fields."""
         ...
 
     def list_user_organizations(

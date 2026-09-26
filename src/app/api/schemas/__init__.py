@@ -15,6 +15,13 @@ No routers or handlers live here; endpoint behavior is owner-phase work
 (Phase 01 non-goal).
 """
 
+from app.api.schemas.admin import (
+    AdminMember,
+    AdminOrganization,
+    AdminOrganizationDetail,
+    AdminOrganizationQuery,
+    AdminSummary,
+)
 from app.api.schemas.api_keys import (
     ApiKeyCreatedResponse,
     ApiKeyCreateRequest,
@@ -30,11 +37,20 @@ from app.api.schemas.manifest import (
 )
 from app.api.schemas.me import MeResponse
 from app.api.schemas.members import MemberCreateRequest, MemberResponse
-from app.api.schemas.organizations import OrganizationCreateRequest, OrganizationResponse
+from app.api.schemas.organizations import (
+    OrganizationCreateRequest,
+    OrganizationRenameRequest,
+    OrganizationResponse,
+)
 
 __all__ = [
     "API_V1_PREFIX",
     "ENDPOINTS",
+    "AdminMember",
+    "AdminOrganization",
+    "AdminOrganizationDetail",
+    "AdminOrganizationQuery",
+    "AdminSummary",
     "ApiKeyCreateRequest",
     "ApiKeyCreatedResponse",
     "ApiKeySummary",
@@ -45,6 +61,7 @@ __all__ = [
     "MemberCreateRequest",
     "MemberResponse",
     "OrganizationCreateRequest",
+    "OrganizationRenameRequest",
     "OrganizationResponse",
     "Page",
     "PageParams",
