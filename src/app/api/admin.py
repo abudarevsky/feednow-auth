@@ -18,6 +18,7 @@ from app.auth.application_access import build_application_admin_user_dependency
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.pepper import PepperSource
 from app.auth.session import SessionManager
+from app.models.enums import MembershipRole
 from app.models.ids import OrganizationId
 from app.models.pagination import PageParams
 from app.models.timestamps import utc_now
@@ -70,6 +71,26 @@ def build_admin_router(
             )
         return result
 
+    def current_user_owns_organization(
+        organization_id: OrganizationId, principal: User
+    ) -> bool:
+        try:
+            membership = storage.get_membership(
+                organization_id=organization_id, user_id=principal.id
+            )
+        except EntityNotFoundError:
+            return False
+        return membership.role is MembershipRole.OWNER
+
+    def reject_owner_destructive_action(
+        organization_id: OrganizationId, principal: User
+    ) -> None:
+        if current_user_owns_organization(organization_id, principal):
+            raise HTTPException(
+                status_code=409,
+                detail="application administrators cannot suspend or delete their own organization",
+            )
+
     @router.get(
         _SUMMARY_SPEC.path.removeprefix("/v1/admin"), response_model=_SUMMARY_SPEC.response_model
     )
@@ -81,7 +102,7 @@ def build_admin_router(
         _SEARCH_SPEC.path.removeprefix("/v1/admin"), response_model=_SEARCH_SPEC.response_model
     )
     def search_organizations(
-        _principal: Annotated[User, Depends(current_admin)],
+        principal: Annotated[User, Depends(current_admin)],
         limit: Annotated[int, Query(ge=1, le=100)] = 20,
         cursor: Annotated[str | None, Query(max_length=2048)] = None,
         q: Annotated[str, Query(max_length=120)] = "",
@@ -102,6 +123,7 @@ def build_admin_router(
                     created_at=org.created_at,
                     member_count=len(members),
                     members=members,
+                    is_current_user_owner=current_user_owns_organization(org.id, principal),
                 )
             )
         return {"items": items, "limit": result.limit, "next_cursor": result.next_cursor}
@@ -111,7 +133,7 @@ def build_admin_router(
     )
     def organization_detail(
         organization_id: OrganizationId,
-        _principal: Annotated[User, Depends(current_admin)],
+        principal: Annotated[User, Depends(current_admin)],
     ) -> AdminOrganizationDetail:
         try:
             org = storage.get_organization(organization_id)
@@ -128,6 +150,7 @@ def build_admin_router(
             created_at=org.created_at,
             member_count=len(members),
             members=members,
+            is_current_user_owner=current_user_owns_organization(org.id, principal),
             type=str(org.type),
             updated_at=org.updated_at,
             services=[{"id": "vispector", "name": "Vispector"}],
@@ -176,8 +199,9 @@ def build_admin_router(
     def suspend_organization(
         organization_id: OrganizationId,
         request: AdminSuspendRequest,
-        _principal: Annotated[User, Depends(current_admin)],
+        principal: Annotated[User, Depends(current_admin)],
     ) -> Response:
+        reject_owner_destructive_action(organization_id, principal)
         try:
             storage.admin_suspend_organization(organization_id, utc_now())
         except EntityNotFoundError as exc:
@@ -200,8 +224,9 @@ def build_admin_router(
     def delete_organization(
         organization_id: OrganizationId,
         request: AdminDeleteRequest,
-        _principal: Annotated[User, Depends(current_admin)],
+        principal: Annotated[User, Depends(current_admin)],
     ) -> Response:
+        reject_owner_destructive_action(organization_id, principal)
         try:
             organization = storage.get_organization(organization_id)
             if request.organization_name != organization.name:

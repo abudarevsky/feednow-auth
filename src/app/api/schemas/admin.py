@@ -40,6 +40,7 @@ class AdminOrganization(ApiSchema):
     created_at: UtcDatetime
     member_count: int
     members: list[AdminMember]
+    is_current_user_owner: bool
 
 
 class AdminOrganizationDetail(AdminOrganization):

@@ -293,6 +293,7 @@ def test_admin_read_api_returns_distinct_counts_search_and_real_members(env: _Ga
     organization = page["items"][0]
     assert organization["name"] == "seed org_gate"
     assert organization["member_count"] == 2
+    assert organization["is_current_user_owner"] is False
     assert {member["email"] for member in organization["members"]} == {
         "admin@example.test",
         "regular@example.test",
@@ -362,6 +363,59 @@ def test_admin_can_suspend_then_delete_organization_with_confirmation(env: _Gate
     assert table_dump(env.db_path, "users") == []
 
 
+def test_admin_cannot_suspend_or_delete_owned_organization(env: _GateEnv) -> None:
+    headers = env.auth(env.token("admin-sub", "admin@example.test"))
+
+    env.storage.create_organization(
+        Organization(
+            id=OrganizationId("org_admin_home"),
+            name="admin home organization",
+            slug="admin-home-org",
+            type=OrganizationType.PERSONAL,
+            status=OrganizationStatus.ACTIVE,
+            created_at=_T0,
+            updated_at=_T0,
+        )
+    )
+    env.storage.create_membership(
+        Membership(
+            id=MembershipId("mem_admin_home"),
+            organization_id=OrganizationId("org_admin_home"),
+            user_id=UserId("usr_admin"),
+            role=MembershipRole.OWNER,
+            status=MembershipStatus.ACTIVE,
+            created_at=_T0,
+        )
+    )
+
+    own_organization = env.client.get(
+        "/v1/admin/organizations/org_admin_home", headers=headers
+    )
+    assert own_organization.status_code == 200
+    assert own_organization.json()["is_current_user_owner"] is True
+
+    suspended = env.client.post(
+        "/v1/admin/organizations/org_admin_home/suspend",
+        headers=headers,
+        json={"confirmation": "SUSPEND"},
+    )
+    assert suspended.status_code == 409
+
+    deleted = env.client.post(
+        "/v1/admin/organizations/org_admin_home/delete",
+        headers=headers,
+        json={"organization_name": "admin home organization"},
+    )
+    assert deleted.status_code == 409
+    assert (
+        env.storage.get_organization(OrganizationId("org_admin_home")).status
+        is OrganizationStatus.ACTIVE
+    )
+    assert env.storage.get_membership(
+        organization_id=OrganizationId("org_admin_home"), user_id=UserId("usr_admin")
+    ).role is MembershipRole.OWNER
+
+
 def test_ordinary_user_is_denied_from_admin_read_api(env: _GateEnv) -> None:
     response = env.client.get(
         "/v1/admin/summary",
@@ -403,7 +457,7 @@ def test_active_key_with_scopes_is_the_uniform_403_not_a_401(env: _GateEnv) -> N
 
 
 def test_key_created_by_an_admin_is_the_uniform_403(env: _GateEnv) -> None:
-    """Spec 13 required behavior 6: every API key fails, **including keys
+    """contract 13 required behavior 6: every API key fails, **including keys
     owned by admins** (the key branch yields no user; contexts stay roleless)."""
     response = env.probe(build_literal(ApiKeyEnvironment.LIVE, SEG_ADMIN_OWNED, SECRET))
     assert response.status_code == 403
