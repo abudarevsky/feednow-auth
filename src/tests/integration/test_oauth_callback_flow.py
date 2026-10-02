@@ -1,9 +1,9 @@
-"""Integration proofs for ``GET /oauth/callback`` (Phase 11 breakdown task 12).
+"""Integration proofs for ``GET /oauth/callback`` (session design notes implementation).
 
 Full journey on the real stack minus live Cognito: a loopback JWKS server
 signs real RS256 tokens, the real :class:`~app.auth.cognito.CognitoAccessTokenVerifier`
 and SQLite storage back the flow, and doubles stand in for the token
-endpoint and the user-info profile source. The task-12 mapping table is the
+endpoint and the user-info profile source. The implementation mapping table is the
 contract, so every branch is pinned:
 
 - (a) provider ``error`` / missing ``code``/``state`` → 401, provider text
@@ -14,7 +14,7 @@ contract, so every branch is pinned:
   writes either way;
 - (e) profile subject/verification/shape failure → 401, outage → 503;
 - (f) disabled user → 403; a different ``sub`` sharing an existing user's
-  email provisions a second, independent user (Phase 12), never a 409;
+  email provisions a second, independent user (application-role), never a 409;
 - (g) success → 302 to the stored return URL with the ``feednow_session``
   cookie (``HttpOnly; SameSite=Lax; Path=/``; ``Secure`` caller-controlled),
   and a withdrawn return origin → 400 with **no** session issued.
@@ -22,7 +22,8 @@ contract, so every branch is pinned:
 Mocked native and Google-federated journeys are covered, plus the secrecy
 sweep: code, state, verifier, tokens, and email appear in no log record,
 error envelope, or redirect target.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -619,7 +620,7 @@ def test_disabled_user_is_403(env: _Env) -> None:
 
 
 def test_email_coexistence_provisions_second_user(env: _Env) -> None:
-    """Phase 12: a stranger already owns this email under a different sub.
+    """application-role: a stranger already owns this email under a different sub.
     The callback no longer 409s — the new sub provisions its own user
     through one full batch and receives a session; the identity tuple, not
     the email, is the convergence key, and the stranger is untouched."""

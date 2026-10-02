@@ -1,24 +1,24 @@
-"""``AuditEvent`` domain entity (spec §4, §16).
+"""``AuditEvent`` domain entity (domain model contract, audit contract).
 
 Records one audited action inside one organization. ``actor_type``/``actor_id``
-carry the same §10 semantics as
+carry the same authorization-context contract semantics as
 :class:`~app.models.authorization_context.AuthorizationContext` (application
 identity only; the ``aud_`` record ``id`` is internal and never an actor_id),
 including the actor-type/actor-id consistency rule.
 
-No-secrets rule (AGENTS.md; spec §16): ``metadata`` must never contain
-plaintext API keys, Cognito tokens, passwords, or refresh tokens. Phase 01
+No-secrets rule (AGENTS.md; audit contract): ``metadata`` must never contain
+plaintext API keys, Cognito tokens, passwords, or refresh tokens. The model
 types ``metadata`` as a JSON-safe mapping so adapters can persist it without
-lossy conversion; **runtime redaction of sensitive values is owner-phase
-work** (the services that emit audit events in Phases 03-05).
+lossy conversion; services must keep sensitive values out of audit payloads.
 
-Deliberate Phase 01 boundaries:
+Model boundaries:
 
-- ``action``/``target_type`` values (e.g. ``api_key.created`` per §16) are
-  bounded free strings; the canonical action vocabulary is owner-phase work.
+- ``action``/``target_type`` values (e.g. ``api_key.created``) are bounded
+  strings; services own the action vocabulary.
 - ``target_type``/``target_id`` are optional: not every audited action names a
   distinct target row (e.g. a broad ``authorization.denied``).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ AuditTargetId = Annotated[str, StringConstraints(min_length=1, max_length=128)]
 
 
 class AuditEvent(BaseModel):
-    """A record of one audited action (spec §4)."""
+    """A record of one audited action (domain model contract)."""
 
     model_config = ConfigDict(extra="forbid")
 

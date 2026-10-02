@@ -1,17 +1,18 @@
-"""``Organization`` domain entity (spec §4).
+"""``Organization`` domain entity (domain model contract).
 
 Every business resource in FeedNow applications belongs to an organization;
 ``id`` (``org_``) is the internal tenancy identity used across the API
-(spec §10, §14).
+(authorization-context contract, API contract).
 
-Deliberate Phase 01 boundaries (same policy as ``User.email``):
+Deliberate initial boundaries (same policy as ``User.email``):
 
 - ``slug`` is a bounded non-empty string only. Format rules (e.g. lowercase
-  hyphen-separated normalization) and slug uniqueness are owner-phase work —
-  provisioning in Phase 03 and storage constraints in Phase 02 — and are
+  hyphen-separated normalization) and slug uniqueness are owner-capability work —
+  provisioning in identity and storage constraints in storage — and are
   deliberately not pinned here.
 - ``name`` is bounded display text; no format rule beyond non-empty.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

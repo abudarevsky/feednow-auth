@@ -1,14 +1,14 @@
-"""Membership endpoint schemas (spec §14: members list / create / remove).
+"""Membership endpoint schemas (API contract: members list / create / remove).
 
-§15 defines no membership bodies, so these are Phase 01 **derived
+key-creation contract defines no membership bodies, so these are initial **derived
 payloads** — every field is listed in the manifest docstring and flagged as
-a spec-revision proposal:
+a contract-revision proposal:
 
 - :class:`MemberResponse` shows a membership as the organization sees it:
   ``user_id`` (``usr_`` application identity), ``role``, ``status``, and
   ``created_at`` (join time). The membership **record ID** (``mem_``) is
-  internal by Phase 01 convention and is deliberately not exposed; member
-  removal targets ``user_id`` (the §14 path parameter), never the record ID.
+  internal by initial convention and is deliberately not exposed; member
+  removal targets ``user_id`` (the API contract path parameter), never the record ID.
 - :class:`MemberCreateRequest` accepts ``user_id`` and ``role`` only.
   ``status`` is server-assigned (``active`` on add) — and removal is a
   physical delete (pinned enum decision), so there is no client-side
@@ -17,7 +17,8 @@ a spec-revision proposal:
   request or response body (204, declared in the manifest).
 
 List usage: ``GET .../members`` returns ``Page[MemberResponse]``.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

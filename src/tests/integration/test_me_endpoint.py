@@ -1,28 +1,29 @@
-"""Integration tests for ``GET /v1/me`` (Phase 03 task 5).
+"""Integration tests for ``GET /v1/me`` (identity).
 
 Full stack, no live Cognito pool (acceptance criterion 5): the loopback JWKS
 test server signs real RS256 tokens, real SQLite persists the provisioning
 batch, and ``TestClient(create_app(routers=[build_me_router(...)]))`` drives
-the frozen Phase 01 envelope. Acceptance mapping:
+the frozen initial envelope. Acceptance mapping:
 
 - each 401 variant (missing/malformed header, expired, wrong issuer, wrong
   client, ``token_use=id``, garbage token, forged signature) asserts **zero
   calls** on a recording storage wrapper — "rejected without storage mutation";
 - named non-401 cases: ``test_disabled_user_403``,
-  ``test_email_coexistence_provisions_second_user`` (Phase 12: a shared
+  ``test_email_coexistence_provisions_second_user`` (application-role: a shared
   email provisions a second user, it no longer 409s), ``test_jwks_down_503``
   — all seeded with existing create methods only;
 - the happy path returns ``usr_``/profile fields and the body carries no
   ``sub``, no ``client_id``, no token bytes; repeated requests provision
   exactly once; every error body validates against the frozen ``Error`` model.
 
-Phase 11 (tasks 4/5): first-login provisioning reads the email from the
+session (tasks 4/5): first-login provisioning reads the email from the
 verified user-info profile, so the environment wires a fake
 :class:`~app.auth.cognito.ProfileSource`; named tests prove the hit path
 makes **zero** user-info requests, the profile email (not the claims email)
 lands on the created user, and a bearer-only first login with no profile
 source is refused 401 without touching storage.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -235,7 +236,7 @@ def test_me_profile_patch_updates_display_name_only(env: _Env) -> None:
 
 
 def test_first_login_provisions_with_profile_email_not_claims_email(env: _Env) -> None:
-    """Phase 11 task 4/5: the stored email comes from the verified user-info
+    """session: the stored email comes from the verified user-info
     profile; the access-token ``email`` claim is never used for creation."""
     env.profile_source.emails["profile-wins-sub"] = "profile@example.test"
     token = env.token(sub="profile-wins-sub", email="claims-only@example.test")
@@ -294,7 +295,7 @@ def test_first_login_user_info_outage_is_503_without_provisioning(
 
 
 def test_first_login_without_profile_source_is_401(tmp_path: Path, key: TestKey) -> None:
-    """Task 5's rollback shape: with no user-info configuration a bearer-only
+    """implementation's rollback shape: with no user-info configuration a bearer-only
     first login is refused 401 with zero writes (never provisioned from
     claims)."""
     with JwksTestServer({"pool-a": [key]}) as server:
@@ -446,7 +447,7 @@ def test_disabled_user_403(env: _Env) -> None:
 
 
 def test_email_coexistence_provisions_second_user(env: _Env) -> None:
-    """Phase 12: a stranger already owns this email under a different sub —
+    """application-role: a stranger already owns this email under a different sub —
     that no longer blocks provisioning. The login creates a second,
     independent user through one full batch (own personal org, own
     membership); the identity tuple, not the email, is the convergence key,

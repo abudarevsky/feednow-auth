@@ -4,13 +4,24 @@
 
 `feednow-auth` owns FeedNow application identity, organization tenancy, authorization context, API credentials, and audit records. Cognito and future identity providers establish an external identity; they do not replace the internal `User` model or authorization rules.
 
-Work from `specs/draft/feednow-auth-service-specification.md`. The numbered plans in `specs/wip/` are the delivery contract and must be completed in order unless their stated dependency is already accepted.
+For new planned work, record source requirements under `specs/draft/` and
+sequence accepted implementation work under `specs/wip/`. Work from the
+current-state documentation when changing existing behavior.
 
 Start with `docs/README.md` for the current application architecture,
 contracts, operations, and verified state. Treat `docs/` as the source of truth
 for what exists. `specs/` defines future-state strategy and transformation
 steps; specs may link to docs for their baseline, but docs must not link to WIP
-or draft specs. Follow `docs/requirements.md`.
+or draft specs. Start with [the documentation index](docs/README.md).
+
+`docs/` is the canonical, phase-free description of implemented behavior.
+Keep it complete and internally consistent; do not copy phase handoffs or
+planning history into it. The documentation and production Python docstrings
+must describe enduring current behavior and must not mention phase numbers,
+phase plans, or `specs/` documents. When a source docstring needs to point
+readers to explanatory material, link the corresponding topic chapter in
+`docs/`. Keep phase ordering, acceptance criteria, and transformation steps in
+`specs/` only.
 
 ## Architecture boundaries
 

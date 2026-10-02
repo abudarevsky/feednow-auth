@@ -24,6 +24,9 @@ def main() -> None:
         "FeedNowAuthGoogleFederationFix-dev",
         user_pool_id=str(os.environ["GOOGLE_FIX_USER_POOL_ID"]),
         client_id=str(os.environ["GOOGLE_FIX_CLIENT_ID"]),
+        implementation_version=os.getenv(
+            "GOOGLE_FIX_IMPLEMENTATION_VERSION", "google-email-proof-v1"
+        ),
         env=cdk.Environment(
             account=os.environ["CDK_DEFAULT_ACCOUNT"],
             region=os.environ["AWS_REGION"],

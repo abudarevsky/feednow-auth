@@ -1,17 +1,17 @@
-"""Unit tests for the Phase 02 task-2 SQLite core (schema, connection, codecs).
+"""Unit tests for the storage implementation SQLite core (schema, connection, codecs).
 
-Scope per the breakdown: pure helpers and adapter plumbing only — codecs,
+Scope per the design notes: pure helpers and adapter plumbing only — codecs,
 mappers, DDL/PRAGMA behavior, cursor encoding, thread-local connections, and
 the factory surface. Storage *behavior* (duplicates, CAS, pagination,
-provisioning) is owned by the conformance suite added in task 3+; there are
+provisioning) is owned by the conformance suite added in implementation+; there are
 deliberately no behavior tests here.
 
 Verify lines covered:
 
 1. Schema init is idempotent on the same file (plus the four unique indexes
    and ``user_version`` stamp; an unknown stamped version is rejected, the
-   Phase 12 ``1 → 2`` migration brings a hand-built v1 file forward with data
-   retained and the email constraint retired, and the Phase 13 ``2 → 3``
+   application-role ``1 → 2`` migration brings a hand-built v1 file forward with data
+   retained and the email constraint retired, and the admin ``2 → 3``
    migration adds the ``users_application_role_lookup`` index — the ordered
    chain carries a v1 file all the way to the current stamp).
 2. FK enforcement is live even after prior DML on the connection — a raw
@@ -21,11 +21,12 @@ Verify lines covered:
 4. Cursor round-trip and tamper rejection (plus the foreign-scope rule).
 5. Mappers reject corrupt enums/prefixes (and rebuild domain objects from
    real rows).
-6. The factory object is ``Storage``-compatible against the task-1 stub check
+6. The factory object is ``Storage``-compatible against the implementation stub check
    (``isinstance`` under ``runtime_checkable``); the skeleton tripwire now
-   asserts the completed surface — with task 7 landed, no protocol method may
+   asserts the completed surface — with implementation landed, no protocol method may
    remain a ``NotImplementedError`` stub.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

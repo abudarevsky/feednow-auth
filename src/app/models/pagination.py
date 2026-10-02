@@ -1,16 +1,17 @@
 """Cursor pagination conventions shared by list endpoints and storage.
 
-Rules (Phase 01 contract):
+Rules (initial contract):
 
 - Pagination is cursor-based. A cursor is an **opaque** string: only storage
   adapters generate or decode its content, and no application layer may
   parse, construct, or depend on it (AGENTS.md: pagination tokens never leak
   above an adapter).
 - Page size is bounded: the default and maximum are pinned here and are the
-  single source of truth for API schemas (task 5) and adapters (Phase 02).
+  single source of truth for API schemas (implementation) and adapters (storage).
 - Request-side limits are **clamped** into range rather than rejected, so an
   over-large ``limit`` degrades gracefully to ``MAX_PAGE_LIMIT``.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

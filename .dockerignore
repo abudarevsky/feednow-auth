@@ -33,9 +33,7 @@ docs/
 specs/
 AGENTS.md
 
-# Deploy (CDK, smoke tests - not needed in runtime). The local Cognito
-# composition root and its OAuth callback capture page are the only
-# deployment files needed by the Docker build.
+# Deploy files needed by the local runtime and DynamoDB Local initializer.
 deploy/
 !deploy/
 deploy/*
@@ -43,6 +41,7 @@ deploy/*
 deploy/docker/*
 !deploy/docker/local_runtime.py
 !deploy/docker/oauth_callback.py
+!deploy/docker/dynamodb_local_init.py
 
 # Test files
 src/tests/

@@ -1,16 +1,17 @@
-"""Unit tests for the Phase 02 task-5 SQLite API-key operations.
+"""Unit tests for the storage implementation SQLite API-key operations.
 
-Scope per the breakdown: storage *behavior* (duplicate rejection, org
+Scope per the design notes: storage *behavior* (duplicate rejection, org
 scoping, tenancy non-filtering, CAS idempotency end-to-end) is owned by the
 conformance suite; this module pins the adapter-internal pieces only — the
-sqlite3→domain translation for the constraints task 5 exercises (produced
+sqlite3→domain translation for the constraints implementation exercises (produced
 against the *real* schema so the messages are the ones SQLite actually
 emits), the revocation CAS path (conditional-update rowcount →
 idempotent-success/not-found translation, including the stored-row
 discipline), the keyset cursor wiring of ``list_api_keys``, the
 defense-in-depth limit re-clamp, and the exact stored values (JSON scopes,
 enum strings, NULL optional timestamps).
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 

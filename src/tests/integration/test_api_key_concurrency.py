@@ -1,18 +1,18 @@
-"""Concurrency and duplicate-request acceptance proofs (Phase 05 task 7, part c).
+"""Concurrency and duplicate-request acceptance proofs (API-key, part c).
 
 The AGENTS.md concurrency mandate ("provisioning and credential revocation
 are concurrency-sensitive: define and test atomicity and duplicate-request
-behavior") at the Phase 05 HTTP seam, on the proven Phase 03/04 pattern:
+behavior") at the API-key HTTP seam, on the proven identity and organizationpattern:
 ``threading.Barrier`` releases (never sleeps), 20 parameterized repeats for
 stability, main-thread warm-up reads, and every final count asserted through
 **direct** SQLite reads on a fresh connection. Lock handling relies entirely
 on the adapter's existing ``busy_timeout`` + WAL discipline — nothing is
 added to production code here.
 
-Cases (breakdown task 7(c)):
+Cases (design notes implementation(c)):
 
 1. **8 concurrent revocations of one key** — every call is an idempotent
-   success (all 204, decision 10), the stored row carries exactly **one**
+   success (all 204, design choice 10), the stored row carries exactly **one**
    ``revoked_at`` (the CAS winner's timestamp — which is also one of the
    audited timestamps, proving the winner's own audit carried the stored
    truth), and each processed call appended its own truthful ``api_key.revoked``
@@ -23,17 +23,18 @@ Cases (breakdown task 7(c)):
    after the race verification fails — the contract's "immediately effective"
    proof with no cache in the service.
 2. **8 concurrent creations with the same body** — creation is non-idempotent
-   by design (decision 9): eight 201s, eight distinct ``key_`` identities,
-   eight distinct §8 segments and secrets, eight distinct literals, eight
+   by design (design choice 9): eight 201s, eight distinct ``key_`` identities,
+   eight distinct credential contract segments and secrets, eight distinct literals, eight
    ``api_key.created`` audits — no shared or reused credential material.
 3. **Forced collision from the minting generator** (monkeypatched ids) — the
-   UNIQUE index is the arbiter (decision 11): the POST answers 409
+   UNIQUE index is the arbiter (design choice 11): the POST answers 409
    ``conflict`` with the fixed retry message, the stored row count is
    unchanged, and **zero** audit rows exist (the audit append happens only
    after a successful write, so a rejected create leaves no trace). Both
-   collision kinds are proven: the §8 ``key_id`` segment
+   collision kinds are proven: the credential contract ``key_id`` segment
    (``api_keys_key_id_unique``) and the ``key_`` record id.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 

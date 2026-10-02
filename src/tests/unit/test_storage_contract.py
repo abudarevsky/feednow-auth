@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 02 task-1 storage contract surface.
+"""Unit tests for the storage implementation storage contract surface.
 
 Covers the task's verify lines:
 
@@ -7,19 +7,20 @@ Covers the task's verify lines:
 2. ``ProvisionedUser`` is frozen and is a pure caller-echo bundle.
 3. A minimal stub class satisfies ``isinstance`` under ``runtime_checkable``;
    a partial stub does not.
-4. The protocol exposes exactly the 25 §11/§12 + Phase 11/12/13 methods (18
-   Phase 02 operations plus the Phase 04 ``provision_organization`` compound
-   plus the four additive Phase 11 login-state/session operations plus the
-   additive Phase 12 ``list_users_by_email`` exact-lookup plus the additive
-   Phase 13 ``transition_application_role`` atomic role transition), all
+4. The protocol exposes exactly the 25 storage contract/storage contract + session and application-role and adminmethods (18
+   storage operations plus the organization ``provision_organization`` compound
+   plus the four additive session login-state/session operations plus the
+   additive application-role ``list_users_by_email`` exact-lookup plus the additive
+   admin ``transition_application_role`` atomic role transition), all
    synchronous, with signatures that reference only domain/typing types (no
    driver types).
-5. Subprocess-isolated import check (fresh interpreter, Phase 01 task-6
+5. Subprocess-isolated import check (fresh interpreter, initial implementation
    precedent): importing ``app.storage.contract`` and ``app.storage`` pulls in
    neither ``sqlite3``, ``boto3``, nor any adapter module. In-process
    ``sys.modules`` assertions would be order-dependent and false-fail in
-   Phase 06, so they are deliberately not used.
-"""
+   DynamoDB, so they are deliberately not used.
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -560,12 +561,12 @@ def test_docstrings_pin_the_required_semantics() -> None:
     assert "not** filtered" in (contract.Storage.get_api_key.__doc__ or "")
     assert "fully rolled back" in (contract.Storage.provision_user.__doc__ or "")
     assert "Returns ``None``" in (contract.Storage.append_audit_event.__doc__ or "")
-    # Phase 04: the org compound pins its own atomicity, no-convergence
-    # semantics, and the Phase 06 replication obligation.
+    # The organization compound pins its own atomicity, no-convergence
+    # semantics, and DynamoDB parity.
     org_doc = contract.Storage.provision_organization.__doc__ or ""
     assert "fully rolled back" in org_doc
     assert "no race-convergence" in org_doc
-    assert "Phase 06 replication obligation" in org_doc
+    assert "DynamoDB replication obligation" in org_doc
 
 
 # ---------------------------------------------------------------------------

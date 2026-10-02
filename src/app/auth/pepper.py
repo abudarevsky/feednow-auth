@@ -1,4 +1,4 @@
-"""Pepper loading abstraction (Phase 05 task 1; spec §8, breakdown decision 3).
+"""Pepper loading abstraction (API-key; credential contract, design notes design choice 3).
 
 The *pepper* is the server-side secret that turns the stored credential
 digest into ``HMAC-SHA256(pepper, secret)``: without it, a stolen database
@@ -9,7 +9,7 @@ source of truth:
   ``current() -> bytes`` method. ``current()`` is deliberately a method
   rather than a stored attribute so a future rotation can hand out a new
   version without any consumer signature changing (rotation itself is a
-  Phase 05 non-goal — one current version).
+  API-key non-goal — one current version).
 - :class:`StaticPepper` is the in-memory implementation used by tests and
   non-AWS deployments. It validates the **≥ 32-byte** floor at
   construction (pure, boot-safe: no I/O, no configuration import) and
@@ -17,10 +17,11 @@ source of truth:
   ``StaticPepper(<redacted>)``, and no pepper byte ever appears in an
   exception message, log record, or audit entry.
 
-**Phase 07 obligation:** wire the AWS Secrets Manager implementation at the
+**AWS obligation:** wire the AWS KMS-decrypted implementation at the
 deployment entrypoint behind this same protocol. Nothing here imports AWS
-SDKs, so the no-``boto3`` proof stays green for everything Phase 05 ships.
-"""
+SDKs, so the no-``boto3`` proof stays green for everything API-key ships.
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 

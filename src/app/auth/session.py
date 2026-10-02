@@ -1,11 +1,11 @@
-"""Application session issuer/verifier and cookie policy (Phase 11 task 9).
+"""Application session issuer/verifier and cookie policy (session).
 
 This module owns the *opaque* server-side session behind the
 ``feednow_session`` cookie. It is deliberately component-level only: mounting
-cookie-based authentication of ``/v1/*`` routes is **not** part of this phase
-(the callback route of task 12 is the sole issuer in this phase's surface).
+cookie-based authentication of ``/v1/*`` routes is **not** part of this capability
+(the callback route of implementation is the sole issuer in this capability's surface).
 
-Contract (breakdown task 9):
+Contract (design notes implementation):
 
 - :class:`SessionManager` is the issuer/verifier over the storage contract:
 
@@ -30,7 +30,8 @@ module imports **no logging** and never writes the id, the user id, or any
 cookie string to logs or exception text. The id carries no claims — it is a
 lookup key, never a token to parse; authorization re-reads user status
 independently of the session row.
-"""
+
+Current behavior and invariants: ``docs/sessions.md``."""
 
 from __future__ import annotations
 
@@ -128,7 +129,7 @@ def build_session_cookie(value: str, *, max_age: int, secure: bool) -> str:
 
     The policy attributes are fixed — ``HttpOnly``, ``SameSite=Lax``,
     ``Path=/`` — and ``Max-Age`` mirrors the configured TTL. ``Secure`` is
-    caller-controlled (deployment config, task 13's ``FEEDNOW_COOKIE_SECURE``)
+    caller-controlled (deployment config, implementation's ``FEEDNOW_COOKIE_SECURE``)
     because local HTTP development cannot use it. The minted id is
     URL-safe base64 (no ``;``/whitespace), so no quoting or escaping is
     applied.

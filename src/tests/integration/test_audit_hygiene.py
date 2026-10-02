@@ -1,13 +1,13 @@
-"""Audit-hygiene acceptance sweep (Phase 04 task 6; extended by Phase 05 task 7,
-Phase 11 task 12, and Phase 13 task 8).
+"""Audit-hygiene acceptance sweep (organization; extended by API-key,
+session, and admin).
 
-Runs the **full mutation + denial battery** for Phase 04 against the real
+Runs the **full mutation + denial battery** for organization against the real
 stack (provisioning via ``/v1/me``, organization create, member add/remove,
 and one denial for each of the four decision-4 reasons), then reads *every*
 audit row directly from the SQLite file and proves the AGENTS.md no-secrets
-rule and the §16 vocabulary pin:
+rule and the audit contract vocabulary pin:
 
-- every ``action`` is inside the §16 set (Phase 05 adds the two ``api_key.*``
+- every ``action`` is inside the audit contract set (API-key adds the two ``api_key.*``
   actions; the pinned-metadata table below carries them);
 - every ``metadata`` key set is exactly the decision-4/7 pinned shape for
   its action — nothing extra can sneak in;
@@ -15,7 +15,7 @@ rule and the §16 vocabulary pin:
   JWT itself, or any bearer/token marker;
 - every actor is a ``usr_`` application identity with ``actor_type=user``.
 
-The Phase 05 extension (task 7) mounts the keys router on the same
+The API-key extension (implementation) mounts the keys router on the same
 environment and runs a **mixed-actor battery**: ``api_key.created``,
 ``api_key.revoked``, and the ``human_only`` denial audited under a ``key_``
 actor — the same vocabulary/metadata/no-secrets sweep must hold when both
@@ -23,20 +23,21 @@ actor kinds write to one database (the other two new denial reasons,
 ``organization_mismatch`` and ``insufficient_scope``, need the scope probe
 and are pinned by ``test_api_key_secrecy.py`` and ``test_api_key_auth_matrix.py``).
 
-The Phase 11 extension (task 12) drives the full ``/oauth/login`` →
+The session extension (implementation) drives the full ``/oauth/login`` →
 ``/oauth/callback`` journey and re-runs the sweep: provisioning audits stay
 in vocabulary, and the authorization code, login state, PKCE verifier, and
 access token appear in no audit row (the login state is consumed and the
 session row carries only opaque ids).
 
-The Phase 13 extension (task 8) drives the out-of-band administration path
+The admin extension (implementation) drives the out-of-band administration path
 (the ``app.services.administration`` grant/revoke over the real SQLite
 adapter — the CLI's exact pipeline) and sweeps every
 ``user.application_role.*`` audit row it writes: the two new actions stay in
-the §16 vocabulary with the pinned two-key ``{"from_role", "to_role"}``
+the audit contract vocabulary with the pinned two-key ``{"from_role", "to_role"}``
 metadata, idempotent no-ops and the missing/ambiguous refusals write nothing,
 and no email, provider ``sub``, token, or auth-code material rides any row.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -197,7 +198,7 @@ def key() -> TestKey:
 
 
 class FakeProfileSource:
-    """Phase 11 task-5 double: verified profile per subject from the emails
+    """session implementation double: verified profile per subject from the emails
     the env already signs into tokens (keeps stored rows identical)."""
 
     def __init__(self) -> None:
@@ -285,7 +286,7 @@ def env(tmp_path: Path, key: TestKey) -> Iterator[_HygieneEnv]:
 
 @pytest.fixture
 def key_env(tmp_path: Path, key: TestKey) -> Iterator[_HygieneEnv]:
-    """Same stack plus the keys router (pepper wired — the Phase 05 extension)."""
+    """Same stack plus the keys router (pepper wired — the API-key extension)."""
     with JwksTestServer({"pool-a": [key]}) as server:
         built = _HygieneEnv(
             tmp_path / "hygiene_keys.sqlite",
@@ -464,11 +465,11 @@ def test_mutation_audits_target_the_right_records(env: _HygieneEnv) -> None:
 def test_mixed_actor_battery_stays_in_vocabulary_and_secret_free(
     key_env: _HygieneEnv,
 ) -> None:
-    """Phase 05 task-7 extension: the same sweep with both actor kinds writing.
+    """API-key implementation extension: the same sweep with both actor kinds writing.
 
     ``api_key.created``, ``api_key.revoked``, and the ``human_only`` denial
     (a key bearer refused on a management route, audited under the ``key_``
-    actor) land in one database next to the human mutations; the §16
+    actor) land in one database next to the human mutations; the audit contract
     vocabulary, the pinned metadata shapes, and the no-credential-material
     rule must all hold unchanged.
     """
@@ -567,7 +568,7 @@ class _FlowTokenEndpoint:
 def test_oauth_session_flow_audits_stay_in_vocabulary_and_secret_free(
     tmp_path: Path, key: TestKey
 ) -> None:
-    """The login/callback provisioning path writes exactly the §6 creation
+    """The login/callback provisioning path writes exactly the identity contract creation
     trio — and no flow material (code, state, verifier, token, email) ever
     reaches an audit row, the login-state table, or the session row."""
     db_path = tmp_path / "hygiene_oauth.sqlite"
@@ -687,7 +688,7 @@ def test_application_role_transition_audits_stay_in_vocabulary_and_secret_free(
     """Grant/revoke through the real service pipeline, then sweep.
 
     ``grant_administrator``/``revoke_administrator`` over the env's SQLite
-    adapter are exactly what the task-5 CLI runs (the CLI adds only exit-code
+    adapter are exactly what the implementation CLI runs (the CLI adds only exit-code
     mapping), so the rows written here are the rows the administration path
     can write. The battery covers both transitions, the idempotent no-op
     (still one audit), and the two read-only refusals (unknown and ambiguous

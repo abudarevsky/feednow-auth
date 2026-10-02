@@ -1,17 +1,18 @@
 """Provider-neutral domain entities and value types.
 
-Phase 01 contract surface (frozen for downstream phases):
+initial contract surface (frozen for downstream capability):
 
 - Conventions live in :mod:`app.models.ids`, :mod:`app.models.timestamps`,
   :mod:`app.models.pagination`, :mod:`app.models.errors` (import them from
   those modules; they are not re-exported here).
 - This package re-exports the enum sets and entity models: identity
-  entities (spec §4) plus the credential, audit, and authorization
+  entities (domain model contract) plus the credential, audit, and authorization
   entities (:mod:`app.models.api_key`, :mod:`app.models.audit_event`,
   :mod:`app.models.authorization_context`).
-- Phase 11 adds the additive session surface: :class:`OAuthLoginState` and
+- session adds the additive session surface: :class:`OAuthLoginState` and
   :class:`AppSession` from :mod:`app.models.session`.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from app.models.api_key import (
     ApiKey,

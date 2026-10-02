@@ -1,14 +1,14 @@
-"""Adapter-neutral storage conformance suite (Phase 02, spec §11/§12).
+"""Adapter-neutral storage conformance suite (storage, storage contract/storage contract).
 
 This module holds the *behavior* cases every ``Storage`` adapter must pass.
-It is imported unchanged by each adapter entry point (task 3:
-``test_sqlite_contract.py``; Phase 06: a DynamoDB Local entry), so the rules
+It is imported unchanged by each adapter entry point (implementation:
+``test_sqlite_contract.py``; DynamoDB: a DynamoDB Local entry), so the rules
 below are a reuse contract, not suggestions:
 
 **Fixture contract every entry point must satisfy.** Each entry module
 provides a pytest fixture named ``storage`` that yields an **initialized
 adapter with all tables empty, per test**. The SQLite entry creates a fresh
-temporary file through ``open_sqlite_storage``; the Phase 06 DynamoDB entry
+temporary file through ``open_sqlite_storage``; the DynamoDB DynamoDB entry
 must provide equivalent isolation (empty tables per test). Cases here never
 depend on execution order or on data left behind by another case.
 
@@ -21,9 +21,10 @@ through the ``storage`` fixture supplied by the entry module;
 **Deterministic builders.** The ``make_*`` helpers below construct domain
 objects with literal prefix-valid IDs and fixed literal timestamps — no
 generators and no ``utc_now()``. This is how the suite honors the contract
-rule that storage mints nothing (entropy strategies are Phase 03/05 work)
-while staying reproducible for Phase 06.
-"""
+rule that storage mints nothing (entropy strategies are identity and API-keywork)
+while staying reproducible for DynamoDB.
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -106,7 +107,7 @@ def make_user(
     """Build a fully formed ``User``; the default email derives from the id
     so distinct literal ids never collide on the email constraint by accident
     (tests that *want* an email conflict pass ``email`` explicitly). The
-    Phase 13 ``status``/``application_role`` knobs default to the historical
+    admin ``status``/``application_role`` knobs default to the historical
     (ACTIVE, USER) shape so existing cases are unchanged."""
     return User(
         id=UserId(user_id),
@@ -188,7 +189,7 @@ def make_api_key(
     scopes: list[str] | None = None,
     created_at: datetime = T1,
 ) -> ApiKey:
-    """Build a fully formed ``ApiKey`` (``credential_segment`` is the §8
+    """Build a fully formed ``ApiKey`` (``credential_segment`` is the credential contract
     non-secret segment, distinct from the ``key_`` application identity)."""
     return ApiKey(
         id=ApiKeyId(key_id),
@@ -1144,7 +1145,7 @@ def _provision_race_batch(
     email: str,
     provider_subject: str,
 ) -> tuple[User, ExternalIdentity, Organization, Membership, list[AuditEvent]]:
-    """One §6 first-login attempt with per-attempt entropy: distinct
+    """One identity contract first-login attempt with per-attempt entropy: distinct
     usr_/extid_/org_/mem_/aud_ ids but a shared email and identity tuple
     (what two racing attempts actually carry)."""
     user_id = f"usr_test_{suffix}"

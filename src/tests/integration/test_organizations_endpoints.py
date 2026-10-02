@@ -1,6 +1,6 @@
-"""Integration tests for the organization endpoints (Phase 04 task 4).
+"""Integration tests for the organization endpoints (organization).
 
-Full stack, no live Cognito (Phase 03 test strategy, decision 9): signed
+Full stack, no live Cognito (identity test strategy, design choice 9): signed
 tokens from the loopback ``JwksTestServer``, real SQLite, and
 ``TestClient(create_app(routers=[build_organizations_router(...)]))`` driving
 the frozen manifest routes. Role-matrix users are **seeded** (create-only
@@ -16,11 +16,12 @@ Acceptance mapping (AC 1/2/5 for the three organization routes):
 - list shows only the caller's active-membership orgs; limit clamps, cursor
   round-trips, a foreign cursor → 400;
 - the owner/admin/member/viewer matrix gets 200 on GET /{id}, 200 on list,
-  and 201 on create (authenticated-only per decision 3); outsider and
+  and 201 on create (authenticated-only per design choice 3); outsider and
   unknown-organization attempts answer the byte-identical 403, the outsider
   denial audited and the unknown-org denial provably not;
 - every error body validates against the frozen ``Error`` envelope.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 
@@ -131,7 +132,7 @@ def seed_membership(
 
 
 def rows(db_path: Path, table: str) -> list[dict[str, Any]]:
-    """Direct SQLite read (audit/mutation-count oracle; decision 9)."""
+    """Direct SQLite read (audit/mutation-count oracle; design choice 9)."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:

@@ -1,17 +1,18 @@
-"""SQLite conformance entry point for the Phase 02 storage suite (task 3).
+"""SQLite conformance entry point for the storage storage suite (implementation).
 
 This module is the only SQLite-specific half of the harness: it provides the
 ``storage`` fixture required by ``suite.py``'s fixture contract (an
 initialized adapter with all tables empty, per test — here, a fresh temp
 file through the documented factory) and re-exports every suite case so
-pytest collects it. Phase 06 replicates *this file* for DynamoDB Local and
+pytest collects it. DynamoDB replicates *this file* for DynamoDB Local and
 runs ``suite.py`` unchanged.
 
 The harness tests below also pin the suite's isolation rules: ``suite.py``
 imports only ``app.storage.contract``/``app.models`` (AST + fresh-interpreter
 proof) and couples to SQLite solely through the ``storage`` fixture (every
 case takes exactly that one fixture argument).
-"""
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 

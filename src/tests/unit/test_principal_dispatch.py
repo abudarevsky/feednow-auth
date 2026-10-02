@@ -1,26 +1,27 @@
-"""Unit tests for the Phase 05 task-5 principal dispatch (:mod:`app.auth.principal`
+"""Unit tests for the API-key implementation principal dispatch (:mod:`app.auth.principal`
 and :func:`app.auth.dependencies.build_current_principal`).
 
 Proves the decision-6 boundary directly against the dependency callable
-(a minimal fake ``Request`` — the chain below it is real SQLite + the task-3
+(a minimal fake ``Request`` — the chain below it is real SQLite + the implementation
 verification seam):
 
 - the :class:`Principal` invariant: **exactly one** of ``user``/``api_key``
   is set (both-``None`` and both-set are programming errors);
 - **prefix dispatch is total and collision-free**: a JWT-looking bearer
-  (``eyJ…``) is never parsed as a credential — the §8 point lookup never
+  (``eyJ…``) is never parsed as a credential — the credential contract point lookup never
   runs — and an ``fn_live_``/``fn_test_`` literal is never sent to the JWT
   verifier;
-- the human path wraps the **unchanged Phase 03 chain**: same
+- the human path wraps the **unchanged identity chain**: same
   ``ResolvedIdentity`` user/context, same failure mapping (disabled user →
   403, missing/malformed header → 401 before any dispatch);
 - the API-key path yields ``Principal(user=None, api_key=row)`` with the
-  §10 context (``actor_type="api_key"``, ``roles == []``, stored scopes),
+  authorization-context contract context (``actor_type="api_key"``, ``roles == []``, stored scopes),
   and every authentication failure — revoked, unknown, malformed — is the
   one uniform **401** carrying :data:`API_KEY_AUTHENTICATION_MESSAGE`
-  (decision 4); a non-``EntityNotFoundError`` ``StorageError`` propagates
-  untranslated (decision 11 → 500, never a misleading 401).
-"""
+  (design choice 4); a non-``EntityNotFoundError`` ``StorageError`` propagates
+  untranslated (design choice 11 → 500, never a misleading 401).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -107,7 +108,7 @@ class RecordingVerifier:
 
 
 class RecordingProfileSource:
-    """Phase 11 task-4 double: records ``(token, expected_sub)`` per fetch."""
+    """session implementation double: records ``(token, expected_sub)`` per fetch."""
 
     def __init__(self, email: str = "first-login@example.test") -> None:
         self.email = email
@@ -124,7 +125,7 @@ class RecordingProfileSource:
 
 
 class RecordingStorage:
-    """Delegates everything to real SQLite; counts/fails the §8 point lookup."""
+    """Delegates everything to real SQLite; counts/fails the credential contract point lookup."""
 
     def __init__(self, inner: SQLiteStorage) -> None:
         self._inner = inner
@@ -414,7 +415,7 @@ def test_wrong_secret_is_the_uniform_401(env: DispatchEnv) -> None:
 
 
 def test_key_backend_outage_propagates_untranslated(env: DispatchEnv) -> None:
-    """Decision 11: a StorageError on the key branch is never a 401."""
+    """design choice 11: a StorageError on the key branch is never a 401."""
     env.storage.fail_key_lookups = True
     with pytest.raises(StorageError):
         env.call(env.bearer(env.live_literal()))

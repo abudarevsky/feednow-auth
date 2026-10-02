@@ -1,15 +1,15 @@
-"""Integration tests for the API-key endpoints (Phase 05 task 6).
+"""Integration tests for the API-key endpoints (API-key).
 
-Same Phase 03/04-proven stack as the member tests (decision 12): loopback
+Same identity and organization-proven stack as the member tests (design choice 12): loopback
 JWKS-signed tokens, real SQLite, seeded owner/admin/member/viewer matrix in
 ``org_team`` plus an outsider anchoring ``org_outside``, and a
 :class:`~app.auth.pepper.StaticPepper` wired into
 :func:`~app.api.keys.build_api_keys_router` (so the management routes carry
-the live key-rejection branch, decision 8). Seeded keys are written directly
+the live key-rejection branch, design choice 8). Seeded keys are written directly
 through the contract (no API path exists for pre-existing or revoked rows);
 audit and row assertions read the SQLite file directly.
 
-Acceptance mapping (task-6 Verify bullets):
+Acceptance mapping (implementation Verify bullets):
 
 - create: 201 body is exactly ``{id, name, key, created_at}`` and the
   returned literal verifies through :func:`~app.auth.api_key_auth.verify_api_key`;
@@ -30,7 +30,8 @@ Acceptance mapping (task-6 Verify bullets):
   ``api_key.revoked`` rows;
 - invalid scope shape → 422; every error body validates against the frozen
   ``Error`` envelope.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 

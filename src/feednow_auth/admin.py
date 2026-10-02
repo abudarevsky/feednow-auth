@@ -1,6 +1,6 @@
-"""Application-administrator bootstrap CLI (Phase 13 task 5).
+"""Application-administrator bootstrap CLI (admin).
 
-The only administration interface spec 13 authorizes is this operator CLI:
+The only administration interface contract 13 authorizes is this operator CLI:
 
 .. code-block:: bash
 
@@ -9,10 +9,10 @@ The only administration interface spec 13 authorizes is this operator CLI:
 
 There is no HTTP bootstrap endpoint, no default admin credential, and no
 environment-driven or startup-time promotion — this module is invoked by an
-operator, never by deployment or container startup (spec 13 required
+operator, never by deployment or container startup (contract 13 required
 behaviors 1-4).
 
-Import contract (required behavior 4, pinned by the breakdown): importing
+Import contract (required behavior 4, pinned by the design notes): importing
 this module performs **no I/O and no credential lookup**. Environment is read
 only inside :func:`main`, through the pipeline
 ``storage_settings_from_env(os.environ)`` → ``create_storage`` →
@@ -21,7 +21,7 @@ only (argparse wiring, constants, function definitions, and the ``__main__``
 guard), which the unit tests prove by AST.
 
 Pinned CLI exit/error contract (the exit codes are stable operator-facing
-API; the task-8 runbook documents this table):
+API; the implementation runbook documents this table):
 
 =====  ==========================================================
 code   meaning
@@ -46,7 +46,8 @@ allowed (the operator already holds the email; ids are internal identities,
 not secrets). No token, credential, or provider material is ever printed,
 and unexpected failures print only the fixed line — the underlying exception
 text (adapter detail) never reaches stderr.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -197,7 +198,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     The process environment is read **here and only here** (module import
     performs no I/O): ``storage_settings_from_env(os.environ)`` derives the
-    settings, ``create_storage`` opens the named adapter, and the task-3
+    settings, ``create_storage`` opens the named adapter, and the implementation
     administration service does the work over the ``Storage`` contract.
     """
     parser = _build_parser()

@@ -1,7 +1,7 @@
-"""Concurrency and duplicate-request acceptance proofs (Phase 04 task 6).
+"""Concurrency and duplicate-request acceptance proofs (organization).
 
 The AGENTS.md concurrency mandate ("provisioning … define and test atomicity
-and duplicate-request behavior") at the HTTP seam, on the Phase 03 task-6
+and duplicate-request behavior") at the HTTP seam, on the identity implementation
 pattern: ``threading.Barrier`` (never sleeps), 20 parameterized repeats for
 stability, and final counts asserted through **direct** SQLite reads on a
 fresh connection.
@@ -9,7 +9,7 @@ fresh connection.
 Cases:
 
 1. **8 threads ``POST /v1/organizations`` with the same slug** — exactly one
-   201; the losers get the plain 409 (decision 2: ``provision_organization``
+   201; the losers get the plain 409 (design choice 2: ``provision_organization``
    has *no* race-convergence semantics, a slug conflict is never a converge);
    the winner's batch wrote exactly one organization, one owner membership,
    and two audits — nothing from the rejected batches survives.
@@ -18,13 +18,14 @@ Cases:
 3. **Two threads remove one pair** — exactly one 204 and one 404: the
    contract pins ``delete_membership`` as non-idempotent, and the service
    translates the loser's miss into ``MemberNotFoundError`` (behavior
-   proven, documented in the phase handoff); exactly one
+   proven, documented in the capability handoff); exactly one
    ``membership.removed`` audit.
 
 Lock handling relies entirely on the adapter's existing
 ``busy_timeout=5000`` + ``BEGIN IMMEDIATE`` discipline — nothing is added
 to production code here.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

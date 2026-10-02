@@ -31,6 +31,7 @@ class GoogleFederationFixStack(Stack):
         *,
         user_pool_id: str,
         client_id: str,
+        implementation_version: str = "google-email-proof-v1",
         **kwargs: object,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -150,7 +151,7 @@ class GoogleFederationFixStack(Stack):
                 "PoolId": user_pool_id,
                 "ClientId": client_id,
                 "TriggerArn": trigger.function_arn,
-                "ImplementationVersion": "google-email-proof-v1",
+                "ImplementationVersion": implementation_version,
             },
         )
         provider_resource.node.add_dependency(trigger)

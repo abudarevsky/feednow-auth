@@ -1,18 +1,19 @@
 """Unit tests for FeedNow application ID minting (:mod:`app.services.idgen`).
 
-Verify lines covered (per the Phase 03 breakdown, task 1, extended by the
-Phase 05 breakdown, task 1):
+Verify lines covered (per the identity design notes, implementation, extended by the
+API-key design notes, implementation):
 
 1. Each minter returns the correct concrete typed ID class with a valid prefix.
 2. 10,000 samples per minter are unique.
 3. No minter accepts or derives from email/``sub``/provider input (zero-argument
    signatures, input-rejecting calls, a stubbed entropy source proving ``uuid4``
    is the only input, and an AST guard over the module body).
-4. The Phase 05 boundary holds in its discharged form: the ``key_``
-   application ID is minted here (task 1), while the §8 ``key_id``
+4. The API-key boundary holds in its discharged form: the ``key_``
+   application ID is minted here (implementation), while the credential contract ``key_id``
    credential segment stays outside this module (it lives in
    :mod:`app.auth.credentials`).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -171,7 +172,7 @@ def test_module_exports_exactly_the_six_pinned_minters():
 
 
 def test_new_api_key_id_validates_as_api_key_id():
-    """Phase 05 task 1 discharged the ``key_`` half of the Phase 01 deferral."""
+    """API-key discharged the ``key_`` half of the initial deferral."""
     value = new_api_key_id()
     assert type(value) is ApiKeyId
     assert isinstance(value, ApplicationId)
@@ -181,7 +182,7 @@ def test_new_api_key_id_validates_as_api_key_id():
 
 
 def test_credential_segment_minting_stays_out_of_idgen():
-    """The §8 ULID/CSPRNG credential entropy belongs to ``app.auth.credentials``.
+    """The credential contract ULID/CSPRNG credential entropy belongs to ``app.auth.credentials``.
 
     No minter here may be a credential-segment minter: the only ``key``-ish
     export is the ``key_`` application identity, and nothing in the module
@@ -194,10 +195,10 @@ def test_credential_segment_minting_stays_out_of_idgen():
     assert all(re.fullmatch(r"[0-9a-f]{32}", suffix) for suffix in minted_suffixes)
 
 
-def test_module_docstring_records_the_deferral_and_phase_05_boundary():
+def test_module_docstring_points_to_the_identifier_contract():
     doc = idgen.__doc__ or ""
-    assert "deferral" in doc
-    assert "Phase 05" in doc
+    assert "UUID4" in doc
+    assert "docs/contracts.md" in doc
     assert "key_id" in doc
 
 

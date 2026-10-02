@@ -1,37 +1,6 @@
-"""API-key credential primitives (Phase 05 task 1; spec §8, breakdown decision 2).
+"""API-key credential primitives: ULID key segments, CSPRNG secrets, literal parsing, peppered HMAC hashes, and constant-time comparison. Plaintext secrets are never persisted or logged.
 
-This module makes the spec's "recommended" credential format concrete and
-owns it end to end: generation, literal assembly, parsing, and the peppered
-hash. The pinned literal is ``fn_<live|test>_<key-id>_<secret>``:
-
-- ``<key-id>`` — a 26-character **ULID**: 48-bit millisecond timestamp in
-  chars 1-10 (first char therefore ∈ ``01234567`` — 130 bits over 26 chars,
-  so no alphabet widening is needed) plus 80 bits of :mod:`secrets`-drawn
-  randomness in chars 11-26, uppercase Crockford base32. The alphabet
-  contains no ``_``, which is what makes parsing unambiguous. It satisfies
-  the frozen ``KeyId`` ≤ 64 bound; uniqueness is ultimately arbitrated by
-  the storage UNIQUE index (decision 11), not by entropy alone.
-- ``<secret>`` — :func:`secrets.token_urlsafe(32)`: exactly **256 bits** of
-  CSPRNG entropy, 43 base64url characters. The alphabet includes ``_``, so
-  parsing strips the fixed 8-char environment prefix and splits at the
-  **first** ``_`` (the key-id segment is underscore-free by charset);
-  everything after is the secret.
-- ``secret_hash`` — ``HMAC-SHA256(pepper, secret)`` in **lowercase hex**
-  (Phase 01 left the encoding open; hex is pinned here).
-
-Boundary rules preserved here:
-
-- The plaintext secret exists only in transit. Nothing in this module
-  persists, logs, or echoes it: :class:`ParsedCredential` redacts the
-  secret from ``repr``/``str``, and every shape violation raises
-  :class:`ApiKeyCredentialFormatError` with one fixed message that never
-  includes any input fragment (key-id, secret, or prefix).
-- The §8 credential segment lives **here**, not in
-  :mod:`app.services.idgen`, so credential entropy never masquerades as
-  application-ID entropy (decision 2).
-- Stdlib only (``hmac``/``hashlib``/``secrets``/``time``): no AWS import, so
-  the no-``boto3`` proof stays green; Phase 07 wires the real pepper source.
-"""
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -86,12 +55,12 @@ _KEY_ID_RE = re.compile(f"[{CROCKFORD_ALPHABET}]{{{KEY_ID_LENGTH}}}")
 
 
 class ApiKeyCredentialFormatError(Exception):
-    """Raised when a credential literal violates the pinned §8 shape.
+    """Raised when a credential literal violates the pinned credential contract shape.
 
     The message is always :data:`MALFORMED_CREDENTIAL_MESSAGE` — a fixed,
     log-safe description that never echoes the offending input (no key-id,
     secret, or prefix fragment appears in any exception text, cause chain,
-    or context). Task 3's verification pipeline converts this into the one
+    or context). implementation's verification pipeline converts this into the one
     uniform 401; nothing here distinguishes *which* segment failed.
     """
 
@@ -103,7 +72,7 @@ class ApiKeyCredentialFormatError(Exception):
 class ParsedCredential:
     """A successfully parsed literal: environment, lookup segment, secret.
 
-    ``key_id`` is the non-secret §8 point-lookup segment; ``secret`` is
+    ``key_id`` is the non-secret credential contract point-lookup segment; ``secret`` is
     plaintext credential material and is therefore redacted from
     ``repr``/``str`` (AGENTS.md: plaintext secrets never reach logs, and a
     logged exception or collection dump must not leak them).
@@ -125,7 +94,7 @@ class ParsedCredential:
 def generate_key_id() -> str:
     """Mint a fresh 26-char Crockford-base32 ULID credential segment.
 
-    Encoding is pinned by decision 2: 48-bit Unix-millisecond timestamp in
+    Encoding is pinned by design choice 2: 48-bit Unix-millisecond timestamp in
     chars 1-10 (two zero pad bits make the first char ∈ ``01234567``), 80
     bits of :func:`secrets.randbits` randomness in chars 11-26 — 130 bits
     over 26 characters, big-endian, five bits per character.
@@ -180,7 +149,7 @@ def build_literal(environment: ApiKeyEnvironment, key_id: str, secret: str) -> s
 def parse_literal(literal: str) -> ParsedCredential:
     """Parse a credential literal into its three segments or fail uniformly.
 
-    Fixed order (decision 4's step (a)): the whole literal must be a
+    Fixed order (design choice 4's step (a)): the whole literal must be a
     non-empty string within the frozen 512 bound; it must start with one of
     the two fixed 8-char environment prefixes; the remainder splits at the
     **first** ``_`` into a non-empty key-id (exact Crockford-26 shape) and a
@@ -205,11 +174,11 @@ def parse_literal(literal: str) -> ParsedCredential:
 
 
 def hash_secret(pepper: bytes, secret: str) -> str:
-    """Return ``HMAC-SHA256(pepper, secret)`` as lowercase hex (decision 2).
+    """Return ``HMAC-SHA256(pepper, secret)`` as lowercase hex (design choice 2).
 
     The pepper arrives as resolved bytes — callers obtain them from a
     :class:`~app.auth.pepper.PepperSource`; ≥ 32-byte enforcement belongs to
-    the source's construction (decision 3), not to this pure function. An
+    the source's construction (design choice 3), not to this pure function. An
     empty pepper is rejected outright because it would silently degrade the
     hash to an unpeppered HMAC.
     """
@@ -237,8 +206,7 @@ def dummy_secret_matches(pepper: bytes, candidate: str) -> bool:
 
     Performs the same HMAC + constant-time-comparison work as
     :func:`secret_matches` against :data:`DUMMY_SECRET_HASH` so that "key id
-    not found" and "secret mismatch" take indistinguishable time (decision
-    4: oracle-freedom on the timing axis, not just the message axis). The
+    not found" and "secret mismatch" take indistinguishable time (design choice 4: oracle-freedom on the timing axis, not just the message axis). The
     fixed digest is not derived from any real credential, so the result is
     always ``False`` for any achievable input; callers must fail the
     authentication regardless.

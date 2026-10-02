@@ -1,4 +1,4 @@
-"""Read-only local platform administration API for the account milestone."""
+"""Local platform administration API backed by the configured storage adapter."""
 
 from typing import Annotated, Any
 
@@ -95,7 +95,7 @@ def build_admin_router(
         _SUMMARY_SPEC.path.removeprefix("/v1/admin"), response_model=_SUMMARY_SPEC.response_model
     )
     def summary(_principal: Annotated[User, Depends(current_admin)]) -> AdminSummary:
-        counts = storage.admin_summary()  # SQLite local adapter query, never browser-side.
+        counts = storage.admin_summary()
         return AdminSummary(**counts)
 
     @router.get(

@@ -1,70 +1,69 @@
-"""Identity resolution and safe provisioning (Phase 03 task 4).
+"""Resolve Cognito identities into FeedNow users and authorization contexts.
 
-Implements spec §5/§6/§7/§10 as the provider-facing half of the service
-layer: verified :class:`~app.auth.cognito.CognitoClaims` become an internal
-:class:`~app.models.user.User` plus a resolved
-:class:`~app.models.authorization_context.AuthorizationContext`, with Cognito
-fields never treated as product identity (AGENTS.md).
+Provider claims are mapped at one seam. First-login provisioning creates the
+user, external identity, personal organization, owner membership, and audit
+events atomically. See ``docs/authentication.md`` for current behavior.
 
-Flow (spec §6, breakdown decisions 4—9):
+Flow:
 
 1. :func:`resolve_or_provision` converts the claims into the identity tuple
    ``provider=cognito``, ``provider_subject=sub``, ``provider_tenant=None``
-   (decision 4 — cognito carries no tenant dimension; the storage contract
-   normalizes ``None`` internally) and performs the §6 lookup.
+   (design choice 4 — cognito carries no tenant dimension; the storage contract
+   normalizes ``None`` internally) and performs the identity contract lookup.
 2. A lookup miss builds one fully formed batch with
    :func:`build_provisioning_batch` — pure in ``(claims, profile, now, ids)``
    so every value is deterministic under test — and hands it to the single
    atomic ``provision_user`` call (User ``active`` with ``application_role``
-   set **explicitly** to ``user`` (Phase 12 — never via the model default),
+   set **explicitly** to ``user`` (application-role — never via the model default),
    ExternalIdentity, personal ``active`` organization, ``owner`` ``active``
    membership, and the three creation audits ``user.created`` /
    ``organization.created`` / ``membership.created``). The batch's
    ``User.email`` comes **only** from a
    :class:`~app.auth.cognito.CognitoProfile` that passed
-   :func:`~app.auth.cognito.require_provisioning_profile` (Phase 11): the
+   :func:`~app.auth.cognito.require_provisioning_profile` (session): the
    access-token ``email`` claim is advisory and a miss without a profile
    provider is refused with :class:`~app.auth.errors.TokenValidationError`
    before any storage write.
-3. A :class:`~app.storage.contract.DuplicateExternalIdentityError` is spec §6's
+3. A :class:`~app.storage.contract.DuplicateExternalIdentityError` is identity contract's
    concurrent-first-login race: the identity tuple is the **sole** race/
-   convergence key (Phase 12 — a duplicate email is no longer a conflict on
+   convergence key (application-role — a duplicate email is no longer a conflict on
    either adapter; equal emails are legitimate separate users). The service
    re-reads the identity tuple: found → converge on the winner's user; absent
-   → :class:`ProvisioningConflictError` (409-mapped in task 5). **Convergence
+   → :class:`ProvisioningConflictError` (409-mapped in implementation). **Convergence
    happens only via that re-read** — ``error.existing_user_id`` is the winner
    the adapter resolved after its own rollback (or ``None``) and serves only
-   as a post-convergence cross-check (decision 7). The batch email plays
+   as a post-convergence cross-check (design choice 7). The batch email plays
    **no part** in deciding convergence: the identity tuple is the sole
-   authority, so the §6 race outcome is independent of the profile email
+   authority, so the identity contract race outcome is independent of the profile email
    value.
 4. After any resolution, a non-``active`` user raises :class:`DisabledUserError`
    with no storage mutation (reads only; provisioning already happened or was
    skipped).
-5. :func:`build_user_context` derives the §10 human context (decision 9):
+5. :func:`build_user_context` derives the authorization-context contract human context (design choice 9):
    default = the **earliest active** organization
    (``list_user_organizations(user_id, PageParams(limit=1))``; storage pins
    ``(created_at, id)`` ascending, so page 1 item 1 is deterministic) with
    ``roles = [get_membership(org, user).role]`` and ``scopes = []``; an
-   explicit ``organization_id`` (Phase 04's org-selection seam) requires the
+   explicit ``organization_id`` (organization implementation org-selection seam) requires the
    membership **and** the organization to be active, else
    :class:`NoActiveOrganizationError` (403). Zero active organizations raises
    the same error.
 
-Clock and entropy (decision 5): exactly **one** :func:`~app.models.timestamps.utc_now`
+Clock and entropy (design choice 5): exactly **one** :func:`~app.models.timestamps.utc_now`
 read and one :func:`new_provisioning_ids` mint per provisioning request
 (both injectable for tests), shared by all five entities and the three audit
 events; storage mints nothing.
 
-Audit metadata is JSON-safe and secret-free (decision 8): no ``sub``, no
+Audit metadata is JSON-safe and secret-free (design choice 8): no ``sub``, no
 token, no email — only ``{"provider": "cognito"}``, ``{"type": "personal"}``,
 ``{"role": "owner"}``. Self-provisioning actors are
 ``actor_type="user"``/``actor_id=`` the new ``usr_`` inside the same
 ``provision_user`` transaction, so the audit→organization FK is satisfied.
 
 These three service errors are domain outcomes, not storage leaks: HTTP
-mapping (401/403/409/503) is task 5's job in ``app/api``.
-"""
+mapping (401/403/409/503) is implementation's job in ``app/api``.
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -114,7 +113,7 @@ from app.storage.contract import (
 
 
 class DisabledUserError(Exception):
-    """The resolved user is authenticated but not ``active`` (task 5 → 403).
+    """The resolved user is authenticated but not ``active`` (implementation → 403).
 
     The message is fixed and carries no user, email, or provider material;
     account state must not leak through error text.
@@ -125,9 +124,9 @@ class DisabledUserError(Exception):
 
 
 class NoActiveOrganizationError(Exception):
-    """No usable tenancy context for the user (task 5 → 403).
+    """No usable tenancy context for the user (implementation → 403).
 
-    Covers both §10 branches of :func:`build_user_context`: zero active
+    Covers both authorization-context contract branches of :func:`build_user_context`: zero active
     organizations under the earliest-active rule, and an explicit
     ``organization_id`` whose membership or organization is missing or
     inactive. The default reason is fixed and organization-free.
@@ -138,12 +137,12 @@ class NoActiveOrganizationError(Exception):
 
 
 class ProvisioningConflictError(Exception):
-    """Provisioning raced an identity with no resolvable winner (task 5 → 409).
+    """Provisioning raced an identity with no resolvable winner (implementation → 409).
 
     The identity-tuple re-read after a :class:`~app.storage.contract.
     DuplicateExternalIdentityError` found no winner, so storage reported an
-    identity-tuple conflict whose tuple belongs to nobody — not spec §6's
-    same-user race. From Phase 12 on this is the error's **only** trigger: a
+    identity-tuple conflict whose tuple belongs to nobody — not identity contract's
+    same-user race. From application-role on this is the error's **only** trigger: a
     duplicate email is no longer a conflict on either adapter (equal emails
     are separate users), so no email path reaches this class. Fixed safe
     message (no email).
@@ -158,7 +157,7 @@ class ProvisioningConflictError(Exception):
 
 @dataclass(frozen=True)
 class ProvisioningIds:
-    """Every record ID a provisioning batch needs, minted together (decision 5).
+    """Every record ID a provisioning batch needs, minted together (design choice 5).
 
     A pure data bag so :func:`build_provisioning_batch` stays a total,
     deterministic function of ``(claims, now, ids)``; production callers get
@@ -205,16 +204,16 @@ class ProvisioningBatch:
 
 @dataclass(frozen=True)
 class ResolvedIdentity:
-    """The §6/§10 outcome of one authenticated request: user + context."""
+    """The identity contract/authorization-context contract outcome of one authenticated request: user + context."""
 
     user: User
     context: AuthorizationContext
 
 
 def _lookup_external_identity(storage: Storage, claims: CognitoClaims) -> User:
-    """The §6 identity-tuple read — one call site for lookup and re-read.
+    """The identity contract identity-tuple read — one call site for lookup and re-read.
 
-    Cognito carries no tenant dimension (decision 4): ``provider_tenant`` is
+    Cognito carries no tenant dimension (design choice 4): ``provider_tenant`` is
     pinned to ``None`` here and at write time, so lookups and batches can
     never drift apart.
     """
@@ -265,20 +264,20 @@ def build_provisioning_batch(
     :func:`verified_provisioning_profile` (the gate runs in
     :func:`_provision_or_converge` before this builder is reached), so
     ``profile.email`` is present, verified, and subject-matched. Values are
-    pinned by breakdown decisions 5—8 and Phase 11: display name is the
+    pinned by design notes decisions 5—8 and session: display name is the
     profile's ``display_name`` when present, else the ``username`` claim when
     non-empty, else ``sub`` (the verifier normalizes empty/absent to ``None``);
     ``User.email`` comes from the verified ``profile.email`` — never from the
     claims; ``User.application_role`` is set **explicitly** to
-    :attr:`~app.models.enums.ApplicationRole.USER` (Phase 12 — provisioning
+    :attr:`~app.models.enums.ApplicationRole.USER` (application-role — provisioning
     never relies on the model default, and ``ADMIN`` is granted out of band,
     never by login). The default workspace is
     ``"{display_name}'s Workspace"`` with the unique-by-construction slug
-    ``personal-{user_id}`` (decision 6 — never derived from email); all five
+    ``personal-{user_id}`` (design choice 6 — never derived from email); all five
     entities and three audits share the single injected ``now``; audit
     metadata is exactly ``{"provider": "cognito"}`` / ``{"type": "personal"}``
     / ``{"role": "owner"}`` with targets and self-provisioning actor pinned
-    per decision 8; event order is the spec §6 creation order.
+    per design choice 8; event order is the identity contract creation order.
     """
     display_name = profile.display_name or claims.username or claims.sub
     user = User(
@@ -368,14 +367,14 @@ def resolve_or_provision(
     ids: ProvisioningIds | None = None,
     profile_provider: Callable[[], CognitoProfile] | None = None,
 ) -> ResolvedIdentity:
-    """Resolve ``claims`` to an active user + §10 context, provisioning on first sight.
+    """Resolve ``claims`` to an active user + authorization-context contract context, provisioning on first sight.
 
     Exactly one identity read on the hit path; at most one ``provision_user``
     call on the miss path (never a second one after a race — convergence is a
     re-read). ``now``/``ids`` are injectable for deterministic tests and
-    default to one clock read and one ID mint per request (decision 5).
+    default to one clock read and one ID mint per request (design choice 5).
 
-    ``profile_provider`` (Phase 11) is invoked **only** on the identity-tuple
+    ``profile_provider`` (session) is invoked **only** on the identity-tuple
     miss path: the hit path performs zero profile work and never overwrites
     the stored user's email. Its profile is gated by
     :func:`verified_provisioning_profile` **before** any storage write, so a
@@ -383,15 +382,15 @@ def resolve_or_provision(
     store untouched. A **missing** provider on the miss path is likewise
     refused with :class:`TokenValidationError`
     (``"verified profile required for provisioning"``) before any write:
-    account creation never falls back to access-token claims (task 5).
+    account creation never falls back to access-token claims (implementation).
 
     Raises:
         DisabledUserError: the resolved user is not ``active`` (no mutation).
         ProvisioningConflictError: the identity-tuple race re-read found no
-            winner (from Phase 12 on, email is never a conflict, so this is
+            winner (from application-role on, email is never a conflict, so this is
             the error's only trigger).
         NoActiveOrganizationError: the user has no usable organization
-            (unreachable right after provisioning; reachable once Phase 04
+            (unreachable right after provisioning; reachable once organization
             can disable orgs).
         TokenValidationError: the provisioning profile failed the gate, or
             no profile provider was supplied for a first-login miss.
@@ -435,14 +434,14 @@ def _provision_or_converge(
 ) -> User:
     """Run the single atomic batch, converging on the race winner if there was one.
 
-    Decision 7's rule is absolute: convergence is driven **only** by the
+    design choice 7's rule is absolute: convergence is driven **only** by the
     identity-tuple re-read (same ``sub`` → the winner's user). The adapter's
     ``existing_user_id`` is the winner it resolved after its own rollback (or
     ``None``), so after a successful re-read it is consulted only to
     cross-check the winner — a disagreement means storage told us two
     different users and is refused as a conflict rather than silently
     trusted. Because the decision never compares emails, a caller exercising
-    the §6 race needs no particular profile email value beyond the gate's
+    the identity contract race needs no particular profile email value beyond the gate's
     presence requirement.
 
     The profile gate (:func:`verified_provisioning_profile`) runs before the
@@ -482,12 +481,12 @@ def build_user_context(
     user: User,
     organization_id: OrganizationId | None = None,
 ) -> AuthorizationContext:
-    """Derive the §10 human AuthorizationContext (decision 9, both branches).
+    """Derive the authorization-context contract human AuthorizationContext (design choice 9, both branches).
 
     Default branch: the **earliest active** organization —
     ``list_user_organizations(user_id, PageParams(limit=1))`` returns only
     active memberships ordered by ``(created_at, id)``, so item 1 is stable.
-    Explicit branch (Phase 04's seam, semantics pinned here): the given
+    Explicit branch (organization implementation seam, semantics pinned here): the given
     ``organization_id`` must resolve to an **active** organization in which
     the user holds an **active** membership, else
     :class:`NoActiveOrganizationError` — a disabled or nonexistent

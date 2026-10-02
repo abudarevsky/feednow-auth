@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import cognito_trigger_lambda
 from app.auth.cognito_triggers import PRE_AUTHENTICATION_SOURCE
+from deploy.aws.runtime import cognito_trigger_lambda
 
 
 def _event(source: str) -> dict[str, Any]:

@@ -1,89 +1,6 @@
-"""DynamoDB adapter: schema, codecs, error translation, and contract operations.
+"""DynamoDB storage adapter for schema, codecs, transactions, pagination, and error translation. Driver values remain inside the adapter.
 
-Phase 06 task 2 laid down everything DynamoDB-specific that the contract
-operations build on; **task 3** implemented the users/external-identity
-operations (:meth:`DynamoDbStorage.create_user`, :meth:`DynamoDbStorage.get_user`,
-:meth:`DynamoDbStorage.create_external_identity`,
-:meth:`DynamoDbStorage.get_user_by_external_identity`) and **task 4** adds the
-organizations/memberships group (:meth:`DynamoDbStorage.create_organization`,
-:meth:`DynamoDbStorage.get_organization`, :meth:`DynamoDbStorage.create_membership`,
-:meth:`DynamoDbStorage.get_membership`, :meth:`DynamoDbStorage.delete_membership`,
-:meth:`DynamoDbStorage.list_user_organizations`,
-:meth:`DynamoDbStorage.list_memberships`) and **task 5** adds the API-keys group
-(:meth:`DynamoDbStorage.create_api_key`, :meth:`DynamoDbStorage.get_api_key`,
-:meth:`DynamoDbStorage.get_api_key_by_key_id`, :meth:`DynamoDbStorage.list_api_keys`,
-:meth:`DynamoDbStorage.revoke_api_key` — the first-write-wins CAS of decision 4),
-and **task 6** adds audit append (:meth:`DynamoDbStorage.append_audit_event`) plus
-the :meth:`DynamoDbStorage.provision_user` compound — one ``TransactWriteItems``
-in SQLite's statement order with the §6 race converge of decision 3 — and
-**task 7** adds the :meth:`DynamoDbStorage.provision_organization` compound
-(the same transactional discipline with **no** race converge: a taken slug is a
-plain conflict).
-The module is importable on its own; nothing in ``app.main``/api/auth/services
-reaches it (the subprocess ``import app.main`` boto3-free proof stays green
-because only an explicit ``from app.storage.dynamodb import
-open_dynamodb_storage`` loads this module). **Phase 11 task 7** added the
-login-state/session group
-(:meth:`DynamoDbStorage.save_oauth_login_state`,
-:meth:`DynamoDbStorage.consume_oauth_login_state` — the atomic
-``delete_item`` + ``attribute_exists`` + ``ALL_OLD`` get-and-delete —
-:meth:`DynamoDbStorage.create_app_session`, and
-:meth:`DynamoDbStorage.get_app_session`) against two new single-table
-:data:`SCHEMA` entries carrying a numeric ``expires_at_epoch`` TTL attribute.
-**Phase 12 task 2** added the ``application_role`` role codec (an item without
-the attribute is a pre-Phase-12 row and reads back as ``user``), the
-``users/by-email`` GSI and the :meth:`DynamoDbStorage.list_users_by_email`
-exact lookup, and retired the ``user_email`` constraint item entirely: email is
-a non-unique lookup field now, so a duplicate address is a legal write and the
-:meth:`DynamoDbStorage.provision_user` race converge keys on the identity tuple
-alone. **Phase 13 task 6** added the ``users/by-application-role`` GSI
-(``g_role`` = the ``application_role`` value, sort key ``pk``) and
-:meth:`DynamoDbStorage.transition_application_role` — the atomic CAS role write
-+ audit append with the last-ACTIVE-admin guard: a strongly consistent target
-read, a ``Query`` on the admin partition for the other-active-admin witness
-set, and one ``TransactWriteItems`` carrying the witness ``ConditionCheck``,
-the CAS ``UpdateItem``, the audit ``PutItem``, and the organizations-parent
-``ConditionCheck`` when the audit event names one.
-
-Design carried from the Phase 06 breakdown (planner decisions 2, 3, 5, 6, 7):
-
-- **Multi-table schema, single source.** :data:`SCHEMA` is the one authoritative
-  table/key/GSI definition; the DynamoDB Local harness and (later) the Phase 07
-  CDK stack consume it verbatim so the schema text exists exactly once.
-- **Sortable timestamps.** :func:`encode_timestamp` re-implements the SQLite
-  text convention (``sqlite.py`` is a completed Phase 02 contract surface and a
-  byte-stable refactor for a 6-line codec is unjustified churn) — a
-  cross-reference comment pins the shared format. Fixed-width microseconds make
-  lexicographic order equal chronological order, which the GSI sort keys and
-  keyset cursors rely on.
-- **Tenant normalization.** ``provider_tenant=None`` participates in the
-  identity-tuple constraint key as the normalized empty string and reads back
-  as ``None`` (lossless: ``ProviderTenant`` pins ``min_length=1``).
-- **Constraint / resume keys.** ``unique_constraints`` PK is
-  ``<kind>#<normalized value>``; GSI sort keys put the ``#``-separated id
-  tiebreaker last so ``(created_at, id)`` ordering is exact.
-- **Opaque keyset cursors.** base64url JSON ``{"scope", "resume"}`` carrying
-  the *last returned* item's index key attributes; a foreign-scope or malformed
-  payload raises :class:`~app.storage.contract.InvalidCursorError` with fixed,
-  echo-free messages, never a raw ``ValueError``/``binascii.Error``/driver error.
-- **List reads are GSI scans with keyset cursors.** ``list_user_organizations``
-  reassembles its page through one ``BatchGetItem`` read-back of the *trimmed*
-  page's organization ids (decision 2's batch-boundary rule: the probe row's
-  payload is never fetched), so the membership index supplies ordering and the
-  organizations table supplies truth.
-- **Positional conflict classification.** :func:`classify_cancellation_reasons`
-  is a pure function over parsed ``CancellationReasons`` dicts plus the
-  operation's same-ordered descriptor list; the first ``ConditionalCheckFailed``
-  in submission order decides the domain error. Transient
-  ``TransactionConflict`` becomes a retry verdict (:data:`RETRY`), throughput
-  faults and unknown codes become the base :class:`~app.storage.contract.StorageError`,
-  and no driver message, table name, region, or request id ever propagates.
-- **Every multi-item write is one ``TransactWriteItems``** (decision 3), with a
-  parallel, same-ordered descriptor list: base puts first, then constraint puts,
-  then the parent ``ConditionCheck``s that replicate SQLite's foreign keys. A
-  rejected batch leaves no residue (DynamoDB transactions are atomic), which is
-  how the adapter reproduces SQLite's rollback-on-conflict behavior.
-"""
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -149,7 +66,7 @@ class IndexSpec:
 
 @dataclass(frozen=True)
 class TableSpec:
-    """One table's name suffix and key schema (decision 2's layout)."""
+    """One table's name suffix and key schema (design choice 2's layout)."""
 
     name: str
     partition_key: str
@@ -162,7 +79,7 @@ class TableSpec:
         Every key attribute (base and GSI) is a string; projections are ``ALL``
         so a Query over an index is self-contained for payloads that live on the
         indexed table. ``PAY_PER_REQUEST`` billing needs no throughput
-        provisioning on Local; Phase 07's CDK declares capacity explicitly.
+        provisioning on Local; AWS implementation CDK declares capacity explicitly.
         """
         key_names = [self.partition_key]
         if self.sort_key is not None:
@@ -351,7 +268,7 @@ def encode_timestamp(value: datetime) -> str:
     lexicographic order equals chronological order (a zero-microsecond value
     must still carry ``.000000`` or a mixed GSI sort-key range mis-sorts).
     Mirrors :func:`app.storage.sqlite.encode_timestamp` (``sqlite.py:236-244``);
-    deliberately re-implemented here rather than shared (breakdown decision 6).
+    deliberately re-implemented here rather than shared (design notes design choice 6).
     Naive datetimes are rejected (:func:`~app.models.timestamps.ensure_utc`).
     """
     normalized = ensure_utc(value)
@@ -385,7 +302,7 @@ def decode_provider_tenant(value: str) -> ProviderTenant | None:
 def encode_constraint_key(kind: ConstraintKind, normalized_value: str) -> str:
     """Build a ``unique_constraints`` PK: ``<kind>#<normalized value>``.
 
-    Key-only (decision 2): the whole uniqueness is carried by the partition key
+    Key-only (design choice 2): the whole uniqueness is carried by the partition key
     so a lookup whose entity id is *unknown* is a single ``GetItem``.
     """
     return f"{kind.value}#{normalized_value}"
@@ -405,7 +322,7 @@ def encode_external_identity_value(
 
 
 def encode_sort_key(created_at: datetime, tiebreaker_id: str) -> str:
-    """Build a GSI sort key: ``<sortable created_at>#<id>`` (decision 2).
+    """Build a GSI sort key: ``<sortable created_at>#<id>`` (design choice 2).
 
     The fixed-width timestamp leads and the ``#``-separated id tiebreaker is
     last, so lexicographic order equals ``(created_at, id)`` chronological order
@@ -425,14 +342,14 @@ def encode_sort_key(created_at: datetime, tiebreaker_id: str) -> str:
 def user_item(user: User) -> dict[str, Any]:
     """The ``users`` item for one domain user (``pk`` is the ``usr_`` identity).
 
-    Phase 12 adds two attributes and removes nothing:
+    application-role adds two attributes and removes nothing:
     ``application_role`` is written as its enum string on **every** path (the
     writer always names the value — the model default is not a storage
     behavior), and ``g_email`` is the ``by-email`` GSI key pair's partition
     attribute, the exact stored address with no normalization (the SQLite
     ``users_email_lookup`` index matches the raw column too), so
     :meth:`DynamoDbStorage.list_users_by_email` is an exact-key Query and never
-    a Scan. Phase 13 adds ``g_role``: the ``by-application-role`` GSI partition
+    a Scan. admin adds ``g_role``: the ``by-application-role`` GSI partition
     attribute, always written as the exact ``application_role`` value in
     lockstep with the attribute itself (:meth:`transition_application_role`
     rewrites both in one conditional update), so the active-admin guard Query
@@ -454,8 +371,8 @@ def user_item(user: User) -> dict[str, Any]:
 def user_from_item(item: Mapping[str, Any]) -> User:
     """Rebuild a :class:`~app.models.user.User` from a ``users`` item.
 
-    The Phase 12 ``application_role`` follows the documented old-data rule: an
-    item that **does not carry** the attribute is a pre-Phase-12 row and reads
+    The application-role ``application_role`` follows the documented old-data rule: an
+    item that **does not carry** the attribute is a pre-capability-12 row and reads
     back as :attr:`~app.models.enums.ApplicationRole.USER` (the only role any
     writer of that era could produce — administration is out of band), so the
     attribute is simply not handed to the model and its ``USER`` default
@@ -543,7 +460,7 @@ def organization_from_item(item: Mapping[str, Any]) -> Organization:
 
 
 def membership_item(membership: Membership, organization_created_at: datetime) -> dict[str, Any]:
-    """The ``memberships`` item for one domain membership (decision 2's layout).
+    """The ``memberships`` item for one domain membership (design choice 2's layout).
 
     The base keys carry the native ``(organization_id, user_id)`` pair (pair
     uniqueness and the tuple lookups are native); the four GSI key attributes
@@ -587,12 +504,12 @@ def membership_from_item(item: Mapping[str, Any]) -> Membership:
 
 
 def api_key_item(api_key: ApiKey) -> dict[str, Any]:
-    """The ``api_keys`` item for one domain key (decision 2's layout).
+    """The ``api_keys`` item for one domain key (design choice 2's layout).
 
     ``pk`` is the ``key_`` application identity; the two GSI key attributes
     carry the organization-scoped listing (SK = ``created_at`` + ``#`` + ``key_``
     id, so ``(created_at, id)`` order is exact). ``scopes`` is stored as a
-    native DynamoDB **L** (decision 6): list order and duplicates are preserved
+    native DynamoDB **L** (design choice 6): list order and duplicates are preserved
     by the type itself — no JSON-text emulation of SQLite's codec. Optional
     timestamps are *absent attributes* when ``None`` (DynamoDB has no NULL
     convention here), which the reader maps back symmetrically. No plaintext
@@ -627,7 +544,7 @@ def api_key_item(api_key: ApiKey) -> dict[str, Any]:
 def api_key_from_item(item: Mapping[str, Any]) -> ApiKey:
     """Rebuild an :class:`~app.models.api_key.ApiKey` from an item.
 
-    Reconstruction goes through ``model_validate`` (decision 6): a corrupt
+    Reconstruction goes through ``model_validate`` (design choice 6): a corrupt
     stored value fails loudly instead of being coerced. The GSI key attributes
     are index plumbing and never part of the domain entity.
     """
@@ -654,14 +571,14 @@ def api_key_from_item(item: Mapping[str, Any]) -> ApiKey:
 def audit_event_item(audit_event: AuditEvent) -> dict[str, Any]:
     """The ``audit_events`` item for one domain audit event (``pk`` is ``aud_``).
 
-    ``metadata`` is stored as a native DynamoDB **M** (decision 6): JSON-safe
+    ``metadata`` is stored as a native DynamoDB **M** (design choice 6): JSON-safe
     values map onto S/N/BOOL/NULL/L/M directly and the contract's "round-trips
     exactly" is observable equality, which native types satisfy — JSON-text
     emulation of SQLite's codec would add lossy number handling for no
     behavioral gain. Optional ``target_type``/``target_id`` are *absent
     attributes* when ``None`` (the same convention as the api-key optional
     timestamps). There is deliberately no ``audit_event_from_item`` reader:
-    the contract has no audit read surface this phase (Phase 08 owns the query
+    the contract has no audit read surface this capability (security owns the query
     path and adds the codec with it); append is write-only by contract.
     """
     item: dict[str, Any] = {
@@ -787,7 +704,7 @@ def organization_slug_constraint_item(organization: Organization) -> dict[str, A
 def membership_id_constraint_item(membership: Membership) -> dict[str, Any]:
     """The ``membership_id`` guard item for one ``mem_`` record id.
 
-    Decision 2: the membership record id is the only non-PK record id, so it
+    design choice 2: the membership record id is the only non-PK record id, so it
     gets a guard item mapping to ``kind="entity_id"``; the ``(organization,
     user)`` pair uniqueness is native on the base table and never appears as
     a constraint item.
@@ -800,9 +717,9 @@ def membership_id_constraint_item(membership: Membership) -> dict[str, Any]:
 
 
 def api_key_id_constraint_item(api_key: ApiKey) -> dict[str, Any]:
-    """The ``api_key_id`` constraint item guarding one §8 credential segment.
+    """The ``api_key_id`` constraint item guarding one API-key credential segment.
 
-    Decision 2: the segment is the §8 uniqueness DynamoDB cannot enforce on the
+    design choice 2: the segment is the credential contract uniqueness DynamoDB cannot enforce on the
     ``key_``-keyed base table, so it gets a guard item mapped to
     ``kind="api_key_id"`` (the frozen ``DuplicateEntityKind``); the ``key_``
     record id is native on the base table and needs no guard. The item carries
@@ -885,13 +802,21 @@ class DuplicateConflict:
 
 
 @dataclass(frozen=True)
+class EntityNotFoundConflict:
+    """Descriptor: a conditional organization update/delete missed its row."""
+
+    def to_error(self) -> StorageError:
+        return EntityNotFoundError("organization not found")
+
+
+@dataclass(frozen=True)
 class IdentityRaceConflict:
     """Descriptor: a ``provision_user`` identity-tuple constraint failure.
 
-    Spec §6's concurrent-first-login race is a converge, not a plain conflict;
-    the identity tuple is the **only** trigger from Phase 12 on (the email
+    identity contract's concurrent-first-login race is a converge, not a plain conflict;
+    the identity tuple is the **only** trigger from application-role on (the email
     constraint this once shared the mapping with no longer exists), and
-    ``existing_user_id`` is resolved by the operation (task 6) after the
+    ``existing_user_id`` is resolved by the operation (implementation) after the
     rollback, so this carries the base error with ``None``.
     """
 
@@ -908,7 +833,7 @@ class ReferenceConflict:
 
 
 class _RoleCasMiss(StorageError):
-    """Internal signal for the Phase 13 target-CAS position.
+    """Internal signal for the admin target-CAS position.
 
     Raised only by :meth:`DynamoDbStorage.transition_application_role`'s own
     classification of a cancelled transition; the operation converts it to the
@@ -920,7 +845,7 @@ class _RoleCasMiss(StorageError):
 
 @dataclass(frozen=True)
 class LastAdminGuardConflict:
-    """Descriptor: the Phase 13 deterministic-witness ``ConditionCheck`` failed.
+    """Descriptor: the admin deterministic-witness ``ConditionCheck`` failed.
 
     The witness stopped being an ``ACTIVE`` admin between the guard read and
     the commit (a racing demotion or disabling shrank the other-active-admin
@@ -937,7 +862,7 @@ class LastAdminGuardConflict:
 
 @dataclass(frozen=True)
 class RoleCasMissConflict:
-    """Descriptor: the Phase 13 target CAS failed (a racing transition committed).
+    """Descriptor: the admin target CAS failed (a racing transition committed).
 
     Maps to the internal :class:`_RoleCasMiss` signal, which
     :meth:`DynamoDbStorage.transition_application_role` resolves by re-reading
@@ -954,6 +879,7 @@ class RoleCasMissConflict:
 #: ``DuplicateConflict(ENTITY_ID)``.
 type ConflictDescriptor = (
     DuplicateConflict
+    | EntityNotFoundConflict
     | IdentityRaceConflict
     | ReferenceConflict
     | LastAdminGuardConflict
@@ -1122,7 +1048,7 @@ def _put_if_absent(
     """One ``Put`` transact item that fails when the record key already exists.
 
     ``attribute_not_exists`` on the key attribute(s) is DynamoDB's PRIMARY KEY
-    collision (decision 2: native on the record-id tables, and the mechanism the
+    collision (design choice 2: native on the record-id tables, and the mechanism the
     ``unique_constraints`` items use to enforce a domain uniqueness).
     """
     names = {f"#{name}": name for name in key_attributes}
@@ -1229,7 +1155,7 @@ class DynamoDbStorage:
         """Submit one ``TransactWriteItems`` with bounded transient retry.
 
         The submitted items and the descriptors are positionally aligned
-        (decision 3), so a cancellation classifies by submission order. Driver
+        (design choice 3), so a cancellation classifies by submission order. Driver
         exceptions never escape: only :class:`StorageError` subclasses do.
         """
         client = self._client()
@@ -1260,10 +1186,10 @@ class DynamoDbStorage:
         """Persist a new user and echo the caller-supplied entity back.
 
         Storage mints nothing: the item is exactly ``user``. Email is **not** a
-        uniqueness constraint from Phase 12 on (the ``user_email`` guard item
+        uniqueness constraint from application-role on (the ``user_email`` guard item
         is gone), so two distinct ``usr_`` identities may carry the same
         address and only a ``usr_`` id collision is translated — as
-        ``kind="entity_id"``, positionally (decision 3) — and a rejected write
+        ``kind="entity_id"``, positionally (design choice 3) — and a rejected write
         leaves no item behind (SQLite's rollback equivalent).
         """
         self._transact(
@@ -1282,7 +1208,7 @@ class DynamoDbStorage:
     def update_user(self, user: User) -> User:
         try:
             self._client().update_item(
-                TableName=self._table("users"),
+                TableName=self._table_name("users"),
                 Key={"pk": str(user.id)},
                 UpdateExpression="SET display_name = :name, updated_at = :updated_at",
                 ExpressionAttributeValues={
@@ -1298,18 +1224,18 @@ class DynamoDbStorage:
         return user
 
     def list_users_by_email(self, email: str) -> list[User]:
-        """Exact-match lookup of every user that carries ``email`` (Phase 12).
+        """Exact-match lookup of every user that carries ``email`` (application-role).
 
         The ``users/by-email`` GSI (partition ``g_email`` = the exact stored
         address, sort ``pk``) answers with the full payload (``ALL``
         projection), so this is one exact-key Query and never a Scan; an
         unknown address simply yields no items, which is an empty list and
-        **not** :class:`EntityNotFoundError` (a lookup, not §12's resolve
+        **not** :class:`EntityNotFoundError` (a lookup, not storage contract's resolve
         signal). The index sorts by ``usr_`` id, while the contract pins
         ``(created_at, id)`` ordering, so the decoded users are sorted here —
         bounded because email is a documented bounded lookup with no cursor
         (:data:`_LIST_USERS_BY_EMAIL_MAX` drains the partition). Items written
-        before Phase 12 carry no ``g_email`` and are invisible to this path
+        before application-role carry no ``g_email`` and are invisible to this path
         until the documented one-time backfill runs; they stay reachable
         through :meth:`get_user`.
         """
@@ -1345,6 +1271,206 @@ class DynamoDbStorage:
             scan_args["ExclusiveStartKey"] = last_key
         users = [user_from_item(item) for item in items]
         return sorted(users, key=lambda user: (user.created_at, str(user.id)))
+
+    def _admin_scan(self, table_name: str) -> list[dict[str, Any]]:
+        """Read a complete table for the local application-administration API."""
+        table = self._table(table_name)
+        items: list[dict[str, Any]] = []
+        args: dict[str, Any] = {"ConsistentRead": True}
+        while True:
+            try:
+                response = table.scan(**args)
+            except ClientError:
+                raise StorageError("storage query failed") from None
+            items.extend(response.get("Items", ()))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                return items
+            args["ExclusiveStartKey"] = last_key
+
+    def admin_summary(self) -> dict[str, int]:
+        """Return global organization and active-membership totals."""
+        organizations = [organization_from_item(item) for item in self._admin_scan("organizations")]
+        active_organizations = {str(org.id) for org in organizations if str(org.status) == "active"}
+        memberships = self._admin_scan("memberships")
+        return {
+            "organization_count": len(organizations),
+            "active_membership_count": sum(
+                1
+                for item in memberships
+                if item.get("status") == str(MembershipStatus.ACTIVE)
+                and item.get("organization_id") in active_organizations
+            ),
+        }
+
+    def admin_search_organizations(self, query: str, page: PageParams) -> Page[Organization]:
+        """Search organizations case-insensitively and return stable cursor pages."""
+        scope = "admin_organizations:" + query.casefold()
+        after = (
+            self._decode_resume(scope, page.cursor, ("created_at", "id"))
+            if page.cursor is not None
+            else None
+        )
+        organizations = [
+            organization_from_item(item)
+            for item in self._admin_scan("organizations")
+            if query.casefold() in str(item.get("name", "")).casefold()
+        ]
+        organizations.sort(key=lambda org: (org.created_at, str(org.id)))
+        if after is not None:
+            position = (decode_timestamp(after["created_at"]), after["id"])
+            organizations = [
+                org for org in organizations if (org.created_at, str(org.id)) > position
+            ]
+        limit = clamp_limit(page.limit)
+        has_more = len(organizations) > limit
+        items = organizations[:limit]
+        next_cursor = (
+            encode_cursor(
+                scope,
+                {"created_at": encode_timestamp(items[-1].created_at), "id": str(items[-1].id)},
+            )
+            if has_more and items
+            else None
+        )
+        return Page(items=items, limit=limit, next_cursor=next_cursor)
+
+    def admin_suspend_organization(self, organization_id: OrganizationId, at: UtcDatetime) -> None:
+        """Disable an organization before revoking each of its active API keys."""
+        self.get_organization(organization_id)
+        try:
+            self._client().update_item(
+                TableName=self._table_name("organizations"),
+                Key={"pk": str(organization_id)},
+                UpdateExpression=(
+                    "SET #status = :disabled, suspended_at = if_not_exists(suspended_at, :at), "
+                    "updated_at = :at"
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":disabled": "disabled",
+                    ":at": encode_timestamp(at),
+                },
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("organization not found") from None
+            raise StorageError("storage update failed") from None
+        for item in self._admin_scan("api_keys"):
+            if (
+                item.get("organization_id") != str(organization_id)
+                or item.get("status") != "active"
+            ):
+                continue
+            try:
+                self._client().update_item(
+                    TableName=self._table_name("api_keys"),
+                    Key={"pk": item["pk"]},
+                    UpdateExpression=(
+                        "SET #status = :revoked, revoked_at = if_not_exists(revoked_at, :at)"
+                    ),
+                    ExpressionAttributeNames={"#status": "status"},
+                    ConditionExpression="#status = :active",
+                    ExpressionAttributeValues={
+                        ":revoked": "revoked",
+                        ":active": "active",
+                        ":at": encode_timestamp(at),
+                    },
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                    raise StorageError("storage update failed") from None
+
+    def admin_reactivate_organization(
+        self, organization_id: OrganizationId, at: UtcDatetime
+    ) -> None:
+        """Restore organization access without restoring revoked API keys."""
+        try:
+            self._client().update_item(
+                TableName=self._table_name("organizations"),
+                Key={"pk": str(organization_id)},
+                UpdateExpression="SET #status = :active, updated_at = :at REMOVE suspended_at",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={":active": "active", ":at": encode_timestamp(at)},
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("organization not found") from None
+            raise StorageError("storage update failed") from None
+
+    def admin_delete_organization(self, organization_id: OrganizationId) -> None:
+        """Remove an organization and its associated records from local storage."""
+        self.get_organization(organization_id)
+        self.admin_suspend_organization(organization_id, utc_now())
+        org_id = str(organization_id)
+        all_memberships = self._admin_scan("memberships")
+        organization_memberships = [
+            item for item in all_memberships if item.get("organization_id") == org_id
+        ]
+        user_ids = {str(item["user_id"]) for item in organization_memberships}
+        memberships_to_delete = [
+            item
+            for item in all_memberships
+            if item.get("organization_id") == org_id or item.get("user_id") in user_ids
+        ]
+        keys_to_delete: dict[str, set[str]] = {
+            "api_keys": set(),
+            "audit_events": set(),
+            "users": set(),
+            "external_identities": set(),
+            "app_sessions": set(),
+            "unique_constraints": set(),
+        }
+        entity_ids: set[str] = {org_id}
+        entity_ids.update(str(item["id"]) for item in memberships_to_delete)
+        for item in self._admin_scan("api_keys"):
+            if item.get("organization_id") == org_id or item.get("created_by_user_id") in user_ids:
+                keys_to_delete["api_keys"].add(str(item["pk"]))
+                entity_ids.add(str(item["pk"]))
+        for item in self._admin_scan("audit_events"):
+            if (
+                item.get("organization_id") == org_id
+                or item.get("actor_id") in user_ids
+                or item.get("target_id") in user_ids
+            ):
+                keys_to_delete["audit_events"].add(str(item["pk"]))
+        for item in self._admin_scan("external_identities"):
+            if item.get("user_id") in user_ids:
+                keys_to_delete["external_identities"].add(str(item["pk"]))
+                entity_ids.add(str(item["pk"]))
+        for item in self._admin_scan("app_sessions"):
+            if item.get("user_id") in user_ids:
+                keys_to_delete["app_sessions"].add(str(item["pk"]))
+        for item in self._admin_scan("unique_constraints"):
+            if item.get("entity_id") in entity_ids or (
+                item.get("kind") == ConstraintKind.ORGANIZATION_SLUG.value
+                and item.get("entity_id") == org_id
+            ):
+                keys_to_delete["unique_constraints"].add(str(item["pk"]))
+        for user_id in user_ids:
+            keys_to_delete["users"].add(user_id)
+        for table_name, ids in keys_to_delete.items():
+            for entity_id in ids:
+                try:
+                    self._table(table_name).delete_item(Key={"pk": entity_id})
+                except ClientError:
+                    raise StorageError("storage delete failed") from None
+        for item in memberships_to_delete:
+            try:
+                self._table("memberships").delete_item(
+                    Key={
+                        "organization_id": item["organization_id"],
+                        "user_id": item["user_id"],
+                    }
+                )
+            except ClientError:
+                raise StorageError("storage delete failed") from None
+        try:
+            self._table("organizations").delete_item(Key={"pk": org_id})
+        except ClientError:
+            raise StorageError("storage delete failed") from None
 
     def create_external_identity(self, identity: ExternalIdentity) -> ExternalIdentity:
         """Attach a provider identity to an existing user (caller-echo).
@@ -1385,11 +1511,11 @@ class DynamoDbStorage:
         """Resolve the identity tuple to the internal :class:`User`.
 
         Two point reads on the key-only constraint table and the ``users`` base
-        table (decision 2): the constraint ``GetItem`` supplies the owning
+        table (design choice 2): the constraint ``GetItem`` supplies the owning
         ``user_id``, the user ``GetItem`` supplies the payload. The provider
         subject is therefore never compared against a ``usr_`` id, and the
         tenant is normalized the same way writes store it. A miss on either read
-        raises :class:`EntityNotFoundError` — Phase 03's "needs provisioning"
+        raises :class:`EntityNotFoundError` — identity implementation "needs provisioning"
         signal, never a ``None`` return.
         """
         constraint = self._get(
@@ -1423,7 +1549,7 @@ class DynamoDbStorage:
         excluded client-side, decoded and sorted by ``(created_at, id)`` — the
         same deterministic key every ordered read uses, so
         :meth:`transition_application_role`'s witness selection is stable.
-        Items written before the Phase 13 backfill carry no ``g_role`` and are
+        Items written before the admin backfill carry no ``g_role`` and are
         invisible here; that invisibility fails closed to the refusal, never
         to a fallback read.
         """
@@ -1450,7 +1576,7 @@ class DynamoDbStorage:
         witness item inside the committing transaction (transaction conditions
         evaluate against committed data, never this operation's own reads), so
         a concurrent shrink of the other-active-admin set fails the whole
-        transition. A pre-Phase-12 item *without* ``application_role`` fails
+        transition. A pre-capability-12 item *without* ``application_role`` fails
         the equality — fail-closed, which is correct: such an item was never
         an admin.
         """
@@ -1736,7 +1862,7 @@ class DynamoDbStorage:
         (:data:`_LIST_USERS_BY_EMAIL_MAX`). Index queries cannot
         request consistent reads (DynamoDB rejects the flag on a GSI);
         DynamoDB Local answers strongly consistent, and production GSI
-        replication lag is a documented Phase 06 limitation.
+        replication lag is a documented DynamoDB limitation.
         """
         query_table = self._table(table)
         items: list[dict[str, Any]] = []
@@ -1770,7 +1896,7 @@ class DynamoDbStorage:
     def _read_back_organizations(self, organization_ids: Sequence[str]) -> list[Organization]:
         """Fetch one page's organizations with a single ``BatchGetItem``.
 
-        Decision 2's batch-boundary rule: only the **trimmed page's** ids are
+        design choice 2's batch-boundary rule: only the **trimmed page's** ids are
         fetched (≤ ``MAX_PAGE_LIMIT`` keys, always inside the 100-key/4 MB
         caps; the probe row's organization is never fetched). Batch response
         order is not contractual, so items are re-keyed and the rebuilt
@@ -1815,7 +1941,7 @@ class DynamoDbStorage:
 
         Storage mints nothing: the item is exactly ``organization``. One
         transaction: the ``org_`` base put and the ``organization_slug``
-        constraint put (decision 2). A taken slug surfaces as
+        constraint put (design choice 2). A taken slug surfaces as
         ``kind="organization_slug"`` and an ``org_`` id collision as
         ``kind="entity_id"`` — base put first in submission order, mirroring
         SQLite, so a both-taken write reports the record id — and a rejected
@@ -1845,26 +1971,91 @@ class DynamoDbStorage:
         return organization_from_item(item)
 
     def update_organization(self, organization: Organization) -> Organization:
-        try:
-            self._client().update_item(
-                TableName=self._table("organizations"),
-                Key={"pk": str(organization.id)},
-                UpdateExpression=(
-                    "SET #name = :name, name_status = :name_status, updated_at = :updated_at"
+        current = self.get_organization(organization.id)
+        if current.slug == organization.slug:
+            try:
+                self._client().update_item(
+                    TableName=self._table_name("organizations"),
+                    Key={"pk": str(organization.id)},
+                    UpdateExpression=(
+                        "SET #name = :name, name_status = :name_status, updated_at = :updated_at"
+                    ),
+                    ExpressionAttributeNames={"#name": "name"},
+                    ExpressionAttributeValues={
+                        ":name": organization.name,
+                        ":name_status": str(organization.name_status),
+                        ":updated_at": encode_timestamp(organization.updated_at),
+                    },
+                    ConditionExpression="attribute_exists(pk)",
+                )
+            except ClientError as exc:
+                if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                    raise EntityNotFoundError("organization not found") from None
+                raise StorageError("storage update failed") from None
+            return organization
+
+        old_constraint_pk = encode_constraint_key(ConstraintKind.ORGANIZATION_SLUG, current.slug)
+        update = {
+            "Update": {
+                "TableName": self._table_name("organizations"),
+                "Key": {"pk": str(organization.id)},
+                "UpdateExpression": (
+                    "SET #name = :name, #slug = :slug, name_status = :name_status, "
+                    "updated_at = :updated_at"
                 ),
-                ExpressionAttributeNames={"#name": "name"},
-                ExpressionAttributeValues={
+                "ExpressionAttributeNames": {"#name": "name", "#slug": "slug"},
+                "ExpressionAttributeValues": {
                     ":name": organization.name,
+                    ":slug": organization.slug,
+                    ":old_slug": current.slug,
                     ":name_status": str(organization.name_status),
                     ":updated_at": encode_timestamp(organization.updated_at),
                 },
-                ConditionExpression="attribute_exists(pk)",
+                "ConditionExpression": "attribute_exists(pk) AND #slug = :old_slug",
+            }
+        }
+        delete_old_slug = {
+            "Delete": {
+                "TableName": self._table_name("unique_constraints"),
+                "Key": {"pk": old_constraint_pk},
+                "ConditionExpression": "entity_id = :organization_id",
+                "ExpressionAttributeValues": {":organization_id": str(organization.id)},
+            }
+        }
+        try:
+            self._transact(
+                [
+                    update,
+                    delete_old_slug,
+                    self._put(
+                        "unique_constraints",
+                        organization_slug_constraint_item(organization),
+                        ("pk",),
+                    ),
+                ],
+                [
+                    EntityNotFoundConflict(),
+                    EntityNotFoundConflict(),
+                    DuplicateConflict(DuplicateEntityKind.ORGANIZATION_SLUG),
+                ],
             )
-        except ClientError as exc:
-            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
-                raise EntityNotFoundError("organization not found") from None
-            raise StorageError("storage update failed") from None
+        except StorageError:
+            raise
         return organization
+
+    def is_organization_slug_available(
+        self,
+        slug: str,
+        excluding_organization_id: OrganizationId | None = None,
+    ) -> bool:
+        constraint = self._get(
+            "unique_constraints",
+            {"pk": encode_constraint_key(ConstraintKind.ORGANIZATION_SLUG, slug)},
+        )
+        return constraint is None or (
+            excluding_organization_id is not None
+            and constraint.get("entity_id") == str(excluding_organization_id)
+        )
 
     def create_membership(self, membership: Membership) -> Membership:
         """Grant a user a role in an organization (caller-echo).
@@ -1875,7 +2066,7 @@ class DynamoDbStorage:
         constraint item mapped to ``kind="entity_id"``. Both parents are
         enforced with ``ConditionCheck``s (the contract's DynamoDB
         foreign-key obligation). The organization is read **first** only to
-        denormalize ``g_org_created`` (decision 2: the by-user index orders
+        denormalize ``g_org_created`` (design choice 2: the by-user index orders
         by organization creation time); the org ``ConditionCheck`` still
         re-verifies existence inside the transaction, so the read informs the
         item, it never enforces the reference.
@@ -1930,11 +2121,11 @@ class DynamoDbStorage:
         The ``by-user`` GSI (PK ``g_user``, SK ``g_org_created`` = organization
         ``created_at`` + ``#`` + org id) supplies ``(created_at, id)`` order
         server-side; a ``FilterExpression`` on the membership item's ``status``
-        hides non-active memberships DynamoDB-side (decision 2: keyset
+        hides non-active memberships DynamoDB-side (design choice 2: keyset
         semantics make filtered continuation correct). The page payload lives
         on the ``organizations`` table, so the trimmed page's org ids go
         through one ``BatchGetItem`` read-back reassembled in GSI order
-        (decision 2's batch-boundary rule). The cursor resumes from the last
+        (design choice 2's batch-boundary rule). The cursor resumes from the last
         **returned** membership item's four key attributes.
         """
         limit = clamp_limit(page.limit)
@@ -2032,11 +2223,11 @@ class DynamoDbStorage:
         failing means the item was absent, which raises
         :class:`EntityNotFoundError` — removal is explicitly **not**
         idempotent (SQLite's blocked-then-zero-rowcount path; the single-item
-        conditional discipline is decision 4's, shared with task 5's
-        revocation CAS). Only the base item is removed: the breakdown pins a
+        conditional discipline is design choice 4's, shared with implementation's
+        revocation CAS). Only the base item is removed: the design notes pins a
         single conditional delete, and the suite's re-grant-after-delete case
         uses a fresh ``mem_`` id, so the guard item's lifetime is unobserved
-        (noted for the Phase 08 hardening list).
+        (noted for the security hardening list).
         """
         memberships_table = self._table("memberships")
         key = {"organization_id": str(organization_id), "user_id": str(user_id)}
@@ -2062,7 +2253,7 @@ class DynamoDbStorage:
         """Persist a new API-key credential row (caller-echo).
 
         Storage mints nothing: the item is exactly ``api_key``. One
-        transaction: the ``key_`` base put, the §8 ``api_key_id`` segment
+        transaction: the ``key_`` base put, the credential contract ``api_key_id`` segment
         constraint put, and the organization/creator ``ConditionCheck``s that
         replicate SQLite's foreign keys (contract: api_key→organization+creator,
         checked in that column order). So a taken segment is
@@ -2071,7 +2262,7 @@ class DynamoDbStorage:
         SQLite, so a both-taken write reports the record id), and an unknown
         organization or creator is :class:`ReferenceNotFoundError` — none of
         them leaves a partial row. ``scopes`` round-trip exactly (order and
-        duplicates preserved; normalization is Phase 05 domain work).
+        duplicates preserved; normalization is API-key domain work).
         """
         self._transact(
             [
@@ -2096,12 +2287,12 @@ class DynamoDbStorage:
     def get_api_key(self, api_key_id: ApiKeyId) -> ApiKey:
         """Load a key by its ``key_`` application identity; a miss raises ``EntityNotFoundError``.
 
-        Tenancy is deliberately **not** filtered here (contract-pinned): the §8
+        Tenancy is deliberately **not** filtered here (contract-pinned): the credential contract
         verification path must resolve the organization *from* the key, so the
-        full item is returned regardless of organization and enforcing the §14
-        org-scoped route contract is the Phase 05 service's check of
+        full item is returned regardless of organization and enforcing the API contract
+        org-scoped route contract is the API-key service's check of
         ``api_key.organization_id``, not a storage filter. ``api_key_id`` is the
-        ``key_`` identity — not the §8 credential segment (see
+        ``key_`` identity — not the API-key credential segment (see
         :meth:`get_api_key_by_key_id`).
         """
         item = self._get("api_keys", {"pk": str(api_key_id)})
@@ -2110,14 +2301,14 @@ class DynamoDbStorage:
         return api_key_from_item(item)
 
     def get_api_key_by_key_id(self, key_id: KeyId) -> ApiKey:
-        """Load a key by the §8 non-secret ``<key-id>`` credential segment.
+        """Load a key by the credential contract non-secret ``<key-id>`` credential segment.
 
         Two point reads on the key-only constraint table and the ``api_keys``
-        base table (decision 2): the constraint ``GetItem`` by
+        base table (design choice 2): the constraint ``GetItem`` by
         ``api_key_id#<segment>`` supplies the ``key_`` id, the key ``GetItem``
         supplies the payload. Returns stored truth: after revocation the row
         still resolves with ``status=revoked`` and ``revoked_at`` set, because
-        status is data and rejection is Phase 05 verification work. A miss on
+        status is data and rejection is API-key verification work. A miss on
         either read raises :class:`EntityNotFoundError` — never ``None``.
         """
         constraint = self._get(
@@ -2185,7 +2376,7 @@ class DynamoDbStorage:
     def revoke_api_key(self, api_key_id: ApiKeyId, *, revoked_at: UtcDatetime) -> ApiKey:
         """Transition a key ``active → revoked`` (first-write-wins CAS).
 
-        Decision 4 mirrors the SQLite statement field-for-field
+        design choice 4 mirrors the SQLite statement field-for-field
         (``sqlite.py:1148-1156`` sets exactly ``status`` and ``revoked_at``;
         the model has no ``updated_at``): a standalone conditional
         ``UpdateItem`` with ``attribute_exists(pk) AND #status = 'active'``.
@@ -2239,15 +2430,15 @@ class DynamoDbStorage:
 
         Returns ``None`` — storage mints nothing and re-reads nothing, so there
         is nothing to return (contract-pinned). One transaction: the ``aud_``
-        base put (record-id conflicts are native on this table, decision 2 — a
+        base put (record-id conflicts are native on this table, design choice 2 — a
         re-append is ``kind="entity_id"``, never a raw driver error) and the
         organizations ``ConditionCheck`` replicating SQLite's audit→organization
-        foreign key (the actor id is §10 application identity enforced at the
+        foreign key (the actor id is authorization-context contract application identity enforced at the
         model boundary, not an FK). Base put first in submission order,
         mirroring SQLite's insert (the PK is checked during the row insert, the
         FK after), so a both-bad append reports the record id; a rejected
         append leaves no row. There is no audit read or list surface in this
-        phase: append is write-only by contract, and ``metadata`` round-trips
+        capability: append is write-only by contract, and ``metadata`` round-trips
         exactly through the native-M storage of :func:`audit_event_item`.
         """
         self._transact(
@@ -2268,13 +2459,13 @@ class DynamoDbStorage:
         reasons: Sequence[Mapping[str, Any]],
         race_constraint_pk_by_index: Mapping[int, str],
     ) -> UserId | None:
-        """Resolve the §6 race winner's ``usr_`` id after the rollback.
+        """Resolve the identity contract race winner's ``usr_`` id after the rollback.
 
         One strongly consistent ``GetItem`` on the **winning** constraint item
-        (decision 3): the failing item is located with the same positional rule
+        (design choice 3): the failing item is located with the same positional rule
         that decided the error (first ``ConditionalCheckFailed`` in submission
-        order), the key-only constraint table (decision 2) carries the owner's
-        ``user_id`` on the identity-tuple item (Phase 12: the only race
+        order), the key-only constraint table (design choice 2) carries the owner's
+        ``user_id`` on the identity-tuple item (application-role: the only race
         trigger), and the constraint ``pk`` is fully known from the failed
         write's own inputs — so the winner resolves in one read, the analogue
         of SQLite's post-rollback identity-tuple read. The transaction cancelled
@@ -2312,17 +2503,17 @@ class DynamoDbStorage:
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
-        audit events in one ``TransactWriteItems`` (spec §6/§12, decision 3).
+        audit events in one ``TransactWriteItems`` (identity contract/storage contract, design choice 3).
 
         Submission order mirrors SQLite's statement order — users → identities
         → organizations → memberships → audits, each group base put then
-        constraint put (from Phase 12 the users group is base-put only: email
+        constraint put (from application-role the users group is base-put only: email
         carries no guard item) — so a multi-failure race classifies identically
         on both adapters, and the parallel, same-ordered descriptors map each
         cancelled item to its domain error (the first ConditionalCheckFailed
         decides).
         The membership item denormalizes the ``created_at`` of the organization
-        the membership actually points at onto ``g_org_created`` (decision 2:
+        the membership actually points at onto ``g_org_created`` (design choice 2:
         the batch's own organization supplies it; an external organization is
         read before the transaction, mirroring ``create_membership``'s
         read-informs/check-enforces split). Parents the batch
@@ -2336,7 +2527,7 @@ class DynamoDbStorage:
         obligation and the DynamoDB replication of SQLite's foreign keys.
 
         Conflict semantics (contract-pinned): the identity tuple is the **sole**
-        race trigger from Phase 12 on — its constraint failure is spec §6's
+        race trigger from application-role on — its constraint failure is identity contract's
         concurrent-first-login race and surfaces as
         :class:`~app.storage.contract.DuplicateExternalIdentityError` after the
         full rollback (transactions are all-or-nothing, so no partial row of
@@ -2480,7 +2671,7 @@ class DynamoDbStorage:
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedOrganization:
         """Atomically write organization + membership + audit events in one
-        ``TransactWriteItems`` (Phase 04 breakdown decision 2, decision 3).
+        ``TransactWriteItems`` (organization design notes design choice 2, design choice 3).
 
         Submission order mirrors SQLite's statement order — organizations →
         memberships → audits, each group base put then constraint put — with
@@ -2492,7 +2683,7 @@ class DynamoDbStorage:
         guard to ``kind="entity_id"``, and every ``aud_`` base put to
         ``kind="entity_id"``. The membership item denormalizes the
         ``created_at`` of the organization it actually points at onto
-        ``g_org_created`` (decision 2: the batch's own organization supplies
+        ``g_org_created`` (design choice 2: the batch's own organization supplies
         it; an external organization is read before the transaction — the same
         "read informs the item, the ConditionCheck enforces the reference"
         split as ``create_membership`` and ``provision_user``). The batch's own
@@ -2592,7 +2783,7 @@ class DynamoDbStorage:
         Storage mints nothing: the item is exactly ``state`` (plus the
         derived numeric ``expires_at_epoch`` TTL attribute). A standalone
         conditional ``PutItem`` with ``attribute_not_exists(pk)`` — the
-        single-item discipline of decision 4, the same channel the
+        single-item discipline of design choice 4, the same channel the
         revocation CAS and the membership delete use — so a duplicate
         ``state_id`` surfaces as ``DuplicateEntityError(kind="entity_id")``
         and a rejected write leaves no item.
@@ -2679,7 +2870,7 @@ class DynamoDbStorage:
         clock. An unknown id and a session at/past ``expires_at`` both yield
         ``None`` — expired is indistinguishable from absent, never
         :class:`EntityNotFoundError`. The server-side counterpart is the
-        ``expires_at_epoch`` TTL attribute (Phase 11 task 8): DynamoDB Local
+        ``expires_at_epoch`` TTL attribute (session): DynamoDB Local
         never sweeps and production sweeps asynchronously, so the read-side
         check is what makes expiry immediate and exact.
         """
@@ -2717,7 +2908,7 @@ def open_dynamodb_storage(
     mid-signature would be a ``SyntaxError``). ``dynamodb_resource`` is the
     injectable seam for unit tests and the Local harness; when omitted a boto3
     resource is built for ``endpoint_url``/``region`` (construction performs no
-    network I/O). ``table_prefix`` lets Phase 07 parameterize ``dev``/``staging``
+    network I/O). ``table_prefix`` lets AWS parameterize ``dev``/``staging``
     /``prod`` and the harness isolate per-test tables.
     """
     resource = dynamodb_resource

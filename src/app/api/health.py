@@ -1,19 +1,20 @@
-"""Operational health endpoint (Phase 01 task 6 skeleton).
+"""Operational health endpoint (initial skeleton).
 
-``GET /health`` is deliberately **not** a spec §14 route: it is not in
+``GET /health`` is deliberately **not** a API contract route: it is not in
 :data:`app.api.schemas.manifest.ENDPOINTS` and lives outside the ``/v1``
 prefix. It exists so deployment platforms (Lambda health checks, ALB probes
-in later phases) can verify the process is alive without touching any
+in later capability) can verify the process is alive without touching any
 dependency.
 
 Hard constraints (acceptance criteria):
 
 - The handler must never touch a database, AWS SDK, or any configuration.
   If it ever needs a dependency, that belongs in a separate readiness
-  endpoint owned by the phase that introduces the dependency.
+  endpoint owned by the capability that introduces the dependency.
 - The response is a fixed, closed payload (``ApiSchema`` → ``extra="forbid"``)
   so monitors can parse it strictly.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

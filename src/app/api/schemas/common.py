@@ -1,6 +1,6 @@
 """Shared building blocks for the versioned HTTP request/response schemas.
 
-Phase 01 contract rules (task 5):
+initial contract rules (implementation):
 
 - Every API schema derives from :class:`ApiSchema`, which forbids unknown
   fields (``extra="forbid"``). Response shapes are therefore closed,
@@ -15,9 +15,10 @@ Phase 01 contract rules (task 5):
   decode, or interpret cursor content (AGENTS.md).
 - No module here may carry secret material: the only full-credential type in
   the whole API surface is
-  :class:`~app.api.schemas.api_keys.ApiKeyCreatedResponse` (spec §15), and
+  :class:`~app.api.schemas.api_keys.ApiKeyCreatedResponse` (key-creation contract), and
   it lives in its own module, not in this shared one.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
-"""Concurrent-first-login acceptance proof (Phase 03 task 6; spec §6).
+"""Concurrent-first-login acceptance proof (identity; identity contract).
 
-The §6 race, exercised against the real SQLite adapter exactly as the
-breakdown pins it:
+The identity contract race, exercised against the real SQLite adapter exactly as the
+design notes pins it:
 
 - **8 threads on a ``threading.Barrier``** (no sleeps), same ``sub``,
   **distinct per-attempt IDs** — each attempt calls ``resolve_or_provision``
@@ -9,7 +9,7 @@ breakdown pins it:
   the real race where concurrent requests share the identity tuple but carry
   different ``usr_``/``org_``/``aud_`` ids; the verified profile email is
   **derived from the subject** (``_verified_email``), never a hardcoded
-  placeholder, because §6 convergence is keyed on the identity tuple alone —
+  placeholder, because identity contract convergence is keyed on the identity tuple alone —
   proved by the distinct-per-attempt-email race below;
 - one main-thread **read** before the barrier so first-connection and
   WAL-conversion PRAGMAs do not race inside the timed window; lock handling
@@ -17,7 +17,7 @@ breakdown pins it:
   ``BEGIN IMMEDIATE`` discipline — nothing new is added here;
 - outcome: exactly one user, identity, organization, owner membership, and
   three audit rows; **all threads resolve the same ``usr_``/``org_``** (the
-  losers converge via decision 7's identity-tuple re-read, never a second
+  losers converge via design choice 7's identity-tuple re-read, never a second
   ``provision_user``);
 - final counts are asserted through **direct** fresh reads, and the race is
   repeated 20 times for stability.
@@ -25,10 +25,11 @@ breakdown pins it:
 Second case (sequential, not a race): two distinct ``sub``s deliberately
 sharing one email — the shared address *is* the subject under test here, so
 the email is named explicitly (``_COLLISION_EMAIL``) instead of being
-derived. Phase 12 made equal emails valid separate users: both logins
+derived. application-role made equal emails valid separate users: both logins
 provision in full (two users, two personal orgs, identity tuple as the only
 convergence key) and neither batch leaves **partial rows**.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -99,7 +100,7 @@ def _verified_email(sub: str) -> str:
 
 def _profile(sub: str = _SUB, *, email: str | None = None) -> CognitoProfile:
     """The verified user-info profile the provisioning path now requires
-    (Phase 11 task 5): the batch email comes from here, not from claims."""
+    (session): the batch email comes from here, not from claims."""
     return CognitoProfile(
         sub=sub,
         email=_verified_email(sub) if email is None else email,
@@ -222,7 +223,7 @@ def test_concurrent_first_requests_provision_exactly_once(tmp_path: Path, repeat
 
 
 def test_concurrent_race_converges_regardless_of_batch_email(tmp_path: Path) -> None:
-    """§6 convergence is keyed on the identity tuple, never on the email.
+    """identity contract convergence is keyed on the identity tuple, never on the email.
 
     Every attempt offers a *different* verified email for the same ``sub``:
     the loser's batch then violates the identity-tuple UNIQUE instead of
@@ -245,7 +246,7 @@ def test_concurrent_race_converges_regardless_of_batch_email(tmp_path: Path) -> 
 
 
 def test_distinct_subs_same_email_coexist_without_partial_rows(tmp_path: Path) -> None:
-    """Not a race: two distinct ``sub``s sharing one email. Phase 12 flipped
+    """Not a race: two distinct ``sub``s sharing one email. application-role flipped
     this from a conflict to coexistence — both logins provision in full
     (own user, own personal org, owner membership, own audits), the identity
     tuple is the only convergence key, and nothing partial is left."""

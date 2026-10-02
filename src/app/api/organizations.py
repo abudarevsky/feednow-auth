@@ -1,16 +1,16 @@
-"""``/v1/organizations`` routers (Phase 04 task 4; spec §14).
+"""``/v1/organizations`` routers (organization; API contract).
 
 :func:`build_organizations_router` mirrors the published ``me.py`` shape: a
 factory closing over the injected :class:`~app.storage.contract.Storage` and
 :class:`~app.auth.cognito.AccessTokenVerifier`, registering **from the frozen
 manifest entries themselves** (:func:`~app.api.schemas.manifest.
 endpoint_for`) so method, path, success status, and response model cannot
-drift from the §14 contract.
+drift from the API contract.
 
 Authorization wiring (decisions 3/5/6):
 
 - ``GET /v1/organizations`` and ``POST /v1/organizations`` consume the
-  Phase 03 authentication chain only — the list is inherently caller-scoped
+  identity authentication chain only — the list is inherently caller-scoped
   (the contract returns only active-membership organizations) and creation
   requires authentication with the creator becoming ``owner`` via the
   atomic batch. (A caller with **no** active organization is already a
@@ -23,9 +23,10 @@ Authorization wiring (decisions 3/5/6):
   malformed cursor → 400; anything else stays untranslated and lands on the
   frozen 500 handler, adapter text never echoed).
 
-Responses are field-by-field projections of the domain models (decision 8);
+Responses are field-by-field projections of the domain models (design choice 8);
 ``limit`` and the opaque ``next_cursor`` pass through verbatim.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``me.py``
 # precedent): the handler signatures reference closure locals in
@@ -40,6 +41,7 @@ from app.api.schemas.organizations import (
     OrganizationCreateRequest,
     OrganizationRenameRequest,
     OrganizationResponse,
+    OrganizationSlugAvailabilityResponse,
 )
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.dependencies import build_current_user
@@ -59,13 +61,20 @@ from app.services.authorization import (
     OrganizationTypeNotSelectableError,
 )
 from app.services.identity import ResolvedIdentity
-from app.storage.contract import EntityNotFoundError, InvalidCursorError, Storage
+from app.storage.contract import (
+    DuplicateEntityError,
+    DuplicateEntityKind,
+    EntityNotFoundError,
+    InvalidCursorError,
+    Storage,
+)
 
 #: The frozen §14 entries this router must register exactly.
 _LIST_SPEC = endpoint_for("list_organizations")
 _CREATE_SPEC = endpoint_for("create_organization")
 _GET_SPEC = endpoint_for("get_organization")
 _PATCH_SPEC = endpoint_for("rename_organization")
+_SLUG_AVAILABILITY_SPEC = endpoint_for("check_organization_slug_availability")
 
 #: Fixed safe message for a rejected client cursor (decision 6; the adapter's
 #: cursor text never echoes upward).
@@ -96,7 +105,7 @@ def build_organizations_router(
 ) -> APIRouter:
     """Build the organization routers bound to ``storage`` and ``verifier``.
 
-    ``profile_source`` (Phase 11 task 4) is forwarded to both auth chains so
+    ``profile_source`` (session) is forwarded to both auth chains so
     a first-login human miss provisions from the verified user-info profile.
     """
     router = APIRouter(tags=["organizations"])
@@ -166,16 +175,40 @@ def build_organizations_router(
         body: OrganizationRenameRequest,
         access: Annotated[OrganizationAccess, Depends(rename_access)],
     ) -> OrganizationResponse:
+        organization_name = body.name.strip()
+        if not organization_name:
+            raise HTTPException(status_code=422, detail="organization name is required")
         updated = access.organization.model_copy(
             update={
-                "name": body.name.strip(),
+                "name": organization_name,
+                "slug": organization_service.organization_slug_from_name(organization_name),
                 "name_status": OrganizationNameStatus.CONFIRMED,
                 "updated_at": utc_now(),
             }
         )
-        if not updated.name:
-            raise HTTPException(status_code=422, detail="organization name is required")
-        return _to_response(storage.update_organization(updated))
+        try:
+            saved = storage.update_organization(updated)
+        except DuplicateEntityError as exc:
+            if exc.kind is DuplicateEntityKind.ORGANIZATION_SLUG:
+                raise HTTPException(status_code=409, detail="organization name is already in use") from exc
+            raise
+        return _to_response(saved)
+
+    def check_organization_slug_availability(
+        name: Annotated[str, Query(min_length=1, max_length=255)],
+        access: Annotated[OrganizationAccess, Depends(rename_access)],
+    ) -> OrganizationSlugAvailabilityResponse:
+        try:
+            slug = organization_service.organization_slug_from_name(name.strip())
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return OrganizationSlugAvailabilityResponse(
+            slug=slug,
+            available=storage.is_organization_slug_available(
+                slug,
+                excluding_organization_id=access.organization.id,
+            ),
+        )
 
     router.add_api_route(
         _LIST_SPEC.path,
@@ -204,6 +237,13 @@ def build_organizations_router(
         methods=[_PATCH_SPEC.method],
         status_code=_PATCH_SPEC.success_status,
         response_model=_PATCH_SPEC.response_model,
+    )
+    router.add_api_route(
+        _SLUG_AVAILABILITY_SPEC.path,
+        check_organization_slug_availability,
+        methods=[_SLUG_AVAILABILITY_SPEC.method],
+        status_code=_SLUG_AVAILABILITY_SPEC.success_status,
+        response_model=_SLUG_AVAILABILITY_SPEC.response_model,
     )
     return router
 

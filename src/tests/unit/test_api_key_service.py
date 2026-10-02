@@ -1,14 +1,14 @@
-"""Unit tests for the Phase 05 task-2 API-key service against stub storage.
+"""Unit tests for the API-key implementation API-key service against stub storage.
 
 These tests prove the *decision rules* of ``app.services.api_key_service``
 without a database, using a recording :class:`~app.storage.contract.Storage`
-stub (breakdown decision 12: zero-write proofs, exact audit shapes, injected
+stub (design notes design choice 12: zero-write proofs, exact audit shapes, injected
 clock/ids). The acceptance-critical pins from decisions 9/10 exercised here:
 
 - **create persists before it audits** — a storage failure means zero audit
   rows (both kinds of :class:`DuplicateEntityError` map to
   :class:`ApiKeyConflictError`; any other error propagates untranslated per
-  decision 11), and an audit-append failure propagates uncaught with the row
+  design choice 11), and an audit-append failure propagates uncaught with the row
   already persisted (the documented decision-1 post-commit window);
 - **the plaintext never lands in storage** — the persisted row's
   ``model_dump()`` carries no secret, no literal, and no secret tail beyond
@@ -19,12 +19,13 @@ clock/ids). The acceptance-critical pins from decisions 9/10 exercised here:
   and the message is byte-identical to the absent-key 404;
 - **duplicate revocations each append exactly one truthful audit** while the
   contract's CAS semantics (original ``revoked_at`` preserved) are honored by
-  the stub, mirroring the adapter behavior tested in Phase 02.
+  the stub, mirroring the adapter behavior tested in storage.
 
 Everything runs under injected ``now``/``ids`` so the row, the literal, and
 both audit shapes are fully deterministic; real-SQLite behavior is owned by
 later integration tasks.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -104,7 +105,7 @@ _SORTED_SCOPES = ["vispector:inspection:run", "vispector:inspection:write"]
 
 
 class StubStorage:
-    """Recording ``Storage`` stub implementing only the methods task 2 touches.
+    """Recording ``Storage`` stub implementing only the methods implementation touches.
 
     ``calls`` is a single append-only order log so tests can assert not just
     counts but *sequencing* (audit strictly after the successful write, no CAS
@@ -254,7 +255,7 @@ def test_normalize_scopes_sorts_and_deduplicates() -> None:
 
 
 def test_secret_fixture_has_the_pinned_credential_shape() -> None:
-    """Pins the fixture against decision 2's real secret shape (43 base64url
+    """Pins the fixture against design choice 2's real secret shape (43 base64url
     chars decoding to exactly 256 bits) so the adversarial ``_``/``-`` alphabet
     cannot silently drift into a shape no generator produces."""
     assert len(_SECRET) == 43
@@ -381,7 +382,7 @@ def test_create_duplicate_maps_to_conflict_with_zero_writes(kind: DuplicateEntit
 
 
 def test_create_reference_error_propagates_untranslated_with_zero_audits() -> None:
-    """Decision 11: ``ReferenceNotFoundError`` is structurally unreachable; if
+    """design choice 11: ``ReferenceNotFoundError`` is structurally unreachable; if
     it ever fires it is a bug and must surface untranslated (never 4xx, never
     audited)."""
     storage = StubStorage()
@@ -560,7 +561,7 @@ def test_unknown_key_revoke_raises_with_zero_writes() -> None:
 
 
 def test_revoke_read_failure_propagates_untranslated_with_zero_writes() -> None:
-    """Decision 11 on the revoke read path: only ``EntityNotFoundError`` maps to
+    """design choice 11 on the revoke read path: only ``EntityNotFoundError`` maps to
     the 404 domain error, so any other ``StorageError`` from ``get_api_key``
     propagates untranslated (→ frozen 500) with no CAS, no audit, and no
     mutation."""

@@ -1,6 +1,6 @@
-"""Integration proofs for ``GET /oauth/login`` (Phase 11 breakdown task 11).
+"""Integration proofs for ``GET /oauth/login`` (session design notes implementation).
 
-Drives the task-11 route through ``TestClient(create_app(routers=[...]))``
+Drives the implementation route through ``TestClient(create_app(routers=[...]))``
 with a real SQLite storage behind a recording wrapper and **tripwire**
 doubles for every callback-only dependency (verifier, token endpoint,
 profile source, session manager) — login initiation must touch exactly one
@@ -22,7 +22,8 @@ machinery. Proven here:
 4. Every login mints a fresh state and verifier; the routes stay out of the
    OpenAPI schema and the frozen ``/v1`` manifest.
 5. Constructor validation fails fast on bad approved configuration.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -76,7 +77,7 @@ class RecordingStorage:
 
 
 class _Tripwire:
-    """Callback-only dependency: any attribute access is a task-11 failure."""
+    """Callback-only dependency: any attribute access is a implementation failure."""
 
     def __getattr__(self, name: str) -> Any:
         raise AssertionError(f"login initiation must not touch {name}")

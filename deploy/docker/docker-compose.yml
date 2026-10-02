@@ -1,18 +1,16 @@
-# feednow-auth local Docker composition (Phase 10).
+# feednow-auth local Docker composition.
 #
 # Run from this directory. The `cognito` profile selects the Cognito-aware
 # local composition root; the `testing` profile selects DynamoDB Local for
-# the Phase 06 adapter-conformance recipe. The two profiles share host port
-# 8000 but are used in separate commands, so they never collide.
+# adapter-conformance tests. The app's DynamoDB Local mode is defined in
+# docker-compose.dynamodb-local.yml.
 #
 #   docker compose --profile cognito up --build          # local account app
 #
 # Non-secret configuration names are documented in .env.example; the actual
 # values live in the non-committed .env loaded via `env_file` below.
 
-# Fixed project name so the SQLite volume is always
-# `feednow-auth_feednow-data` (docs/RUNNING_WITH_COGNITO.md §6), whether
-# compose is invoked directly or through another file layering.
+# Fixed project name keeps local named volumes stable across invocations.
 name: feednow-auth
 
 services:
@@ -33,8 +31,7 @@ services:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
       target: prod
-    # Local Cognito-aware composition root: SQLite storage, JWKS
-    # verification, API-key pepper, and the /oauth/callback capture page.
+    # Local Cognito-aware composition root with selectable storage.
     command: uvicorn local_runtime:app --app-dir deploy/docker --host 0.0.0.0 --port 8000 --no-access-log
     env_file:
       - path: .env
@@ -46,10 +43,12 @@ services:
     depends_on:
       data-init:
         condition: service_completed_successfully
-    # Lets the documented DynamoDB Local recipe inject the endpoint via
-    # interpolation at `run` time without baking it into .env.
     environment:
-      FEEDNOW_DYNAMODB_LOCAL_ENDPOINT: ${FEEDNOW_DYNAMODB_LOCAL_ENDPOINT:-}
+      FEEDNOW_STORAGE_BACKEND: ${FEEDNOW_STORAGE_BACKEND:-sqlite}
+      FEEDNOW_SQLITE_PATH: ${FEEDNOW_SQLITE_PATH:-/data/feednow-auth.db}
+      FEEDNOW_DYNAMODB_REGION: ${FEEDNOW_DYNAMODB_REGION:-us-east-1}
+      FEEDNOW_TABLE_PREFIX: ${FEEDNOW_TABLE_PREFIX:-feednow-auth-local-}
+      FEEDNOW_DYNAMODB_ENDPOINT: ${FEEDNOW_DYNAMODB_ENDPOINT:-}
 
   ui:
     profiles: ["ui"]

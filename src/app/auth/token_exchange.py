@@ -1,16 +1,16 @@
-"""Authorization-code + PKCE token-exchange client (Phase 11 task 10).
+"""Authorization-code + PKCE token-exchange client (session).
 
 Exchanges a Cognito Hosted UI authorization code for an access token over
 the RFC 6749 / RFC 7636 ``POST /oauth2/token`` form flow. PKCE is always
 required. Public app clients send no secret; confidential app clients may
 provide a server-side secret, sent only with HTTP Basic authentication.
 
-Contract (breakdown task 10):
+Contract (design notes implementation):
 
 - :class:`CognitoTokenEndpoint` pins approved configuration at
   construction: absolute HTTPS token endpoint (no query/fragment, so no
   per-call URL selection or parameter smuggling) and a non-empty
-  ``client_id``. The same redirect-rejection policy as the task-2
+  ``client_id``. The same redirect-rejection policy as the implementation
   user-info client is reused (:class:`app.auth.cognito._RejectRedirectHandler`),
   because following a redirect off the token endpoint could move the
   code/verifier pair to another origin.
@@ -20,12 +20,12 @@ Contract (breakdown task 10):
   ``client_id``, ``code_verifier``), parses the JSON object response, and
   returns **only** ``access_token``. ``id_token`` and ``refresh_token`` are
   discarded without storing or echoing them — the application reads the
-  verified user-info profile instead (Phase 11 decision).
+  verified user-info profile instead (session decision).
 - Every provider-side failure — transport error, timeout, non-2xx
   (redirects included), oversized or unparseable body, and a
   missing/short/non-string ``access_token`` — raises
   :class:`~app.auth.errors.TokenProviderUnavailableError` (503-mapped by
-  the task-12 callback route) with a **fixed, safe reason** that never
+  the implementation callback route) with a **fixed, safe reason** that never
   interpolates the code, verifier, or any token material. A pre-wire
   completeness guard keeps empty caller-supplied exchange material from
   ever leaving the process, using the same fixed-reason vocabulary.
@@ -33,7 +33,8 @@ Contract (breakdown task 10):
 Like the rest of the auth boundary, this module imports no logging; the
 authorization code is a single-use bearer credential and the verifier is
 the PKCE secret, so neither may appear in exception text or logs.
-"""
+
+Current behavior and invariants: ``docs/sessions.md``."""
 
 from __future__ import annotations
 
@@ -113,7 +114,7 @@ class CognitoTokenEndpoint:
         """Redeem ``code`` (with its PKCE ``code_verifier``) for an access token.
 
         ``redirect_uri`` must be the exact value used at authorization time
-        (RFC 6749 §4.1.3 binds the code to it). Returns only the provider's
+        (RFC 6749 domain model contract.1.3 binds the code to it). Returns only the provider's
         ``access_token`` string.
 
         :raises TokenProviderUnavailableError: incomplete exchange material

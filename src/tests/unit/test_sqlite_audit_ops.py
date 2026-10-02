@@ -1,9 +1,9 @@
-"""Unit tests for the Phase 02 task-6 SQLite audit-append operation.
+"""Unit tests for the storage implementation SQLite audit-append operation.
 
-Scope per the breakdown: storage *behavior* (duplicate rejection, FK
+Scope per the design notes: storage *behavior* (duplicate rejection, FK
 enforcement end-to-end) is owned by the conformance suite; this module pins
 the adapter-internal pieces only — the sqlite3→domain translation for the
-constraints task 6 exercises (produced against the *real* schema so the
+constraints implementation exercises (produced against the *real* schema so the
 messages are the ones SQLite actually emits), the row→domain mapper
 read-back, the exact stored values (compact metadata JSON, verbatim
 ``actor_type`` strings, NULL optional targets, fixed-width timestamps), the
@@ -11,7 +11,8 @@ metadata codec round-trip through the ``AuditMetadata = dict[str,
 JsonValue]`` boundary (nested objects/arrays and non-string scalars), the
 fail-loud tripwire on corrupt stored values via ``model_validate``, and the
 rollback discipline on a rejected append.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -90,7 +91,7 @@ def make_audit_event(
     metadata: dict[str, Any] | None = None,
     created_at: datetime = _T2,
 ) -> AuditEvent:
-    """Fully formed event; the actor-id cast mirrors the §10 consistency rule
+    """Fully formed event; the actor-id cast mirrors the authorization-context contract consistency rule
     the model validator already enforces (``user`` ↔ ``usr_``,
     ``api_key`` ↔ ``key_``)."""
     return AuditEvent(

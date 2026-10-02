@@ -1,11 +1,12 @@
-"""Unit proofs for the Phase 07 CDK entrypoint scaffold.
+"""Unit proofs for the AWS CDK entrypoint scaffold.
 
-Covers the contract from the Phase 07 breakdown task 1:
+Covers the contract from the AWS design notes implementation:
 ``deploy/aws/cdk/.env`` loading precedence (shell wins, file fills gaps,
 comments/quotes handled, missing file is a no-op), the required-input
 gate, ``FEEDNOW_ENV`` validation rejection, and the names derived from
 the environment value object.
-"""
+
+Current behavior and invariants: ``docs/operations.md``."""
 
 from __future__ import annotations
 
@@ -23,8 +24,10 @@ CDK_DIR = Path(__file__).resolve().parents[3] / "deploy" / "aws" / "cdk"
 REQUIRED_VARS = (
     "FEEDNOW_ENV",
     "CDK_DEFAULT_ACCOUNT",
+    "AWS_ACCOUNT_ID",
     "AWS_REGION",
-    "COGNITO_CALLBACK_URLS",
+    "ACCOUNT_ORIGIN",
+    "ACCOUNT_BASE_URL",
 )
 
 
@@ -76,20 +79,28 @@ def test_load_cdk_env_fills_missing_and_strips_quotes(tmp_path: Path) -> None:
         "\n"
         "NOT_A_PAIR\n"
         "FEEDNOW_ENV=prod\n"
-        'CDK_DEFAULT_ACCOUNT="123456789012"\n'
+        'AWS_ACCOUNT_ID="123456789012"\n'
         "AWS_REGION='eu-north-1'\n"
     )
 
     cdk_app.load_cdk_env(env_file)
 
     assert os.getenv("FEEDNOW_ENV") == "prod"
-    assert os.getenv("CDK_DEFAULT_ACCOUNT") == "123456789012"
+    assert os.getenv("AWS_ACCOUNT_ID") == "123456789012"
     assert os.getenv("AWS_REGION") == "eu-north-1"
     assert os.getenv("NOT_A_PAIR") is None
 
 
-def test_load_cdk_env_missing_file_is_noop(tmp_path: Path) -> None:
-    cdk_app.load_cdk_env(tmp_path / "absent.env")  # must not raise
+def test_load_cdk_env_missing_file_fails_closed(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit, match="Missing environment configuration"):
+        cdk_app.load_cdk_env(tmp_path / "absent.env")
+
+
+def test_load_cdk_env_rejects_aws_credentials(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env.prod"
+    env_file.write_text("FEEDNOW_ENV=prod\nAWS_PROFILE=default\n")
+    with pytest.raises(SystemExit, match="Unsupported or sensitive setting AWS_PROFILE"):
+        cdk_app.load_cdk_env(env_file)
 
 
 def test_require_inputs_lists_every_missing_name(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -101,6 +112,7 @@ def test_require_inputs_lists_every_missing_name(monkeypatch: pytest.MonkeyPatch
     message = str(excinfo.value)
     assert "CDK_DEFAULT_ACCOUNT" in message
     assert "AWS_REGION" in message
+    assert "ACCOUNT_ORIGIN" in message
     assert "FEEDNOW_ENV" not in message
 
 
@@ -108,14 +120,40 @@ def test_require_inputs_returns_all_when_present(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("FEEDNOW_ENV", "dev")
     monkeypatch.setenv("CDK_DEFAULT_ACCOUNT", "123456789012")
     monkeypatch.setenv("AWS_REGION", "eu-north-1")
-    monkeypatch.setenv("COGNITO_CALLBACK_URLS", "https://app.example.invalid/oauth/callback")
+    monkeypatch.setenv("ACCOUNT_ORIGIN", "https://account.example.invalid")
+    monkeypatch.setenv("FEEDNOW_COGNITO_USER_POOL_ID", "eu-north-1_existing")
+    monkeypatch.setenv("FEEDNOW_COGNITO_CLIENT_ID", "existingclient")
 
     assert cdk_app.require_inputs() == {
         "FEEDNOW_ENV": "dev",
         "CDK_DEFAULT_ACCOUNT": "123456789012",
         "AWS_REGION": "eu-north-1",
-        "COGNITO_CALLBACK_URLS": "https://app.example.invalid/oauth/callback",
+        "ACCOUNT_ORIGIN": "https://account.example.invalid",
     }
+
+
+def test_require_inputs_maps_expected_account_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FEEDNOW_ENV", "prod")
+    monkeypatch.setenv("AWS_ACCOUNT_ID", "123456789012")
+    monkeypatch.setenv("AWS_REGION", "eu-north-1")
+    monkeypatch.setenv("ACCOUNT_ORIGIN", "https://account.example.invalid")
+    monkeypatch.setenv("FEEDNOW_COGNITO_USER_POOL_ID", "eu-north-1_existing")
+    monkeypatch.setenv("FEEDNOW_COGNITO_CLIENT_ID", "existingclient")
+    assert cdk_app.require_inputs()["CDK_DEFAULT_ACCOUNT"] == "123456789012"
+
+
+def test_require_inputs_requires_existing_prod_cognito_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FEEDNOW_ENV", "prod")
+    monkeypatch.setenv("CDK_DEFAULT_ACCOUNT", "123456789012")
+    monkeypatch.setenv("AWS_REGION", "eu-north-1")
+    monkeypatch.setenv("ACCOUNT_ORIGIN", "https://account.example.invalid")
+    monkeypatch.delenv("FEEDNOW_COGNITO_USER_POOL_ID", raising=False)
+    monkeypatch.delenv("FEEDNOW_COGNITO_CLIENT_ID", raising=False)
+
+    with pytest.raises(SystemExit, match="FEEDNOW_COGNITO_USER_POOL_ID, FEEDNOW_COGNITO_CLIENT_ID"):
+        cdk_app.require_inputs()
 
 
 # --- FEEDNOW_ENV validation ---------------------------------------------------
@@ -176,6 +214,9 @@ def test_stack_is_named_and_prefixed_from_env() -> None:
         env.stack_name,
         feednow_env=env,
         cognito_callback_urls=["https://app.example.invalid/oauth/callback"],
+        account_origin="https://account.example.invalid",
+        existing_user_pool_id="eu-north-1_existing",
+        existing_client_id="existingclient",
         env=cdk.Environment(account="123456789012", region="eu-north-1"),
     )
 

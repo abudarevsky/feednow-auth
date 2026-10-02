@@ -1,17 +1,18 @@
 """Stable error envelope and machine-readable error codes.
 
-Rules (Phase 01 contract):
+Rules (initial contract):
 
 - ``code`` is the stable, machine-readable half of the contract; ``message``
   is human-readable and may change without notice. Consumers must branch on
   ``code`` only.
-- Codes are additive: renaming or removing a value requires a spec revision.
-  HTTP status mapping is HTTP-handling work owned by the task-6 exception
+- Codes are additive: renaming or removing a value requires a contract revision.
+  HTTP status mapping is HTTP-handling work owned by the implementation exception
   handlers (``app/api``), deliberately not encoded here.
 - Error payloads must never echo submitted secret material (API secrets,
   passwords, tokens): :class:`FieldError` intentionally has **no** ``input``
   or ``value`` field, only a field path and a safe message.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -48,7 +49,7 @@ class Error(BaseModel):
     """Top-level error response envelope; field order is the serialized shape.
 
     The JSON shape ``{"code", "message", "field_errors", "request_id"}`` is
-    frozen for Phase 01+; consumers parse it as-is.
+    frozen for initial+; consumers parse it as-is.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)

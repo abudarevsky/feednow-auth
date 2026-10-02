@@ -1,25 +1,26 @@
 """Typed, prefix-validated FeedNow identifier value objects.
 
-Conventions (Phase 01 contract, frozen for downstream phases):
+Conventions (initial contract, frozen for downstream capability):
 
 - Application-identity IDs (``usr_``, ``org_``, ``key_``) are the only values
-  that may appear as ``actor_id``/path parameters in the API (spec §10, §14).
+  that may appear as ``actor_id``/path parameters in the API (authorization-context contract, API contract).
   They are modeled by :class:`ApplicationId` subclasses.
 - Record IDs (``extid_``, ``mem_``, ``aud_``) identify stored rows for
   ExternalIdentity, Membership, and AuditEvent. They are internal and must
-  never surface as ``actor_id`` or in §14 path parameters. They are modeled
+  never surface as ``actor_id`` or in API contract path parameters. They are modeled
   by :class:`RecordId` subclasses.
 - Provider subjects (Cognito ``sub``, Shopify IDs, ...) are plain constrained
   strings (:data:`ProviderSubject`), never ID value objects. Email, Cognito
   ``sub``, and Shopify IDs must never be coerced into application identity.
 - Concrete generation strategies (entropy source, ULID-style ``key_id`` per
-  spec §8) belong to owner phases 03/05; this module only *validates*
-  prefixes and shape so Phase 01 cannot become the de facto entropy contract.
+  credential contract) belong to owner identity and API-key; this module only *validates*
+  prefixes and shape so initial cannot become the de facto entropy contract.
 
 All ID types are immutable ``str`` subclasses: they serialize as plain JSON
 strings, hash/equal like strings, and are distinguished by their concrete
 type and prefix.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -107,7 +108,7 @@ class _PrefixedId(str):
 
 
 class ApplicationId(_PrefixedId):
-    """Base for IDs that act as FeedNow application identities (spec §10)."""
+    """Base for IDs that act as FeedNow application identities (authorization-context contract)."""
 
 
 class RecordId(_PrefixedId):
@@ -130,7 +131,7 @@ class ApiKeyId(ApplicationId):
     """Internal FeedNow API key identifier (``key_``).
 
     Distinct from the non-secret ``key_id`` credential segment inside
-    ``fn_live_<key-id>_<secret>`` (spec §8), which is owned by Phase 05.
+    ``fn_live_<key-id>_<secret>`` (credential contract), which is owned by API-key.
     """
 
     prefix: ClassVar[str] = "key"

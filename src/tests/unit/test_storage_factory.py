@@ -1,6 +1,6 @@
-"""Unit proofs for the CLI-facing storage factory (Phase 13 task 2).
+"""Unit proofs for the CLI-facing storage factory (admin).
 
-Covers the breakdown contract:
+Covers the design notes contract:
 
 - ``create_storage`` dispatches by settings type to the documented ``open_*``
   entry points, forwarding the DynamoDB connection shape, and rejects unknown
@@ -9,9 +9,10 @@ Covers the breakdown contract:
   conflicting ``os.environ`` provably does not leak in) and enforces the
   required/optional env matrix with exact-match backend validation.
 - Rejection messages are fixed and safe: they never echo a provided value.
-- The factory module's own imports touch only ``app.storage.*`` (spec 13
+- The factory module's own imports touch only ``app.storage.*`` (contract 13
   required behavior 5: no FastAPI app, no ``app.main``, no Cognito/pepper).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

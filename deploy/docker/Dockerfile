@@ -34,8 +34,8 @@ RUN uv sync --frozen --no-install-project --no-dev
 COPY src/ src/
 RUN uv sync --frozen --no-dev
 
-# Local composition root + callback page into /app/deploy/docker/.
-# The .dockerignore whitelist restricts this glob to exactly those two files.
+# Local composition modules into /app/deploy/docker/.
+# The .dockerignore whitelist restricts this glob to the required files.
 COPY deploy/docker/*.py deploy/docker/
 
 # The current ghcr.io/astral-sh/uv:python3.14-bookworm-slim digest ships no

@@ -1,16 +1,16 @@
-"""Non-production deployed smoke test for the feednow-auth runtime (Phase 07 task 7).
+"""Non-production deployed smoke test for the feednow-auth runtime (AWS).
 
-Proves, against a **deployed** stack (not local fakes), the Phase 07 §5/§6
+Proves, against a **deployed** stack (not local fakes), the AWS documented contract/identity contract
 proof path end to end: a Cognito-authenticated request resolves to an
 internal ``usr_`` identity, and first-login provisioning persisted the user
 plus its default organization membership server-side.
 
 Prerequisite
-    A deployed dev (or staging) stack from Phase 07 task 6 — the Lambda +
-    HTTP API wired to the task-3 Cognito pool and the task-2 DynamoDB tables,
+    A deployed dev (or staging) stack from AWS — the Lambda +
+    HTTP API wired to the implementation Cognito pool and the implementation DynamoDB tables,
     e.g. (from ``deploy/aws/cdk``)::
 
-        FEEDNOW_ENV=dev COGNITO_CALLBACK_URLS=... npx -y aws-cdk@2 deploy FeedNowAuth-dev
+        FEEDNOW_ENV=dev FEEDNOW_COGNITO_CALLBACK_URLS=... npx -y aws-cdk@2 deploy FeedNowAuth-dev
 
 Inputs (stack outputs / console values — names and ids only, never secret
 material; operator credentials need Cognito data-plane calls and reads on the
@@ -26,11 +26,7 @@ prefixed tables):
 
 Run (from the repository root, operator AWS credentials in the environment)::
 
-    PYTHONPATH=. python deploy/aws/smoke/smoke.py \
-        --env dev --region eu-north-1 \
-        --user-pool-id eu-north-1_XXXXXXXXX --client-id XXXXXXXXXXXXXXX \
-        --api-url https://<api-id>.execute-api.eu-north-1.amazonaws.com \
-        --table-prefix feednow-auth-dev-
+    PYTHONPATH=. python deploy/aws/smoke/smoke.py         --env dev --region eu-north-1         --user-pool-id eu-north-1_XXXXXXXXX --client-id XXXXXXXXXXXXXXX         --api-url https://<api-id>.execute-api.eu-north-1.amazonaws.com         --table-prefix feednow-auth-dev-
 
 Proof path (executed in exactly this order):
 
@@ -61,7 +57,8 @@ Safety contract
       :func:`default_dynamodb_resource`) are injectable so the whole proof
       path is unit-testable against fakes (see
       ``src/tests/unit/test_smoke_script.py``).
-"""
+
+Current behavior and invariants: ``docs/operations.md``."""
 
 from __future__ import annotations
 
@@ -180,7 +177,7 @@ def run_smoke(
     dynamodb_resource: Callable[[str], Any] | None = None,
     force: bool = False,
 ) -> SmokeResult:
-    """Execute the §5/§6 proof path and print only ids plus a pass line.
+    """Execute the documented contract/identity contract proof path and print only ids plus a pass line.
 
     The three seams are injectable for tests; ``None`` binds the real
     boto3/urllib defaults. The environment guard runs before any seam is

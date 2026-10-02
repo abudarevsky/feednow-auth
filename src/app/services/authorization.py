@@ -1,24 +1,24 @@
-"""Organization tenancy authorization rules and audit builders (Phase 04 task 2).
+"""Organization tenancy authorization rules and audit builders (organization).
 
-Pure business rules for spec §9/§14 tenancy: the documented role policy
-(breakdown decision 3), the uniform denial classification (decision 4), the
+Pure business rules for authorization contract/API contract tenancy: the documented role policy
+(design notes design choice 3), the uniform denial classification (design choice 4), the
 mutation/denial audit-event builders (decisions 4/7), and the service-layer
-domain errors whose HTTP translation the routers own (decision 6). This
+domain errors whose HTTP translation the routers own (design choice 6). This
 module imports **no FastAPI** — the credential wiring lives in
-``app.auth.organization_access`` (task 3) and the routers (tasks 4/5).
+``app.auth.organization_access`` (implementation) and the routers (tasks 4/5).
 
-Role policy (decision 3): rank is ``viewer < member < admin < owner``
+Role policy (design choice 3): rank is ``viewer < member < admin < owner``
 (:data:`ROLE_RANK`). Reads require an **active** membership at rank >=
 viewer (any role); mutations require rank >= admin (owner or admin). The
 ``owner`` role is not grantable, not removable, and not changeable through
 the membership API — enforced by these guards plus the deliberate absence of
 any update method in the storage contract.
 
-Denial classification (decision 4): :func:`classify_access` checks in fixed
+Denial classification (design choice 4): :func:`classify_access` checks in fixed
 precedence — organization status, then membership presence, then membership
 status, then role rank — so when several conditions hold at once the audit
 ``reason`` is deterministic while HTTP stays one uniform 403 (no existence
-oracle; mirrors Phase 03 decision 9). The :class:`AccessOutcome` denial
+oracle; mirrors identity design choice 9). The :class:`AccessOutcome` denial
 strings are the *only* reason vocabulary that may enter an
 ``authorization.denied`` audit.
 
@@ -30,14 +30,15 @@ create/remove — and never carries email, provider ``sub``, tokens, or
 secret material. :func:`audit_denial` propagates append failures
 (fail-closed: a denial that cannot be audited is a 500, never a silent 403).
 
-Phase 05 decision 7 generalizes the *denial* audit surface only:
-:func:`build_denial_audit`/:func:`audit_denial` accept any §10 actor
+API-key design choice 7 generalizes the *denial* audit surface only:
+:func:`build_denial_audit`/:func:`audit_denial` accept any authorization-context contract actor
 identity (``usr_`` or ``key_``) with ``actor_type`` derived via
 :func:`~app.models.authorization_context.actor_type_for`, and
 :class:`AccessOutcome` gains the three API-key denial strings
 (``human_only``, ``organization_mismatch``, ``insufficient_scope``).
 Human-actor behavior is unchanged.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 
@@ -63,12 +64,12 @@ from app.storage.contract import Storage
 
 class AccessOutcome(StrEnum):
     """Result vocabulary of :func:`classify_access` and the API-key scope
-    dependency (decision 4, extended by Phase 05 decision 7).
+    dependency (design choice 4, extended by API-key design choice 7).
 
     The seven denial strings are exactly the ``reason`` values permitted in
     ``authorization.denied`` audit metadata; ``granted`` is never audited.
     ``human_only``, ``organization_mismatch``, and ``insufficient_scope``
-    are produced by the Phase 05 API-key paths (decisions 6/7), not by
+    are produced by API-key paths (design choices 6/7), not by
     :func:`classify_access`, whose human-actor behavior is unchanged.
     """
 
@@ -122,7 +123,7 @@ def classify_access(
     membership: Membership | None,
     min_role: MembershipRole,
 ) -> AccessDecision:
-    """Classify one organization access — **pure**, fixed precedence (decision 4).
+    """Classify one organization access — **pure**, fixed precedence (design choice 4).
 
     Checks run in order: organization status, membership presence, membership
     status, role rank. ``membership=None`` means "no row for this user". The
@@ -199,7 +200,7 @@ class MembershipConflictError(Exception):
 
 
 class OwnerMembershipImmutableError(Exception):
-    """Owner memberships are not removable through the API (409, decision 3)."""
+    """Owner memberships are not removable through the API (409, design choice 3)."""
 
     def __init__(self, message: str = "owner membership cannot be removed") -> None:
         super().__init__(message)
@@ -213,7 +214,7 @@ class OwnerMembershipImmutableError(Exception):
 def require_selectable_organization_type(organization_type: OrganizationType) -> None:
     """Allow only :attr:`~app.models.enums.OrganizationType.CUSTOMER`.
 
-    ``personal`` organizations are auto-created by provisioning (spec §7) and
+    ``personal`` organizations are auto-created by provisioning (authentication contract) and
     ``internal`` organizations are operator-managed; neither is selectable
     through ``POST /v1/organizations`` (frozen request-schema rationale).
     """
@@ -222,7 +223,7 @@ def require_selectable_organization_type(organization_type: OrganizationType) ->
 
 
 def require_assignable_member_role(role: MembershipRole) -> None:
-    """Reject ``owner`` grants (decision 3: the owner role is not grantable)."""
+    """Reject ``owner`` grants (design choice 3: the owner role is not grantable)."""
     if role is MembershipRole.OWNER:
         raise OwnerRoleNotAssignableError()
 
@@ -241,7 +242,7 @@ def build_organization_created_audit(
     now: datetime,
 ) -> AuditEvent:
     """``organization.created`` — metadata exactly ``{"type": ...}``, target the
-    new ``org_`` (decision 7; written inside the ``provision_organization``
+    new ``org_`` (design choice 7; written inside the ``provision_organization``
     batch with the creator as actor)."""
     return AuditEvent(
         id=audit_id,
@@ -266,7 +267,7 @@ def build_membership_created_audit(
     now: datetime,
 ) -> AuditEvent:
     """``membership.created`` — metadata exactly ``{"role": ...}`` (the granted
-    role), target the new ``mem_`` record id (decision 7; appended **after**
+    role), target the new ``mem_`` record id (design choice 7; appended **after**
     the successful write)."""
     return AuditEvent(
         id=audit_id,
@@ -292,7 +293,7 @@ def build_membership_removed_audit(
 ) -> AuditEvent:
     """``membership.removed`` — metadata exactly ``{"role": ...}`` (the role
     **at removal**), target the removed ``mem_`` id (a plain string, no FK;
-    decision 7; appended after the delete commits)."""
+    design choice 7; appended after the delete commits)."""
     return AuditEvent(
         id=audit_id,
         organization_id=organization_id,
@@ -316,10 +317,10 @@ def build_denial_audit(
     now: datetime,
 ) -> AuditEvent:
     """``authorization.denied`` — metadata exactly ``{"reason", "operation"}``
-    (decision 4): the :class:`AccessOutcome` denial string and the manifest
+    (design choice 4): the :class:`AccessOutcome` denial string and the manifest
     ``operation_id``. No target (the model pins denial as a broad action),
     no email, no ``sub``, no token, no caller role beyond what the reason
-    implies. The actor is any §10 application identity (Phase 05 decision 7):
+    implies. The actor is any authorization-context contract application identity (API-key design choice 7):
     ``actor_type`` is derived from the concrete class of ``actor_id`` via
     :func:`~app.models.authorization_context.actor_type_for`, so a ``key_``
     actor is audited as ``api_key`` and a ``usr_`` actor as ``user`` with
@@ -350,9 +351,9 @@ def audit_denial(
     """Append one ``authorization.denied`` through ``append_audit_event``.
 
     Called **only when the organization row exists** (the audit→organization
-    FK; decision 4 documents unknown-organization denials as structurally
+    FK; design choice 4 documents unknown-organization denials as structurally
     unauditable). ``actor_id`` is the acting application identity — ``usr_``
-    or ``key_`` (Phase 05 decision 7); existing positional call sites pass
+    or ``key_`` (API-key design choice 7); existing positional call sites pass
     ``UserId`` values and are unaffected. ``now`` defaults to one clock read;
     the ``aud_`` id is minted here — the only minting in this module, and
     still outside storage. Append failures propagate (fail-closed: a denial

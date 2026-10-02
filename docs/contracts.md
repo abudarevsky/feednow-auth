@@ -1,394 +1,57 @@
 # Contracts
 
-This document describes the currently implemented contract. Future changes
-belong in the transformation plan that owns them; update this document only
-when that behavior is actually implemented and verified.
+This chapter summarizes the service's current domain, HTTP, error, and
+security boundaries. The endpoint manifest in
+`src/app/api/schemas/manifest.py` is the canonical inventory of versioned
+routes.
 
-- Application IDs are `usr_`, `org_`, and `key_`; provider subjects remain
-  constrained strings and are never coerced into application IDs.
-- Record IDs `extid_`, `mem_`, and `aud_` are internal and never appear in
-  paths or API response payloads.
-- Naive datetimes are rejected; JSON timestamps use UTC ISO-8601 with `Z`.
-- `Page[T]` uses an opaque cursor; only storage adapters create or decode it.
-- API schemas forbid unknown fields and never expose hashes or credentials,
-  except the one-time `ApiKeyCreatedResponse.key`.
-- Every `/v1` route must appear in `ENDPOINTS`; deletes are 204 with no body.
-- Product APIs must not require a synchronous auth-service call for every
-  protected request.
-- Storage is reached only through the 27-method `Storage` protocol and the
-  documented factories `open_sqlite_storage(path: str | Path) -> Storage`
-  and `open_dynamodb_storage(*, endpoint_url=None, region="us-east-1",
-  table_prefix="", dynamodb_resource=None) -> DynamoDbStorage` (both with
-  `close()`); the CLI-facing `app.storage.factory` (`storage_settings_from_env`
-  + `create_storage`, env names below) is the only configuration→adapter
-  seam outside the app entrypoint. Adapters are imported by explicit
-  submodule path only; signatures carry domain types exclusively: no row,
-  driver exception, session, or interpretable cursor may cross the boundary.
-- Storage never mints IDs or timestamps; writes take fully formed domain
-  entities and read back unchanged.
-- Every storage failure is a `StorageError` subclass. Missing entities raise
-  `EntityNotFoundError` (never `None`); uniqueness violations raise
-  `DuplicateEntityError` with a stable `kind` (`entity_id`,
-  `external_identity`, `membership`, `organization_slug`, `user_email`,
-  `api_key_id`); unknown parents raise `ReferenceNotFoundError`; bad cursors
-  raise `InvalidCursorError`; a refused last-active-administrator demotion
-  raises `LastActiveAdministratorError` (Phase 13, see the administration
-  boundary below).
-- Lists are ordered by `(created_at, id)` ascending with `id` as the
-  deterministic keyset tiebreaker; out-of-range limits are clamped, not
-  rejected.
-- Organization creation is exactly one `provision_organization` batch
-  (organization + owner membership + creation audits) — the only atomic
-  unit, because the owner invariant has no repair path. Unlike
-  `provision_user` there is no race convergence: a taken slug is a plain
-  `DuplicateEntityError(kind=organization_slug)`, taken record ids are
-  `entity_id`, and an unknown membership user is `ReferenceNotFoundError`;
-  every rejected batch is fully rolled back. Both shipped adapters replicate
-  the atomics (SQLite: one transaction; DynamoDB: one `TransactWriteItems`
-  with positional conflict classification).
+## Identity and data
 
-Authentication boundary (Phase 03):
+- Application identities use `usr_`, `org_`, and `key_` prefixes. Internal
+  record IDs such as `extid_`, `mem_`, and `aud_` do not appear in HTTP paths
+  or response payloads.
+- External provider subjects remain provider-scoped values and are never
+  substituted for FeedNow IDs.
+- Persisted and serialized timestamps are timezone-aware UTC values.
+- Request schemas reject unknown fields. API responses never expose password,
+  token, pepper, or secret-hash material; only key creation returns the full
+  API-key literal, once.
+- `Page[T]` uses opaque keyset cursors. Clients pass cursors back unchanged.
 
-- Access tokens only: `RS256` exact header match (checked before any claim
-  extraction or network fetch), issuer by exact set membership against the
-  configured allowlist (never prefix matching, never the library's `issuer=`
-  option), `client_id` set membership, `token_use == "access"`, optional
-  `email` (bounded ≤320 when present; absent/null yields `None` — Phase 11
-  removed the `sub@cognito.invalid` synthesis; the authoritative email for
-  provisioning comes from the verified profile below), 60-second leeway on
-  `exp`/`iat`/`nbf`. Rejections carry fixed safe reasons and never mutate
-  storage.
-- `JwksSource.signing_key(issuer, kid)` is **issuer-bound**: a `kid` is
-  resolved only from that issuer's key set; cross-issuer scanning is
-  impossible through the interface.
-- A Cognito `sub` becomes `(provider=cognito, provider_subject=sub,
-  provider_tenant=None)` — provider fields stop at the service seam; only
-  `usr_`/`org_` ids flow onward.
-- First-login provisioning is exactly one `provision_user` batch (user,
-  identity, personal org, owner membership, three creation audits) sharing
-  one clock read and one ID set. `User.email` comes only from a verified
-  provider profile (Phase 11): `require_provisioning_profile` demands
-  bounded non-empty `email`, `email_verified` exactly `True`, and a `sub`
-  equal to the validated token's, before any storage write; on the miss
-  path a missing `profile_provider` is the fixed 401 `"verified profile
-  required for provisioning"` and the hit path performs zero profile work
-  and never overwrites the stored email. Race convergence happens **only**
-  via the identity-tuple re-read after `DuplicateExternalIdentityError`;
-  `existing_user_id` is an adapter email-fallback value — advisory
-  cross-check, never the convergence signal. A re-read miss is a genuine
-  email collision: `ProvisioningConflictError`, no partial rows.
-- Human `AuthorizationContext`: organization = earliest active membership
-  (or the explicit `organization_id`, which requires an active membership in
-  an active organization), `roles=[role]`, `scopes=[]`,
-  `actor_type="user"`, `actor_id=usr_`.
-- Status mapping: `TokenValidationError`→401, `DisabledUserError` /
-  `NoActiveOrganizationError`→403, `ProvisioningConflictError`→409,
-  `TokenProviderUnavailableError`→503 — all through the frozen `Error`
-  envelope; 503 carries `internal_error` (no new code invented).
-- `GET /v1/me` returns the caller's `User` fields only — the internal `usr_`
-  id is the only identifier returned; no `sub`, no `client_id`, no token
-  material, no record ids (`extid_`/`mem_`/`aud_`).
+## HTTP surface
 
-Authorization boundary (Phase 04):
+The versioned manifest currently contains 19 endpoints: two current-user
+operations; organization and member operations; API-key management; and local
+application-administration operations. The generic `create_app()` factory
+mounts health plus explicitly supplied routers. AWS and local Docker
+compositions select their own router sets. OAuth, health, CSRF, and the local
+Vispector proof route are outside the versioned manifest.
 
-- Role rank is `viewer < member < admin < owner` (`ROLE_RANK`). Org-scoped
-  reads require an active membership (any role); member add/remove require
-  rank ≥ admin. Organization creation requires only authentication and the
-  creator becomes `owner` through the atomic batch. `owner` is not
-  grantable, not removable, and not changeable through the API (policy plus
-  the deliberate absence of storage update methods).
-- Unknown org, inactive org, missing membership, inactive membership, and
-  insufficient role all answer the same 403 with one fixed message
-  (existence-oracle-free). `authorization.denied` is audited whenever the
-  organization row exists with metadata exactly `{reason, operation}`;
-  unknown-org denials are structurally unaudited (FK exception); an
-  audit-append failure on a denial is a 500, never a silent 403
-  (fail-closed).
-- Mutation audits: `organization.created` `{"type"}` + `membership.created`
-  `{"role": "owner"}` inside the creation batch; `membership.created` /
-  `membership.removed` (role at removal) appended standalone **after** the
-  successful write. No `mem_` record id or email appears in any response
-  body; record ids live only in audit targets.
-- Status mapping (frozen codes only): type/owner-role guards and foreign
-  cursors → 400 `validation_error`; non-member and unknown target `usr_` →
-  404 `not_found`; slug conflict, duplicate pair, and owner immutability →
-  409 `conflict`; any other `StorageError` stays untranslated to the 500
-  handler.
-- The shared dependency factories `build_organization_member_dependency` /
-  `build_organization_admin_dependency` (keyed on the resolved context's
-  actor, so Phase 05's `api_key` branch joins at the same seam) yield a
-  frozen `OrganizationAccess(identity, organization, membership)`; shipped
-  routers carry no authz logic and register manifest entries only.
+Successful reads and updates use 200; creates use 201; deletion and lifecycle
+actions with no response body use 204. Error responses use the shared safe
+error envelope. Backend, AWS, Cognito, token, and credential contents are not
+echoed in error messages.
 
-Credential boundary (Phase 05):
+## Authentication and authorization
 
-- The literal is `fn_<live|test>_<key-id>_<secret>`: 8-char fixed environment
-  prefix, 26-char Crockford-base32 ULID key-id (charset contains no `_`),
-  43-char base64url secret (256 bits). Parsing splits at the **first** `_`
-  after the fixed prefix; every shape violation raises one fixed,
-  input-echo-free format error. `secret_hash` is
-  `HMAC-SHA256(pepper, secret)` lowercase hex; `key_prefix` is the 44-char
-  masked display value (`fn_<env>_<key-id>_<6 chars>...`) — the only place
-  any secret-derived text may appear in a read response.
-- The pepper comes only from a `PepperSource` (`StaticPepper` today;
-  **Phase 07 obligation**: Secrets Manager at the entrypoint, never an env
-  dump), enforces ≥ 32 bytes at construction, and never appears in
-  `repr`/`str`, logs, audits, or error text.
-- `verify_api_key` runs a fixed order (parse → point lookup with a
-  timing-equalizing dummy comparison on miss → secret match → environment
-  match → status → expiry; `expires_at == now` is expired) and every failure
-  raises the one uniform 401 message; any other `StorageError` propagates
-  untranslated → 500. Verification is read-only — no storage write happens
-  on any request path (`last_used_at` stays unset by design).
-- `build_current_principal` dispatches on the bearer prefix only (`fn_…` vs
-  JWT `eyJ…` — collision impossible); `Principal` carries exactly one actor.
-  API-key §10 context: `actor_type="api_key"`, `actor_id=key_`, stored
-  organization, `roles=[]` always, stored scopes — no human-role escalation.
-- Management routes are human-only **where a `pepper_source` is wired** (the
-  api-keys router today; the organizations/members routers join when the
-  entrypoint wires pepper — until then a key bearer there simply fails JWT
-  verification → 401): a key bearer gets the uniform 403 audited
-  `human_only`. The scope dependency's
-  key branch is org status → `organization_mismatch` → `insufficient_scope`
-  (exact-string scope membership; no wildcards or hierarchy); its human
-  branch ignores `required_scope` (roles govern people). `authorization.denied`
-  now accepts any `ActorId` (`usr_`/`key_`, type derived via `actor_type_for`)
-  and seven reasons; metadata stays `{reason, operation}`.
-- Creation audits `api_key.created` `{"environment", "scopes"}` (sorted-unique)
-  **after** the write and returns the full literal exactly once (the 201);
-  revocation is get → tenancy check (foreign key: the same 404 message
-  **before** any CAS call) → first-write-wins CAS (idempotent, original
-  `revoked_at` preserved) → one truthful `api_key.revoked` `{}` audit per
-  processed call. Minted-id collisions are 409 with zero audit rows (create
-  is non-idempotent; retry with fresh entropy). The `{key_id}` path parameter
-  is the `key_` application identity, never the credential segment.
+Cognito access tokens require exact `RS256`, issuer and client allowlist
+membership, and `token_use="access"`. First-login provisioning requires a
+verified user-info profile. Human organization roles and API-key scopes are
+separate authorization vocabularies. API keys never acquire human roles.
 
-Storage adapter parity (Phase 06):
+Organization access denials use a uniform 403 response to avoid exposing
+organization existence. Denials are audited when an organization row exists;
+an unknown organization cannot be an audit target. Authentication failures
+do not trigger storage writes.
 
-- The DynamoDB adapter is behavior-identical to SQLite on the shared
-  conformance suite (60 adapter-neutral cases, byte-identical `suite.py`
-  across entries — an adapter change satisfies a failing case, never the
-  suite). Uniqueness DynamoDB cannot enforce natively lives in one
-  key-only `unique_constraints` table (`user_email`, `organization_slug`,
-  `external_identity` with `None`→`""` tenant normalization, `api_key_id`,
-  `membership_id` guard → `entity_id`); record-id and membership-pair
-  conflicts are native conditional puts.
-- Every multi-item write is one `TransactWriteItems` whose items are
-  submitted in SQLite's statement order with a parallel descriptor list;
-  the first `ConditionalCheckFailed` in submission order decides the
-  `DuplicateEntityError` kind / `ReferenceNotFoundError`. Transient
-  `TransactionConflict` is retried bounded (the `busy_timeout` analogue);
-  throughput faults and exhaustion surface as the base `StorageError`
-  (retryable channel) — no new error classes.
-- `provision_user`'s email/identity-tuple conflict is spec §6's race
-  (`DuplicateExternalIdentityError`, winner resolved by one post-rollback
-  constraint `GetItem`); `provision_organization`'s taken slug is a plain
-  duplicate — the deliberate asymmetry is adapter-independent.
-- `revoke_api_key` is a conditional `UpdateItem` CAS with stored-truth
-  idempotency (original `revoked_at` preserved; absence is
-  `EntityNotFoundError`); `delete_membership` is a conditional `DeleteItem`
-  (non-idempotent) — both field-for-field SQLite-equivalent.
-- Cursors are adapter-native opaque keyset tokens (DynamoDB: base64url
-  `{"scope", "resume"}` from the last **returned** item's key set); they
-  never byte-match across adapters and nothing above the adapter parses
-  them. `list_user_organizations` reassembles its page through one
-  `BatchGetItem` read-back of the trimmed page only.
-- Driver failures translate inside the adapter to fixed, echo-free domain
-  text (no table names, driver messages, regions, or request ids escape).
+## Storage and audit invariants
 
-Session boundary (Phase 11):
+Storage operations accept fully formed domain records; adapters do not mint
+IDs or timestamps. User and organization provisioning, application-role
+transitions, and OAuth state consumption have their documented atomicity
+guarantees. API-key revocation is idempotent with the original revocation time
+preserved. Audit metadata excludes credentials and provider tokens.
 
-- `GET /oauth/login` and `GET /oauth/callback` (`src/app/api/oauth.py`)
-  are the authorization-code + PKCE session flow. Both routes are
-  `include_in_schema=False` and deliberately **outside** the frozen `/v1`
-  `ENDPOINTS` manifest (the health-route mounting precedent applies); the
-  manifest rule above is unchanged. Login initiation validates `next`
-  against an exact-origin allowlist plus same-origin relative paths
-  (credentials-in-URL, non-http(s) schemes, protocol-relative/backslash
-  smuggling, and foreign origins → 400 `validation_error`, the submitted
-  value never echoed), then stores a single-use `OAuthLoginState`
-  (600-second expiry) and 302s to the configured authorize URL with
-  `scope=openid email profile` and `code_challenge_method=S256`; the PKCE
-  verifier never leaves the server.
-- The callback's failure mapping is the contract (frozen Phase 01
-  envelope): provider `error` or missing `code`/`state` → 401;
-  unknown/expired/replayed state → 401; exchange failure → 503;
-  access-token validation failure → 401 with JWKS outage → 503 (all before
-  any profile or user storage touch); profile shape/subject failure → 401
-  with provider outage → 503; disabled user / no active org → 403;
-  provisioning conflict → 409; stored return URL no longer allow-listed →
-  400. Every message is a fixed constant or producer-pinned safe reason;
-  code, state, verifier, tokens, and email appear in no log record, error
-  envelope, or redirect target.
-- Success issues an opaque application session and sets the
-  `feednow_session` cookie: fixed `HttpOnly; SameSite=Lax; Path=/`,
-  `Max-Age` mirroring the configured TTL, `Secure` only when deployment
-  config says so. The session id is a lookup key that carries no claims
-  (`secrets.token_urlsafe(32)`); `SessionManager.verify` never raises for
-  caller-controlled input.
-- The storage contract gained four additive operations —
-  `save_oauth_login_state`, `consume_oauth_login_state` (atomic
-  get-and-delete: exactly one concurrent caller receives the record;
-  unknown/expired/replayed yields `None`, never `EntityNotFoundError`),
-  `create_app_session`, and `get_app_session` (reads at/past `expires_at`
-  behave as absent; reads are not writes). Both adapters implement them;
-  DynamoDB stores a numeric `expires_at_epoch` TTL attribute on the two
-  new tables.
-- The production `/v1/*` entrypoint keeps bearer-token authentication. The
-  local Cognito Compose runtime may inject `SessionManager` into mounted
-  browser routers so the account UI can authenticate with the HTTP-only
-  session cookie; this local composition does not revise the production
-  endpoint manifest.
-
-Administration boundary (Phase 13):
-
-- `transition_application_role(*, user_id, expected_role, new_role,
-  updated_at, audit_event) -> RoleTransition` is the only role-change
-  operation and the contract docstring **is** its semantics spec: unknown
-  user → `EntityNotFoundError`; stored role == `new_role` →
-  `RoleTransitionOutcome.NO_CHANGE` with **zero writes** — no role update,
-  no timestamp movement, and the supplied audit event is **not** persisted
-  (idempotent no-op; the caller must not re-append, so repeated
-  grant/revoke never creates duplicate audits). Because `ApplicationRole`
-  is a closed two-value vocabulary, a CAS miss on `expected_role` can only
-  mean stored == `new_role`: no third outcome exists (tripwire: adding a
-  third role requires revisiting this operation). A demotion `ADMIN → USER`
-  whose target is `ACTIVE` is refused with `LastActiveAdministratorError`
-  when no **other** `ACTIVE` admin user exists — fully rolled back (no
-  role write, no audit row); a demotion of a `DISABLED` admin skips the
-  guard (the active-admin count cannot change). On `TRANSITIONED` the role
-  update and the caller-formed audit append commit in one transaction and
-  the returned `User` is the final stored record with `new_role`/
-  `updated_at` (read-back allowed — the `revoke_api_key` precedent;
-  storage still mints nothing). When `audit_event.organization_id` is
-  present the same organizations-parent guarantee as `append_audit_event`
-  applies (missing parent → `ReferenceNotFoundError`, fully rolled back);
-  a reused `aud_` id is `DuplicateEntityError(kind=entity_id)`. Both
-  adapters are behavior-identical (SQLite: one transaction plus the
-  `users_application_role_lookup` index; DynamoDB: strong read, the
-  `by-application-role` witness `Query`, and one `TransactWriteItems`
-  carrying a deterministic-witness `ConditionCheck`, so concurrent
-  last-pair double revocations serialize with exactly one winner).
-- The administration service (`src/app/services/administration.py`) is the
-  only caller, over the `Storage` protocol alone. `resolve_unique_user`
-  maps an exact email via `list_users_by_email`: zero →
-  `AdministratorNotFoundError`, more than one →
-  `AmbiguousAdministratorEmailError` (message carries the count and the
-  `usr_` ids only, never provider material); neither path writes. The
-  audit anchor is the user's earliest **active** organization (the same
-  deterministic anchor `/v1/me` uses); none →
-  `AdministratorAuditAnchorMissingError` raised **before** any transition
-  call, so the refusal mutates nothing. Exactly one clock read and one
-  `aud_` mint per command; `LastActiveAdministratorError` propagates
-  untranslated (mapping is caller-side).
-- The two transition audits are `user.application_role.granted` /
-  `user.application_role.revoked` with `target_type="user"`, `target_id=`
-  the affected `usr_`, metadata **exactly** `{"from_role", "to_role"}`
-  (role values only — no email, no Cognito `sub`, no token, no auth code),
-  `actor_type="user"`, and `actor_id=` the **affected user** — the pinned
-  out-of-band decision, because the CLI carries no operator identity and
-  the `ActorType` vocabulary is frozen. No-op commands write no audit.
-- The operator CLI `python -m feednow_auth.admin grant|revoke --email
-  <addr>` has a pinned exit-code contract (stable operator-facing API):
-  `0` success (stdout distinguishes `granted` / `already granted` /
-  `revoked` / `already revoked`), `2` usage error (argparse) **or**
-  unusable storage configuration (the factory's fixed `ValueError`
-  messages), `3` no user exists for that email, `4` ambiguous email
-  (stderr lists the candidate `usr_` ids), `5` refused: the revoke would
-  remove the last active administrator, `1` any unexpected failure — one
-  fixed safe stderr line, never a traceback. Echoing the operator-supplied
-  email and `usr_` ids is allowed; token, credential, and adapter
-  exception text are not. Module import performs no I/O and no credential
-  lookup; the CLI never provisions users and is never invoked at
-  deployment or container startup.
-- The CLI-facing factory (`src/app/storage/factory.py`) consumes
-  `FEEDNOW_STORAGE_BACKEND` (required, exactly `sqlite` or `dynamodb`);
-  `sqlite` requires `FEEDNOW_SQLITE_PATH`; `dynamodb` requires
-  `FEEDNOW_DYNAMODB_REGION` and `FEEDNOW_TABLE_PREFIX` (present; empty
-  string means no prefix) and takes an optional `FEEDNOW_DYNAMODB_ENDPOINT`
-  (present and non-empty → DynamoDB Local, absent or empty → AWS).
-  Rejections are `ValueError` with fixed, value-free messages. The factory
-  constructs no FastAPI app, never imports `app.main`/`app.auth.cognito`,
-  and reads no Cognito or pepper configuration.
-- The global-administrator dependency
-  `build_application_admin_dependency`
-  (`src/app/auth/application_access.py`) composes `build_current_principal`
-  and grants only when the principal is human **and**
-  `application_role is ApplicationRole.ADMIN`, returning that `Principal`
-  verbatim; every other outcome — ordinary humans and **every** API-key
-  variant, including a key owned by an ADMIN user (the key branch is
-  structurally roleless) — answers the **same uniform 403** with one fixed
-  message echoing no role, key, or identity material. Denials are not
-  audited at this seam. Phase 13 mounts it on **no** production route;
-  local Docker mounts read-only admin routes in the frozen `/v1` manifest.
-  Organization-membership
-  administration keeps its separate org-local `organization_access`
-  policy: the global `ApplicationRole` and organization roles never
-  inherit into each other.
-
-Local account milestone additions:
-
-- `Organization.name_status` is `placeholder` for automatically provisioned
-  personal workspaces and `confirmed` for named organizations. The owner-only
-  `PATCH /v1/organizations/{organization_id}` trims and stores the submitted
-  name, returns `name_status=confirmed`, and preserves the original creation
-  timestamp. SQLite schema v4 adds this value and `api_keys.service_id` through
-  a forward-only migration; existing personal workspaces are backfilled as
-  placeholders.
-- `Organization.suspended_at` is null until first suspension, then preserves
-  that UTC timestamp. Suspension disables ordinary member accounts and
-  memberships and revokes the organization's keys; global application admins
-  retain access to the admin surfaces.
-- API keys store `service_id` (currently `vispector`) and masked key summaries
-  expose that identifier. The literal secret remains available once at
-  creation only.
-- The local Docker runtime mounts read-only global admin routes: summary
-  counts, paginated case-insensitive organization search, organization details,
-  and paginated actual memberships. Each route uses the backend application
-  role gate; API-key principals receive the same fixed 403 as non-admin users.
-- `GET /v1/local/vispector/protected` is a local-only acceptance probe outside
-  the public manifest. It requires an active Vispector service key through
-  normal API-key verification and returns a credential-free authenticated
-  result. It is mounted only by Docker local runtime.
-
-Canonical modules:
-
-- Domain: `src/app/models/`
-- API schemas and manifest: `src/app/api/schemas/`
-- App factory: `src/app/main.py`
-- Storage contract (protocol, errors, `ProvisionedUser`,
-  `ProvisionedOrganization`, `RoleTransition`): `src/app/storage/contract.py`
-- SQLite adapter and factory: `src/app/storage/sqlite.py`
-- DynamoDB adapter, `SCHEMA`, and factory: `src/app/storage/dynamodb.py`
-  (imported only by explicit submodule path)
-- CLI-facing storage factory (env-derived settings):
-  `src/app/storage/factory.py`
-- Adapter-neutral storage conformance suite and its two entries:
-  `src/tests/storage_contract/` (DynamoDB Local harness:
-  `src/tests/support/dynamodb_local.py`)
-- Token contract and verifier: `src/app/auth/cognito.py` (+ `errors.py`,
-  `jwks.py`, `dependencies.py`)
-- Verified-profile seam (Phase 11): `CognitoProfile`,
-  `require_provisioning_profile`, `ProfileSource`, and
-  `CognitoUserInfoClient` in `src/app/auth/cognito.py`; token exchange in
-  `src/app/auth/token_exchange.py`; sessions and cookie policy in
-  `src/app/auth/session.py` over `src/app/models/session.py`
-- Credential primitives, pepper seam, and API-key verification:
-  `src/app/auth/credentials.py`, `src/app/auth/pepper.py`,
-  `src/app/auth/api_key_auth.py`, `src/app/auth/principal.py`
-- Resolution/provisioning rules and ID minting:
-  `src/app/services/identity.py`, `src/app/services/idgen.py`
-- Administration rules (email resolution, audit formation, transition
-  mapping): `src/app/services/administration.py`
-- Authorization rules and audit builders: `src/app/services/authorization.py`
-- Shared organization-access dependency: `src/app/auth/organization_access.py`
-- Global-administrator dependency (unmounted this phase):
-  `src/app/auth/application_access.py`
-- Tenancy services and routers: `src/app/services/{organization,member}.py`,
-  `src/app/api/{organizations,members}.py`
-- API-key service rules and router: `src/app/services/api_key_service.py`,
-  `src/app/api/keys.py`
-- First mounted router: `src/app/api/me.py`
-- Session boundary router (outside the `/v1` manifest): `src/app/api/oauth.py`
-- Administrator CLI (the only bootstrap interface; `python -m
-  feednow_auth.admin`): `src/feednow_auth/admin.py`
+See [storage.md](storage.md), [authentication.md](authentication.md),
+[authorization.md](authorization.md), and [credentials.md](credentials.md) for
+the detailed behavior and limits.

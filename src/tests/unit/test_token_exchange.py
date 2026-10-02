@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 11 token-exchange client (breakdown task 10).
+"""Unit tests for the session token-exchange client (design notes implementation).
 
 Pins the :class:`CognitoTokenEndpoint` contract:
 
@@ -15,10 +15,11 @@ Pins the :class:`CognitoTokenEndpoint` contract:
 - hygiene: exception text never carries exchange or token material.
 
 The opener is replaced with a recording fake (the client's only I/O seam),
-following the task-2 user-info client's test pattern, so no socket or TLS
+following the implementation user-info client's test pattern, so no socket or TLS
 fixture is needed; the redirect-rejection policy is pinned on the built
 opener because urllib only reaches the handler through a live 3xx.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -166,7 +167,7 @@ def test_constructed_client_exposes_fixed_configuration() -> None:
 
 
 def test_built_opener_rejects_every_redirect() -> None:
-    """The task-2 redirect policy is reused: no 3xx target is ever fetched."""
+    """The implementation redirect policy is reused: no 3xx target is ever fetched."""
     endpoint = CognitoTokenEndpoint(TOKEN_URL, CLIENT_ID)
     assert any(isinstance(handler, _RejectRedirectHandler) for handler in endpoint._opener.handlers)
 

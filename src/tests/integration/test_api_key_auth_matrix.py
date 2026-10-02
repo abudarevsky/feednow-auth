@@ -1,11 +1,10 @@
-"""Verification-matrix acceptance proofs over HTTP (Phase 05 task 7, part b).
+"""Verification-matrix acceptance proofs over HTTP (API-key, part b).
 
-The decision-4 pipeline proven in task 3's unit suite, now exercised through
+The decision-4 pipeline proven in implementation's unit suite, now exercised through
 the **real HTTP seam**: a probe route mounted with
 :func:`~app.auth.organization_access.build_organization_scope_dependency`
-(probe routers live in the test module per decision 12 — the shipped routers
-register manifest entries only, and the scope dependency is the Phase 06/07/08
-product seam this matrix certifies).
+(probe routers live in the test module per design choice 12 — the shipped routers
+register manifest entries only, and the scope dependency is the DynamoDB and AWS and securityproduct seam this matrix certifies).
 
 Every authentication failure case answers the **one uniform 401**
 (``unauthenticated`` + :data:`~app.auth.api_key_auth.API_KEY_AUTHENTICATION_MESSAGE`)
@@ -14,22 +13,23 @@ with a **byte-identical body**, and provably:
 - mutates nothing (a recording storage proxy counts every protocol write and a
   direct SQLite dump compares the full ``api_keys``/``audit_events`` contents
   before and after each request);
-- appends zero audit rows (decision 12: auth failures are not
-  ``authorization.denied`` and §16 requires no auth-failure event);
+- appends zero audit rows (design choice 12: auth failures are not
+  ``authorization.denied`` and audit contract requires no auth-failure event);
 - echoes no key-id/secret/pepper fragment.
 
 Cases: malformed-each-way (bad shape, empty segments, oversized, invalid
 Crockford chars), unknown key-id, wrong secret (single-character change),
 environment skew (stored ``live``, presented ``test``), revoked, expired
-(seeded ``expires_at`` in the past — no API path sets expiry, decision 9),
+(seeded ``expires_at`` in the past — no API path sets expiry, design choice 9),
 plus the 200 anchors (active key, and an active key with a future expiry —
 which also proves verification is **read-only**: no ``last_used_at`` write).
 The dispatch boundary stays a separate class on purpose: a bearer that never
 looks like a credential (``fn_prod_…`` / ``eyJ…``) is not sent to the key seam
-at all (zero point lookups recorded) and answers the Phase 03 JWT 401 — same
-status and code, different fixed message, which is decision 6's pinned
+at all (zero point lookups recorded) and answers the identity JWT 401 — same
+status and code, different fixed message, which is design choice 6's pinned
 boundary rather than an oracle inside the key class.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``keys.py``
 # precedent): the probe handler's ``Annotated[..., Depends(scope_dep)]``
@@ -119,7 +119,7 @@ CREDENTIAL_MATERIAL = (SECRET.encode(), PEPPER, SEG_VALID.encode(), SEG_UNKNOWN.
 
 
 class RecordingStorage:
-    """Delegates to real SQLite while counting §12 writes and §8 lookups.
+    """Delegates to real SQLite while counting storage contract writes and credential contract lookups.
 
     ``__getattr__`` forwards everything else verbatim, so the app under test
     sees the complete contract; only the mutating methods and the credential

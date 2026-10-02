@@ -1,36 +1,12 @@
-"""Unit proofs for the Phase 07 Cognito resources (task 3).
-
-The stack must declare exactly one user pool, one public app client, and one
-hosted domain per environment:
-
-* pool: email is the only sign-in attribute (``UsernameAttributes=["email"]``),
-  self-service sign-up is on, and password reset uses the ``verified_email``
-  recovery mechanism with Cognito's default email templates (no SES sender,
-  hence no custom ``EmailConfiguration``);
-* client: ``feednow-auth-<env>``, ``GenerateSecret=false`` (public PKCE
-  client), ``AllowedOAuthFlows=["code"]`` with ``openid``/``email``/``profile``
-  scopes, callback and logout URIs taken from the required
-  ``COGNITO_CALLBACK_URLS`` input, and ``ExplicitAuthFlows`` carrying
-  ``ALLOW_USER_PASSWORD_AUTH`` (task-7 smoke path) plus
-  ``ALLOW_REFRESH_TOKEN_AUTH``;
-* domain: prefix ``feednow-auth-<env>``;
-* outputs: pool id, issuer URL (``Fn::Sub``, because the pool id is an
-  unresolved token), and client id are all present and non-empty.
-
-An empty ``COGNITO_CALLBACK_URLS`` must fail at synth time with a message that
-names the input, since CDK validates OAuth redirect URIs during synthesis.
-"""
+"""Cognito must be provisioned and configured outside the FeedNow CDK stack."""
 
 from __future__ import annotations
 
-import functools
-import importlib
 import importlib.util
 import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from types import ModuleType
 from typing import Any
 
 import aws_cdk as cdk
@@ -38,213 +14,68 @@ import pytest
 from aws_cdk.assertions import Template
 
 CDK_DIR = Path(__file__).resolve().parents[3] / "deploy" / "aws" / "cdk"
-
-
-def _load_module(name: str, path: Path) -> ModuleType:
-    """Import a CDK file under a fixed name without mutating the global ``sys.path``."""
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-# Loaded under a unique name: ``test_cdk_app.py`` and ``test_cdk_dynamodb.py``
-# cache the same file and pytest may run any of the three first.
-stack_module = _load_module("feednow_cdk_cognito_stack", CDK_DIR / "feednow_auth_stack.py")
+spec = importlib.util.spec_from_file_location(
+    "feednow_cdk_cognito_stack", CDK_DIR / "feednow_auth_stack.py"
+)
+assert spec is not None and spec.loader is not None
+stack_module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = stack_module
+spec.loader.exec_module(stack_module)
 FeedNowAuthStack = stack_module.FeedNowAuthStack
 parse_cognito_callback_urls = stack_module.parse_cognito_callback_urls
-
 ENVIRONMENTS = ("dev", "staging", "prod")
 
-CALLBACK_URLS = [
-    "https://app.example.invalid/oauth/callback",
-    "https://app.example.invalid/logout",
-]
 
-
-@functools.cache
-def _stack(env_name: str, *callback_urls: str) -> FeedNowAuthStack:
-    urls = list(callback_urls) or list(CALLBACK_URLS)
+def _stack(env_name: str) -> FeedNowAuthStack:
     return FeedNowAuthStack(
         cdk.App(),
         f"FeedNowAuth-{env_name}",
         feednow_env=env_name,
-        cognito_callback_urls=urls,
+        account_origin="https://account.example.invalid",
+        existing_user_pool_id=f"eu-north-1_{env_name}",
+        existing_client_id=f"{env_name}client",
         env=cdk.Environment(account="123456789012", region="eu-north-1"),
     )
 
 
-@functools.cache
-def _template(env_name: str) -> Template:
-    return Template.from_stack(_stack(env_name))
-
-
-def _single(env_name: str, resource_type: str) -> Mapping[str, Any]:
-    """The one and only properties block of ``resource_type`` in the stack."""
-    found = _template(env_name).find_resources(resource_type)
-    assert len(found) == 1, f"expected exactly one {resource_type}, found {len(found)}"
-    return next(iter(found.values()))["Properties"]
-
-
-def _pool(env_name: str) -> Mapping[str, Any]:
-    return _single(env_name, "AWS::Cognito::UserPool")
-
-
-def _client(env_name: str) -> Mapping[str, Any]:
-    return _single(env_name, "AWS::Cognito::UserPoolClient")
-
-
-def _domain(env_name: str) -> Mapping[str, Any]:
-    return _single(env_name, "AWS::Cognito::UserPoolDomain")
-
-
-def _outputs(env_name: str) -> Mapping[str, Any]:
-    return _template(env_name).to_json().get("Outputs", {})
-
-
-# --- User pool: email-only sign-in, self sign-up, verified-email recovery ----
-
-
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pool_signs_in_with_email_only(env_name: str) -> None:
-    assert _pool(env_name)["UsernameAttributes"] == ["email"]
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pool_self_sign_up_is_enabled_and_email_is_auto_verified(env_name: str) -> None:
-    properties = _pool(env_name)
-    assert properties["AdminCreateUserConfig"] == {"AllowAdminCreateUserOnly": False}
-    assert properties["AutoVerifiedAttributes"] == ["email"]
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pool_has_writable_google_verification_claim_and_cognito_triggers(env_name: str) -> None:
-    properties = _pool(env_name)
-    assert any(
-        attribute.get("Name") == "g_verified" and attribute.get("Mutable") is True
-        for attribute in properties["Schema"]
-    )
-    assert "PreSignUp" in properties["LambdaConfig"]
-    assert "PreAuthentication" in properties["LambdaConfig"]
-    trigger = next(
-        resource["Properties"]
-        for resource in _template(env_name).find_resources("AWS::Lambda::Function").values()
-        if resource["Properties"].get("Handler") == "cognito_trigger_lambda.handler"
-    )
-    assert trigger["Handler"] == "cognito_trigger_lambda.handler"
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pool_recovers_password_by_verified_email_with_default_templates(env_name: str) -> None:
-    properties = _pool(env_name)
-    assert properties["AccountRecoverySetting"] == {
-        "RecoveryMechanisms": [{"Name": "verified_email", "Priority": 1}]
+def test_stack_never_creates_or_mutates_cognito_resources(env_name: str) -> None:
+    template = Template.from_stack(_stack(env_name)).to_json()
+    resources: Mapping[str, Any] = template.get("Resources", {})
+    cognito_types = {
+        "AWS::Cognito::UserPool",
+        "AWS::Cognito::UserPoolClient",
+        "AWS::Cognito::UserPoolDomain",
+        "AWS::Lambda::Permission",
     }
-    # Cognito default email style: no developer SES configuration is granted.
-    assert "EmailConfiguration" not in properties
+    assert not any(item["Type"] in cognito_types for item in resources.values())
+    assert not any(
+        item["Type"] == "AWS::Lambda::Function"
+        and item["Properties"].get("Handler") == "cognito_trigger_lambda.handler"
+        for item in resources.values()
+    )
+    outputs = template["Outputs"]
+    assert outputs["CognitoUserPoolId"]["Value"] == f"eu-north-1_{env_name}"
+    assert outputs["CognitoClientId"]["Value"] == f"{env_name}client"
+    assert "https://cognito-idp.${region}.amazonaws.com/${pool_id}" in json.dumps(
+        outputs["CognitoIssuerUrl"]["Value"]
+    )
 
 
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pool_is_retained_in_prod_and_destroyed_elsewhere(env_name: str) -> None:
-    expected = "Retain" if env_name == "prod" else "Delete"
-    for resource in _template(env_name).find_resources("AWS::Cognito::UserPool").values():
-        assert resource["DeletionPolicy"] == expected
-
-
-# --- App client: public PKCE authorization-code client -----------------------
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_client_is_public_and_named_per_env(env_name: str) -> None:
-    properties = _client(env_name)
-    assert properties["GenerateSecret"] is False
-    assert properties["ClientName"] == f"feednow-auth-{env_name}"
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_client_uses_authorization_code_grant_with_pkce_scopes(env_name: str) -> None:
-    properties = _client(env_name)
-    assert properties["AllowedOAuthFlowsUserPoolClient"] is True
-    assert properties["AllowedOAuthFlows"] == ["code"]
-    assert sorted(properties["AllowedOAuthScopes"]) == ["email", "openid", "profile"]
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_client_limits_profile_attributes_and_never_writes_email_verified(env_name: str) -> None:
-    properties = _client(env_name)
-    assert set(properties["ReadAttributes"]) == {"email", "email_verified", "name"}
-    assert set(properties["WriteAttributes"]) == {"email", "custom:g_verified"}
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_client_explicit_auth_flows_cover_password_and_refresh(env_name: str) -> None:
-    flows = _client(env_name)["ExplicitAuthFlows"]
-    assert "ALLOW_USER_PASSWORD_AUTH" in flows
-    assert "ALLOW_REFRESH_TOKEN_AUTH" in flows
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_client_redirect_uris_come_from_the_input(env_name: str) -> None:
-    properties = _client(env_name)
-    assert properties["CallbackURLs"] == CALLBACK_URLS
-    assert properties["LogoutURLs"] == CALLBACK_URLS
-
-
-def test_client_redirect_uris_follow_a_different_input() -> None:
-    other = ["https://other.example.invalid/cb"]
-    template = Template.from_stack(_stack("dev", *other))
-    properties = next(iter(template.find_resources("AWS::Cognito::UserPoolClient").values()))[
-        "Properties"
-    ]
-    assert properties["CallbackURLs"] == other
-    assert properties["LogoutURLs"] == other
-
-
-# --- Hosted domain ------------------------------------------------------------
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_hosted_domain_prefix_is_environment_bound(env_name: str) -> None:
-    assert _domain(env_name)["Domain"] == f"feednow-auth-{env_name}"
-
-
-def test_domain_prefixes_differ_per_env() -> None:
-    domains = {_domain(env_name)["Domain"] for env_name in ENVIRONMENTS}
-    assert domains == {"feednow-auth-dev", "feednow-auth-staging", "feednow-auth-prod"}
-
-
-# --- Outputs: pool id, issuer URL, client id ---------------------------------
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_cognito_outputs_are_present_and_non_empty(env_name: str) -> None:
-    outputs = _outputs(env_name)
-    for name in ("CognitoUserPoolId", "CognitoIssuerUrl", "CognitoClientId"):
-        assert name in outputs, f"{name} output missing"
-        assert outputs[name]["Value"], f"{name} output is empty"
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_issuer_output_is_a_substituted_cognito_id_url(env_name: str) -> None:
-    value = _outputs(env_name)["CognitoIssuerUrl"]["Value"]
-    # The pool id is an unresolved token, so the URL must be built by Fn::Sub.
-    assert "Fn::Sub" in value
-    template, variables = value["Fn::Sub"]
-    assert template == "https://cognito-idp.${region}.amazonaws.com/${pool_id}"
-    assert variables["region"] == "eu-north-1"
-    assert "Ref" in variables["pool_id"]
-
-
-# --- COGNITO_CALLBACK_URLS is required at synth time --------------------------
-
-
-@pytest.mark.parametrize("empty", [None, "", "  ", ",", ", ,", []])
-def test_stack_requires_at_least_one_callback_url(empty: Any) -> None:
-    with pytest.raises(ValueError, match="COGNITO_CALLBACK_URLS"):
+@pytest.mark.parametrize("missing", ["pool", "client", "both"])
+def test_stack_requires_user_provisioned_pool_and_client(missing: str) -> None:
+    kwargs: dict[str, str] = {}
+    if missing not in {"pool", "both"}:
+        kwargs["existing_user_pool_id"] = "eu-north-1_existing"
+    if missing not in {"client", "both"}:
+        kwargs["existing_client_id"] = "existingclient"
+    with pytest.raises(ValueError, match="user-provisioned Cognito pool and client"):
         FeedNowAuthStack(
-            cdk.App(), "FeedNowAuth-dev", feednow_env="dev", cognito_callback_urls=empty
+            cdk.App(),
+            "MissingCognitoImport",
+            feednow_env="prod",
+            account_origin="https://account.example.invalid",
+            **kwargs,
         )
 
 
@@ -256,22 +87,3 @@ def test_callback_url_input_is_normalized() -> None:
         "https://a.example.invalid/cb",
     )
     assert parse_cognito_callback_urls(None) == ()
-
-
-def test_stack_exposes_the_resolved_callback_urls() -> None:
-    stack = _stack("dev", "https://a.example.invalid/cb,https://b.example.invalid/cb")
-    assert stack.cognito_callback_urls == (
-        "https://a.example.invalid/cb",
-        "https://b.example.invalid/cb",
-    )
-
-
-# --- No secret material anywhere in the template ------------------------------
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_template_carries_no_client_secret(env_name: str) -> None:
-    assert _client(env_name)["GenerateSecret"] is False
-    rendered = json.dumps(_template(env_name).to_json())
-    assert "ClientSecret" not in rendered
-    assert '"GenerateSecret": true' not in rendered

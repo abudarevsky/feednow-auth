@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "User Authentication",
+    "output": "docs/diagrams/user-authentication.html",
+    "viewBox": [1050, 1420],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    { "id": "browser", "type": "external", "label": "Browser", "sublabel": "UI" },
+    { "id": "service", "type": "backend", "label": "FeedNow Auth", "sublabel": "OAuth + identity" },
+    { "id": "cognito", "type": "external", "label": "Amazon Cognito", "sublabel": "Managed Login" },
+    { "id": "jwks", "type": "external", "label": "Cognito JWKS", "sublabel": "issuer-bound keys" },
+    { "id": "profile", "type": "external", "label": "UserInfo", "sublabel": "verified profile" },
+    { "id": "storage", "type": "database", "label": "Storage", "sublabel": "users + sessions" }
+  ],
+  "segments": [
+    { "from": 150, "to": 500, "label": "Sign in" },
+    { "from": 520, "to": 980, "label": "Validate and resolve identity" },
+    { "from": 1000, "to": 1290, "label": "Establish app session" }
+  ],
+  "messages": [
+    { "from": "browser", "to": "service", "y": 180, "label": "GET /oauth/login", "variant": "emphasis" },
+    { "from": "service", "to": "storage", "y": 224, "label": "store single-use state + PKCE verifier", "variant": "security" },
+    { "from": "service", "to": "browser", "y": 268, "label": "302 to authorize URL with S256 challenge", "variant": "return" },
+    { "from": "browser", "to": "cognito", "y": 312, "label": "authorize + authenticate user", "variant": "emphasis" },
+    { "from": "cognito", "to": "browser", "y": 356, "label": "redirect with code + state", "variant": "return" },
+    { "from": "browser", "to": "service", "y": 400, "label": "GET /oauth/callback?code&state", "variant": "security" },
+    { "from": "service", "to": "storage", "y": 544, "label": "atomically consume state + verifier", "variant": "security" },
+    { "from": "service", "to": "cognito", "y": 588, "label": "exchange code + verifier", "variant": "security" },
+    { "from": "cognito", "to": "service", "y": 632, "label": "access token", "variant": "return", "note": "Tokens stay on the backend." },
+    { "from": "service", "to": "jwks", "y": 676, "label": "resolve signing key for exact issuer", "variant": "security" },
+    { "from": "jwks", "to": "service", "y": 720, "label": "issuer-bound signing key", "variant": "return" },
+    { "from": "service", "to": "storage", "y": 764, "label": "verify RS256 claims; resolve identity tuple", "variant": "emphasis" },
+    { "from": "service", "to": "profile", "y": 808, "label": "fetch profile on first login only", "variant": "security", "note": "Require matching sub and explicitly verified email before provisioning." },
+    { "from": "profile", "to": "service", "y": 852, "label": "verified user profile", "variant": "return" },
+    { "from": "service", "to": "storage", "y": 896, "label": "atomically provision user + identity + personal org + owner membership", "variant": "security", "note": "Only on an identity miss; existing identities resolve without profile fetch or reprovisioning." },
+    { "from": "service", "to": "storage", "y": 1040, "label": "persist opaque session with expiry", "variant": "security" },
+    { "from": "service", "to": "browser", "y": 1084, "label": "Set-Cookie: feednow_session (HttpOnly)", "variant": "return", "note": "Cognito tokens and PKCE verifier are not sent to browser storage." },
+    { "from": "browser", "to": "service", "y": 1228, "label": "protected request with session cookie", "variant": "emphasis" },
+    { "from": "service", "to": "storage", "y": 1272, "label": "verify session; reload active user", "variant": "security" },
+    { "from": "service", "to": "browser", "y": 1316, "label": "account response", "variant": "return" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Provider boundary", "items": ["Cognito handles credential entry and provider authentication", "FeedNow Auth validates tokens and owns internal identity and authorization"] },
+    { "dot": "emerald", "title": "First login", "items": ["Provision only from a verified profile whose sub matches the validated token", "User, external identity, personal organization, owner membership, and creation audits are atomic"] },
+    { "dot": "orange", "title": "Browser session", "items": ["The browser receives an opaque HttpOnly session cookie", "Session-authenticated unsafe requests also require the CSRF token"] }
+  ]
+}

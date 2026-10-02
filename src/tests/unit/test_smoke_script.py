@@ -1,7 +1,7 @@
-"""Unit proofs for the Phase 07 task-7 non-production deployed smoke script.
+"""Unit proofs for the AWS implementation non-production deployed smoke script.
 
 The script's three seams (``cognito_client``, ``http_get``,
-``dynamodb_resource``) are faked here so the whole §5/§6 proof path runs
+``dynamodb_resource``) are faked here so the whole documented contract/identity contract proof path runs
 hermetically. The proofs:
 
 1. The happy path issues the **exact call sequence** — sign_up →
@@ -21,7 +21,8 @@ hermetically. The proofs:
 
 The smoke module lives outside the ``app`` package and is loaded with
 importlib — the pattern the CDK/runtime proofs establish.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

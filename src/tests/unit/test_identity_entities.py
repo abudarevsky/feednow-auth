@@ -1,10 +1,11 @@
 """Unit tests for identity entities: User, ExternalIdentity, Organization,
-Membership (Phase 01 task 3).
+Membership (initial).
 
-Covers the task-3 verify list: round-trip serialization, unknown enum-string
+Covers the implementation verify list: round-trip serialization, unknown enum-string
 rejection, ``extra="forbid"``, ``User.id`` (``usr_``) distinct from
-``ExternalIdentity.provider_subject``, and §4 field-list equality per entity.
-"""
+``ExternalIdentity.provider_subject``, and domain model contract field-list equality per entity.
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 

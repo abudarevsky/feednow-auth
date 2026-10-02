@@ -1,4 +1,4 @@
-"""Unit proofs for the Phase 07 task-5 runtime packaging and composition root.
+"""Unit proofs for the AWS implementation runtime packaging and composition root.
 
 Covers the task's verify lines:
 
@@ -7,35 +7,35 @@ Covers the task's verify lines:
 2. Importing ``deploy/aws/runtime/handler.py`` performs **no** ``FEEDNOW_*``
    environment read and **no** AWS SDK call, and leaves the application
    uncomposed.
-3. :class:`RuntimeConfig.from_environ` reads the five documented keys,
+3. :class:`RuntimeConfig.from_environ` reads the documented runtime keys,
    normalizes the comma-separated Cognito allowlists, and fails naming only
    the missing keys (never their values). Every config-failure proof sweeps
    the whole rendered exception chain — message, repr, and any
    cause/context a cold-start traceback would print — against every
    configured value.
 4. ``build_app()`` with injected fakes mounts exactly the frozen manifest
-   routes (plus the Phase 01 ``/health``), forces the single pepper read at
+   routes (plus the initial ``/health``), forces the single pepper read at
    cold start, and never touches ``os.environ`` when a config is supplied.
-5. :class:`SecretsManagerPepper` fetches ``GetSecretValue`` exactly once,
-   parses the ``pepper`` JSON field, enforces the ≥ 32-byte floor, and never
+5. :class:`KmsEncryptedPepper` decrypts the configured ciphertext exactly once,
+   enforces the ≥ 32-byte floor, and never
    renders the value in ``repr``/``str`` or in any error message.
-6. Phase 11 task 13: the seven session keys are an all-or-nothing gate —
+6. session: the seven session keys are an all-or-nothing gate —
    fully present mounts ``/oauth/login`` + ``/oauth/callback`` and passes a
-   ``CognitoUserInfoClient`` to the four §14 routers, fully absent keeps the
-   exact pre-phase-11 surface (rollback seam), and a partial or malformed
+   ``CognitoUserInfoClient`` to the four API contract routers, fully absent keeps the
+   exact pre-capability-11 surface (rollback seam), and a partial or malformed
    set fails cold start naming only the offending keys.
 
 The deploy modules are loaded with importlib (they live outside the ``app``
-package); ``secrets_pepper`` is registered under its own name first so
-``handler``'s top-level ``from secrets_pepper import ...`` resolves through
-``sys.modules`` — the pattern the CDK proofs already establish.
-"""
+package); ``kms_encrypted_pepper`` is registered under its own name first so the
+runtime handler import resolves through ``sys.modules`` — the pattern the CDK
+proofs establish.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
-import json
 import os
 import sys
 from collections.abc import Iterator, Mapping
@@ -71,7 +71,8 @@ CONFIG_KEYS = (
     "FEEDNOW_TABLE_PREFIX",
     "FEEDNOW_COGNITO_ISSUERS",
     "FEEDNOW_COGNITO_CLIENT_IDS",
-    "FEEDNOW_PEPPER_SECRET_ID",
+    "FEEDNOW_ENV",
+    "FEEDNOW_PEPPER_CIPHERTEXT_B64",
 )
 
 ISSUER = "https://cognito-idp.eu-north-1.amazonaws.com/eu-north-1_AAAAAAAAA"
@@ -81,7 +82,8 @@ FAKE_ENV: dict[str, str] = {
     "FEEDNOW_TABLE_PREFIX": "feednow-auth-dev-",
     "FEEDNOW_COGNITO_ISSUERS": ISSUER,
     "FEEDNOW_COGNITO_CLIENT_IDS": "devclient1",
-    "FEEDNOW_PEPPER_SECRET_ID": "feednow-auth/dev/api-pepper",
+    "FEEDNOW_ENV": "dev",
+    "FEEDNOW_PEPPER_CIPHERTEXT_B64": "Y2lwaGVydGV4dA==",
 }
 
 #: A fully configured session gate: the deployed surface gains the two
@@ -102,7 +104,7 @@ SESSION_ENV: dict[str, str] = {
     "FEEDNOW_COOKIE_SECURE": "true",
 }
 
-SECRET_ID = FAKE_ENV["FEEDNOW_PEPPER_SECRET_ID"]
+CIPHERTEXT = FAKE_ENV["FEEDNOW_PEPPER_CIPHERTEXT_B64"]
 
 
 def _load_module(name: str, path: Path) -> ModuleType:
@@ -115,10 +117,12 @@ def _load_module(name: str, path: Path) -> ModuleType:
     return module
 
 
-secrets_pepper = _load_module("secrets_pepper", RUNTIME_DIR / "secrets_pepper.py")
+kms_encrypted_pepper = _load_module(
+    "kms_encrypted_pepper", RUNTIME_DIR / "kms_encrypted_pepper.py"
+)
 runtime_handler = _load_module("feednow_runtime_handler", RUNTIME_DIR / "handler.py")
 
-SecretsManagerPepper = secrets_pepper.SecretsManagerPepper
+KmsEncryptedPepper = kms_encrypted_pepper.KmsEncryptedPepper
 RuntimeConfig = runtime_handler.RuntimeConfig
 
 #: The Phase 11 task-13 session-gate keys (all-or-nothing), pinned to the
@@ -171,7 +175,7 @@ def _assert_config_failure_leaks_no_values(exc: BaseException, environ: Mapping[
     The composition-root contract: failures name the offending keys and
     nothing else. Every comma-separated entry of every supplied value —
     issuers, client ids, the Cognito authorize/token/userInfo URLs, the
-    redirect URI, return origins, the pepper secret id — must be absent from
+    redirect URI, return origins, and encrypted pepper value — must be absent from
     the message, the repr, and any chained exception the traceback prints.
     """
     rendered = _rendered_failure(exc)
@@ -255,7 +259,8 @@ def test_runtime_config_reads_every_required_key() -> None:
     assert config.table_prefix == "feednow-auth-dev-"
     assert config.cognito_issuers == (ISSUER,)
     assert config.cognito_client_ids == ("devclient1",)
-    assert config.pepper_secret_id == SECRET_ID
+    assert config.environment == "dev"
+    assert config.pepper_ciphertext_b64 == CIPHERTEXT
 
 
 def test_runtime_config_normalizes_comma_separated_allowlists() -> None:
@@ -491,12 +496,14 @@ def _spy_routers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _SpyRouterFactory
 
 def test_build_app_mounts_the_session_flow_when_the_gate_is_on() -> None:
     app = _build_with_fakes(environ={**FAKE_ENV, **SESSION_ENV})
-    expected = {
-        (spec.method, spec.path) for spec in ENDPOINTS if not spec.path.startswith("/v1/admin/")
-    } | {
+    expected = {(spec.method, spec.path) for spec in ENDPOINTS} | {
         ("GET", "/health"),
         ("GET", "/oauth/login"),
         ("GET", "/oauth/callback"),
+        ("GET", "/v1/csrf"),
+        ("GET", "/v1/services"),
+        ("POST", "/logout"),
+        ("GET", "/logout"),
     }
     assert _mounted_routes(app) == expected
 
@@ -599,31 +606,27 @@ def test_module_handler_is_a_mangum_adapter_over_the_lazy_app() -> None:
     assert runtime_handler.app.built is False
 
 
-# --- 5. Secrets Manager pepper source ----------------------------------------
+# --- KMS-encrypted Lambda pepper source --------------------------------------
 
 
-class _FakeSecretsClient:
-    """``secretsmanager`` double: counts calls, returns a canned payload."""
-
-    def __init__(self, payload: dict[str, Any] | None = None, error: Exception | None = None):
-        self.payload: dict[str, Any] = payload if payload is not None else _string_payload(PEPPER)
+class _FakeKmsClient:
+    def __init__(self, value: bytes | None = None, error: Exception | None = None):
+        self.value = value if value is not None else PEPPER
         self.error = error
         self.calls: list[dict[str, Any]] = []
 
-    def get_secret_value(self, **kwargs: Any) -> dict[str, Any]:
+    def decrypt(self, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(kwargs)
         if self.error is not None:
             raise self.error
-        return self.payload
+        return {"Plaintext": self.value}
 
 
-def _string_payload(value: bytes) -> dict[str, Any]:
-    return {"SecretString": json.dumps({"pepper": value.decode("ascii")})}
-
-
-def _source(payload: dict[str, Any] | None = None, *, client: Any | None = None) -> Any:
-    return SecretsManagerPepper(
-        SECRET_ID, client=client if client is not None else _FakeSecretsClient(payload)
+def _source(value: bytes | None = None, *, client: Any | None = None) -> Any:
+    return KmsEncryptedPepper(
+        CIPHERTEXT,
+        "dev",
+        client=client if client is not None else _FakeKmsClient(value),
     )
 
 
@@ -631,83 +634,68 @@ def test_pepper_source_satisfies_the_published_protocol() -> None:
     assert isinstance(_source(), PepperSource)
 
 
-def test_construction_performs_no_io() -> None:
-    client = _FakeSecretsClient()
-    source = SecretsManagerPepper(SECRET_ID, client=client)
+def test_construction_performs_no_io_and_redacts_repr() -> None:
+    client = _FakeKmsClient()
+    source = KmsEncryptedPepper(CIPHERTEXT, "dev", client=client)
     assert client.calls == []
-    assert repr(source) == "SecretsManagerPepper(<redacted>)"
+    assert repr(source) == "KmsEncryptedPepper(<redacted>)"
 
 
-def test_secret_id_is_read_from_the_environment() -> None:
-    source = SecretsManagerPepper(client=_FakeSecretsClient(), environ={CONFIG_KEYS[4]: SECRET_ID})
-    assert source.secret_id == SECRET_ID
+def test_ciphertext_and_environment_are_read_from_environment() -> None:
+    source = KmsEncryptedPepper(
+        client=_FakeKmsClient(), environ={CONFIG_KEYS[4]: "dev", CONFIG_KEYS[5]: CIPHERTEXT}
+    )
+    assert source.current() == PEPPER
 
 
-def test_missing_secret_id_fails_naming_the_key() -> None:
+def test_missing_ciphertext_or_environment_fails_naming_the_key() -> None:
     with pytest.raises(ValueError) as excinfo:
-        SecretsManagerPepper(client=_FakeSecretsClient(), environ={})
-    assert CONFIG_KEYS[4] in str(excinfo.value)
+        KmsEncryptedPepper(client=_FakeKmsClient(), environ={})
+    assert "FEEDNOW_PEPPER_CIPHERTEXT_B64" in str(excinfo.value)
 
 
-def test_current_parses_the_pepper_json_field() -> None:
-    assert _source(_string_payload(PEPPER)).current() == PEPPER
-
-
-def test_get_secret_value_is_issued_exactly_once() -> None:
-    client = _FakeSecretsClient(_string_payload(PEPPER))
-    source = SecretsManagerPepper(SECRET_ID, client=client)
+def test_current_decrypts_ciphertext_once_with_environment_context() -> None:
+    client = _FakeKmsClient(PEPPER)
+    source = KmsEncryptedPepper(CIPHERTEXT, "dev", client=client)
     assert source.current() == PEPPER
     assert source.current() == PEPPER
-    assert client.calls == [{"SecretId": SECRET_ID}]
+    assert client.calls == [
+        {
+            "CiphertextBlob": b"ciphertext",
+            "EncryptionContext": {"environment": "dev"},
+        }
+    ]
 
 
-def test_binary_payload_is_accepted() -> None:
-    client = _FakeSecretsClient({"SecretBinary": json.dumps({"pepper": "b" * 40}).encode()})
-    assert SecretsManagerPepper(SECRET_ID, client=client).current() == b"b" * 40
-
-
-def test_floor_is_enforced_and_the_value_is_not_leaked() -> None:
+def test_floor_is_enforced_without_leaking_the_value() -> None:
     short = MARKED_PEPPER[: MIN_PEPPER_BYTES - 1]
-    source = _source(_string_payload(short))
+    source = _source(short)
     with pytest.raises(ValueError) as excinfo:
         source.current()
     assert str(MIN_PEPPER_BYTES) in str(excinfo.value)
     _assert_no_value(str(excinfo.value), short)
 
 
-@pytest.mark.parametrize(
-    "payload",
-    [
-        {"SecretString": f"not json {MARKED_PEPPER.decode()}"},
-        {"SecretString": json.dumps({"pepper": 42})},
-        {"SecretString": json.dumps({"other": MARKED_PEPPER.decode()})},
-        {"SecretString": ""},
-        {"SecretBinary": b"\xff\xfe"},
-        {},
-    ],
-)
-def test_malformed_payloads_fail_closed_without_leaking(payload: dict[str, Any]) -> None:
-    source = _source(payload)
+@pytest.mark.parametrize("value", [""])
+def test_malformed_values_fail_closed_without_leaking(value: str) -> None:
+    source = _source(value.encode())
     with pytest.raises(ValueError) as excinfo:
         source.current()
-    assert SECRET_ID in str(excinfo.value)  # the name is configuration, safe to render
+    assert "KMS-encrypted" in str(excinfo.value)
     _assert_no_value(str(excinfo.value), MARKED_PEPPER)
-    assert excinfo.value.__cause__ is None  # no chained payload document
 
 
 def test_transport_failure_is_reclassified_without_details() -> None:
-    client = _FakeSecretsClient(error=RuntimeError("AccessDeniedException on something"))
-    source = _source(client=client)
-    with pytest.raises(ValueError) as excinfo:
-        source.current()
-    assert "not readable" in str(excinfo.value)
+    client = _FakeKmsClient(error=RuntimeError("AccessDeniedException on something"))
+    with pytest.raises(ValueError, match="could not be decrypted"):
+        _source(client=client).current()
 
 
-def test_repr_and_str_are_redacted() -> None:
-    source = _source(_string_payload(MARKED_PEPPER))
-    assert source.current() == MARKED_PEPPER  # fetch first: the cache must hide too
+def test_repr_and_str_are_redacted_after_fetch() -> None:
+    source = _source(MARKED_PEPPER)
+    assert source.current() == MARKED_PEPPER
     for rendered in (repr(source), str(source), f"{source}", f"{source!r}"):
-        assert rendered == "SecretsManagerPepper(<redacted>)"
+        assert rendered == "KmsEncryptedPepper(<redacted>)"
     assert MARKED_PEPPER not in source.__dict__.values()
     assert MARKED_PEPPER.decode() not in repr(source.__dict__)
     assert repr(source.__dict__["_static"]) == "StaticPepper(<redacted>)"

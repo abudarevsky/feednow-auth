@@ -1,4 +1,4 @@
-"""Subprocess acceptance for the Phase 13 task-5 administrator CLI on SQLite.
+"""Subprocess acceptance for the admin implementation administrator CLI on SQLite.
 
 The unit suite (``test_admin_cli.py``) proves the CLI contract against a stub
 storage; this module proves the **real** ``python -m feednow_auth.admin``
@@ -6,8 +6,8 @@ entry point end-to-end over a committed SQLite database on a temp file. Each
 run is a genuine subprocess (its own interpreter, its own ``-m`` import of
 ``feednow_auth.admin``, its own environment), so the packaging shim, the
 ``if __name__ == "__main__"`` guard, the env→settings→storage factory
-pipeline, and the task-3 service are all exercised for real — none of which a
-same-process call can prove. Acceptance mapping (breakdown task 5 "Verify"):
+pipeline, and the implementation service are all exercised for real — none of which a
+same-process call can prove. Acceptance mapping (design notes implementation "Verify"):
 
 - **real ``-m`` entry point** — every assertion runs the CLI as a subprocess
   with ``PYTHONPATH=src``; a broken shim or guard would fail on import;
@@ -16,10 +16,11 @@ same-process call can prove. Acceptance mapping (breakdown task 5 "Verify"):
   connection);
 - **double-grant single audit** — a second ``grant`` exits 0 printing
   ``already granted`` and leaves the audit table at one row (idempotent
-  no-op; no duplicate audit, spec 13 behavior 7);
+  no-op; no duplicate audit, contract 13 behavior 7);
 - **exit 5 on the last admin** — revoking the only ACTIVE administrator exits
   5 and mutates nothing (the adapter guard, surfaced through the CLI).
-"""
+
+Current behavior and invariants: ``docs/administration.md``."""
 
 from __future__ import annotations
 

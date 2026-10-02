@@ -1,10 +1,10 @@
-"""SQLite-backed acceptance proofs for the Phase 13 task-3 administration service.
+"""SQLite-backed acceptance proofs for the admin implementation administration service.
 
 The stub suite (``test_administration_service.py``) proves the decision rules;
-this module proves the same service against the **real Phase 02/13 adapter**
+this module proves the same service against the **real storage and adminadapter**
 (WAL, ``BEGIN IMMEDIATE``, FKs, the CAS transition) on tmp files, reading
 committed truth back through a *separate* connection. Acceptance mapping
-(breakdown task 3 "Verify"):
+(design notes implementation "Verify"):
 
 - **grant persists role + exactly one audit** — the ``users`` row flips to
   ``admin`` with the injected ``updated_at`` and one ``granted`` audit row
@@ -21,7 +21,8 @@ committed truth back through a *separate* connection. Acceptance mapping
 - **audit metadata** — the persisted row carries exactly the two-key
   secret-free shape ``{"from_role", "to_role"}`` with no email, sub, or
   token material anywhere in it.
-"""
+
+Current behavior and invariants: ``docs/administration.md``."""
 
 from __future__ import annotations
 

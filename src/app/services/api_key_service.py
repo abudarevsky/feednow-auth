@@ -1,26 +1,26 @@
-"""API-key service rules and audit builders (Phase 05 task 2; spec §8/§14/§16).
+"""API-key service rules and audit builders (API-key; credential contract/API contract/audit contract).
 
 Business rules behind the create/list/revoke routes, functions-with-injected-
-storage like :mod:`app.services.member` (breakdown decision 0). This module
+storage like :mod:`app.services.member` (design notes design choice 0). This module
 imports **no FastAPI**: HTTP translation (404/409/201/204, response schemas,
-the one-crossing-point literal projection) belongs to the task-6 router, and
-the access dependency enforcing admin rank is task 5's composition of the
-Phase 04 seam. What lives here is the domain contract pinned by decisions
+the one-crossing-point literal projection) belongs to the implementation router, and
+the access dependency enforcing admin rank is implementation's composition of the
+organization seam. What lives here is the domain contract pinned by decisions
 9/10:
 
-- **Creation (decision 9):** normalize request scopes to sorted-unique
-  (the Phase 02 contract defers normalization to this layer; storage then
-  round-trips exactly) → mint the ``key_`` identity, the §8 ULID key-id, and
+- **Creation (design choice 9):** normalize request scopes to sorted-unique
+  (the storage contract defers normalization to this layer; storage then
+  round-trips exactly) → mint the ``key_`` identity, the credential contract ULID key-id, and
   the 256-bit secret (all injectable via :class:`ApiKeyCreationIds`) → build
   the complete :class:`~app.models.api_key.ApiKey` (``status=active``,
-  ``expires_at=None`` — the frozen §15 request schema has no expiry field) →
+  ``expires_at=None`` — the frozen key-creation contract request schema has no expiry field) →
   ``storage.create_api_key`` → append ``api_key.created`` **after** the
-  successful write (the Phase 04 membership-audit ordering; the accepted
+  successful write (the organization membership-audit ordering; the accepted
   post-commit audit window is documented in the handoff) → return
   ``(api_key, full_literal)``. The plaintext secret exists only in the
   returned literal and the injected ids; nothing here persists or logs it,
   and :meth:`ApiKeyCreationIds.__repr__` redacts it.
-- **Revocation (decision 10):** ``get_api_key`` first (absence →
+- **Revocation (design choice 10):** ``get_api_key`` first (absence →
   :class:`ApiKeyNotFoundError`), then the tenancy check — a foreign-org key
   raises the **same** error with the **same** fixed message *before* any CAS
   call, so the revoke path is not a cross-org existence oracle — then the
@@ -30,14 +30,15 @@ Phase 04 seam. What lives here is the domain contract pinned by decisions
   concurrent revocations each audited; winner-detection is impossible under
   same-clock ties).
 - **List:** pure pass-through of the contract's org-scoped, all-statuses
-  page (decision 8's projection to summaries is router work).
+  page (design choice 8's projection to summaries is router work).
 
 Audit shapes are pinned by decisions 9/10: ``api_key.created`` metadata is
 exactly ``{"environment", "scopes"}`` (non-secret), ``api_key.revoked``
 metadata is exactly ``{}``; both target ``api_key``/the ``key_`` identity
 with the human ``usr_`` actor. Every builder is pure in injected
 ``ids``/``now`` — storage mints nothing, so tests stay deterministic.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ class ApiKeyNotFoundError(Exception):
     """No key with that ``key_`` identity exists **in this organization** (404).
 
     The single fixed message covers both the absent key and the foreign-org
-    key (decision 10): revocation must never reveal whether a key exists in
+    key (design choice 10): revocation must never reveal whether a key exists in
     another organization, so the two cases are indistinguishable at this
     boundary and the router renders one byte-identical 404 envelope.
     """
@@ -96,7 +97,7 @@ class ApiKeyNotFoundError(Exception):
 
 class ApiKeyConflictError(Exception):
     """The freshly minted credential collided with a storage uniqueness
-    constraint (409; decision 11).
+    constraint (409; design choice 11).
 
     Covers both ``kind="api_key_id"`` (ULID segment) and ``kind="entity_id"``
     (``key_`` record id) duplicates raised by ``create_api_key`` — the UNIQUE
@@ -116,7 +117,7 @@ class ApiKeyConflictError(Exception):
 
 @dataclass(frozen=True, repr=False)
 class ApiKeyCreationIds:
-    """Every entropy value one creation mints: identities plus §8 segments.
+    """Every entropy value one creation mints: identities plus credential contract segments.
 
     ``api_key_id`` is the ``key_`` application identity and ``audit_id`` the
     ``api_key.created`` record id; ``key_id``/``secret`` are the credential
@@ -142,7 +143,7 @@ class ApiKeyCreationIds:
 
 def new_api_key_creation_ids() -> ApiKeyCreationIds:
     """Mint the complete id bundle for one creation (application ids plus the
-    credential segment and 256-bit secret; decision 2's generators)."""
+    credential segment and 256-bit secret; design choice 2's generators)."""
     return ApiKeyCreationIds(
         api_key_id=new_api_key_id(),
         audit_id=new_audit_event_id(),
@@ -157,22 +158,22 @@ def new_api_key_creation_ids() -> ApiKeyCreationIds:
 
 
 def normalize_scopes(scopes: Sequence[Scope]) -> list[str]:
-    """Return the scopes **sorted and de-duplicated** (decision 9).
+    """Return the scopes **sorted and de-duplicated** (design choice 9).
 
-    The Phase 02 contract round-trips scope lists verbatim and defers
+    The storage contract round-trips scope lists verbatim and defers
     normalization to this layer; calling it once before the build means the
     persisted row and the ``api_key.created`` audit carry the identical
     canonical list. Shape validation stays with the frozen ``Scope`` type
-    (schemas are the single validator; decision 11).
+    (schemas are the single validator; design choice 11).
     """
     return sorted(set(scopes))
 
 
 def build_key_prefix(environment: ApiKeyEnvironment, key_id: str, secret: str) -> str:
-    """Assemble the display prefix pinned by decision 2.
+    """Assemble the display prefix pinned by design choice 2.
 
     ``fn_<env>_<key-id>_<first 6 secret chars>...`` — the key-id segment is
-    non-secret by §8 design and the 6-char head is standard masked
+    non-secret by credential contract design and the 6-char head is standard masked
     identification (Stripe/GitHub precedent); the full secret never appears.
     """
     head = secret[:KEY_PREFIX_SECRET_CHARS]
@@ -195,7 +196,7 @@ def build_api_key_created_audit(
     now: datetime,
 ) -> AuditEvent:
     """``api_key.created`` — metadata exactly ``{"environment", "scopes"}``
-    (decision 9): the environment string and the sorted-unique scope list,
+    (design choice 9): the environment string and the sorted-unique scope list,
     both non-secret. Target is ``api_key``/the ``key_`` application identity;
     actor is the human creator ``usr_``. The secret, hash, prefix, and
     credential segment never enter the event."""
@@ -220,11 +221,11 @@ def build_api_key_revoked_audit(
     api_key_id: ApiKeyId,
     now: datetime,
 ) -> AuditEvent:
-    """``api_key.revoked`` — metadata exactly ``{}`` (decision 10): the action
+    """``api_key.revoked`` — metadata exactly ``{}`` (design choice 10): the action
     and target are the whole record; the ``revoked_at`` truth lives on the
     key row, not in audit. Target ``api_key``/the ``key_`` id, actor the human
     ``usr_``. ``append_audit_event``'s docstring names this event as its
-    intended Phase 05 standalone user."""
+    intended API-key standalone user."""
     return AuditEvent(
         id=audit_id,
         organization_id=organization_id,
@@ -257,15 +258,15 @@ def create_api_key(
 ) -> tuple[ApiKey, str]:
     """Create one API key and return ``(stored_key, full_literal)`` exactly once.
 
-    Fixed order (decision 9): normalize scopes → mint (or accept injected)
+    Fixed order (design choice 9): normalize scopes → mint (or accept injected)
     ids/secret → build the complete :class:`ApiKey` with
-    ``secret_hash = HMAC-SHA256(pepper, secret)`` (lowercase hex, decision 2)
+    ``secret_hash = HMAC-SHA256(pepper, secret)`` (lowercase hex, design choice 2)
     → ``storage.create_api_key`` → ``api_key.created`` audit **after** the
     successful write → assemble the literal from the stored (unchanged,
     caller-echo contract) segments plus the minted secret.
 
     A storage failure means zero writes: the create error propagates (mapped
-    per decision 11) before any audit append is attempted, and an audit-append
+    per design choice 11) before any audit append is attempted, and an audit-append
     failure propagates uncaught (fail-closed; the persisted-key/lost-plaintext
     window is the documented decision-1 limitation). ``now``/``ids`` are
     injectable; production reads the clock once per creation.
@@ -319,7 +320,7 @@ def revoke_api_key(
 ) -> ApiKey:
     """Revoke one org-scoped key (idempotent CAS) and audit the processed call.
 
-    Fixed order (decision 10): ``get_api_key`` → tenancy check → CAS →
+    Fixed order (design choice 10): ``get_api_key`` → tenancy check → CAS →
     exactly one ``api_key.revoked`` audit **after** the successful transition.
     The foreign-org branch raises :class:`ApiKeyNotFoundError` *before*
     ``storage.revoke_api_key`` is ever called — the recording-stub test pins
@@ -337,7 +338,7 @@ def revoke_api_key(
 
     Raises:
         ApiKeyNotFoundError: unknown id, foreign-org id, or a race against
-            absence — one indistinguishable 404 (decision 10).
+            absence — one indistinguishable 404 (design choice 10).
     """
     timestamp = now if now is not None else utc_now()
     try:
@@ -374,7 +375,7 @@ def list_api_keys(
     No filtering, reordering, or cursor interpretation is invented here (the
     contract pins ``(created_at, id)`` order and opaque cursors; the router
     projects field-by-field to summaries preserving ``limit``/``next_cursor``
-    verbatim — Phase 04 decision-8 pattern).
+    verbatim — organization decision-8 pattern).
     """
     return storage.list_api_keys(organization_id, page)
 

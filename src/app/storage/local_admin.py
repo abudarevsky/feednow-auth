@@ -1,4 +1,4 @@
-"""SQLite-backed extension required by local organization administration."""
+"""Storage extension required by the local organization administration API."""
 
 from typing import Protocol
 
@@ -10,7 +10,7 @@ from app.storage.contract import Storage
 
 
 class LocalAdminStorage(Storage, Protocol):
-    """Base storage contract plus local-only global organization queries."""
+    """Base storage contract plus global organization administration operations."""
 
     def admin_summary(self) -> dict[str, int]:
         """Return organization and active-membership totals for local admins."""

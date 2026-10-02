@@ -4,7 +4,7 @@ This module owns both halves of the service's own signed JWTs:
 :class:`JwtTokenIssuer` mints them and :class:`JwtTokenVerifier` accepts
 them — the verifier is the single place that validates a token's
 application-role claims against the closed domain vocabularies. The
-Phase 03 verification chain (:mod:`app.auth.cognito`) stays unchanged
+identity verification chain (:mod:`app.auth.cognito`) stays unchanged
 and separate: it accepts only ``RS256`` Cognito access tokens, so a
 token minted here can never bootstrap itself through the Cognito
 verifier, and a Cognito token can never be accepted here (this verifier
@@ -23,7 +23,7 @@ Contract:
 - **Subject is always the internal FeedNow ID.** ``sub`` is ``user.id``
   (``usr_``); email, display name, and any provider ``sub`` are never claims
   (AGENTS.md: internal IDs are the application identity).
-- **Role-based claims keep the two vocabularies separate** (spec 12
+- **Role-based claims keep the two vocabularies separate** (contract 12
   invariant 1): :data:`APPLICATION_ROLE_CLAIM` carries the user's single
   global :class:`~app.models.enums.ApplicationRole`, while
   :data:`ROLES_CLAIM` carries the organization-local
@@ -33,7 +33,7 @@ Contract:
   :class:`~app.models.enums.ApplicationRole` can never be smuggled into the
   membership list despite the coincident ``"admin"`` string.
 - The issuer accepts a ``User`` only — an API key can never be a JWT subject,
-  so key principals stay roleless (spec 12 invariant 7) by construction.
+  so key principals stay roleless (contract 12 invariant 7) by construction.
 - Registered claims: ``iss``/``aud`` (constructor config), ``iat``/``exp``
   (service clock, ``exp = iat + ttl_seconds``), and ``jti``
   (``secrets.token_urlsafe(16)``, fresh per call) for replay detection.
@@ -47,7 +47,7 @@ Contract:
   :class:`~app.models.enums.ApplicationRole` value and ``roles`` must be
   a JSON list of exact :class:`~app.models.enums.MembershipRole` values;
   anything else — missing, mistyped, unknown, wrong case, or a value
-  smuggled across the vocabulary boundary (spec 12 invariant 1) —
+  smuggled across the vocabulary boundary (contract 12 invariant 1) —
   rejects the token. ``sub`` must be a valid internal ``usr_`` identity
   (AGENTS.md: internal IDs are the application identity). Verification
   touches no storage and resolves no user; projecting verified claims
@@ -57,7 +57,8 @@ Secrecy rules (AGENTS.md): a minted token is bearer credential material,
 so this module imports **no logging**, never persists a token, and every
 constructor, validation, or verification failure raises a fixed message
 that echoes no key, claim, or input fragment.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -289,7 +290,7 @@ class JwtClaims:
     :class:`~app.models.enums.ApplicationRole` and :attr:`roles` the
     organization-local :class:`~app.models.enums.MembershipRole` values,
     so no consumer can ever observe an unvalidated or cross-vocabulary
-    role (spec 12 invariant 1). ``sub`` is the internal ``usr_`` identity.
+    role (contract 12 invariant 1). ``sub`` is the internal ``usr_`` identity.
     """
 
     sub: UserId
@@ -333,7 +334,7 @@ class JwtTokenVerifier:
        :class:`~app.models.enums.MembershipRole` value. Unknown, missing,
        mistyped, or case-shifted values are rejections — the two closed
        vocabularies can never be crossed or extended through a token
-       (spec 12 invariant 1).
+       (contract 12 invariant 1).
 
     Verification is not authentication: this class touches no storage and
     resolves no user; it only decides whether the token's own claims are
@@ -573,7 +574,7 @@ class JwtTokenVerifier:
         else — absent, ``null``, non-string, a membership-only value such as
         ``"owner"``, an unknown string, or wrong case — is a rejection with a
         fixed reason: an unvalidated role can never reach a consumer, and a
-        token can never invent a third role (spec 12 invariant 1).
+        token can never invent a third role (contract 12 invariant 1).
         """
         if APPLICATION_ROLE_CLAIM not in payload or payload[APPLICATION_ROLE_CLAIM] is None:
             raise TokenValidationError(APPLICATION_ROLE_CLAIM_MISSING_MESSAGE)
@@ -591,7 +592,7 @@ class JwtTokenVerifier:
         strings (duplicates are preserved as issued; the issuer
         canonicalizes). An application-only value such as ``"user"`` inside
         this list is a rejection — the vocabularies never cross despite the
-        coincident ``"admin"`` string (spec 12 invariant 1).
+        coincident ``"admin"`` string (contract 12 invariant 1).
         """
         if ROLES_CLAIM not in payload or payload[ROLES_CLAIM] is None:
             raise TokenValidationError(ROLES_CLAIM_MISSING_MESSAGE)

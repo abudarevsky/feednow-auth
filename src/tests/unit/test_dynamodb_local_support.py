@@ -1,11 +1,12 @@
 """Unit proofs for the DynamoDB Local harness (no Docker, no network I/O).
 
-Covers the harness contract from Phase 06 decision 8: env-var gating with
+Covers the harness contract from DynamoDB design choice 8: env-var gating with
 explicit skip reasons, a connect-level endpoint probe, the nine-table
-names/key-schema spec (decision 2's layout), prefix hygiene, and the
+names/key-schema contract (design choice 2's layout), prefix hygiene, and the
 create/delete lifecycle driven against an injected fake resource so no live
 calls are made.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

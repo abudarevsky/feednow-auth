@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 03 task-4 identity service against stub storage.
+"""Unit tests for the identity implementation identity service against stub storage.
 
 These tests prove the *decision rules* of ``app.services.identity`` without a
 database, using a recording :class:`~app.storage.contract.Storage` stub. The
@@ -10,19 +10,20 @@ two acceptance-critical proofs live here:
 - **rejected/conflicting paths never mutate** — disabled users raise before
   any context read, and the identity-conflict path (a race re-read with no
   winner) raises after exactly one (failed) ``provision_user`` attempt, never
-  a second. From Phase 12 on a duplicate email is no longer a conflict on
+  a second. From application-role on a duplicate email is no longer a conflict on
   either adapter, so the identity tuple is the only conflict signal.
 
-Per breakdown decision 7, the convergence test carries a *consistent*
+Per design notes design choice 7, the convergence test carries a *consistent*
 ``existing_user_id`` while the conflict tests carry one the identity re-read
 never confirms — proving the service ignores that field for convergence and
-re-reads the identity tuple instead. Since Phase 11 task 5 every miss-path
+re-reads the identity tuple instead. Since session every miss-path
 call carries a fake ``profile_provider``: account creation reads the email
 only from the gated :class:`~app.auth.cognito.CognitoProfile`, and a miss
 without one is refused before any write. Real-SQLite behavior (row read-back,
 repeat-call stability, same-email coexistence) is owned by
 ``test_identity_service_sqlite.py``.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -156,7 +157,7 @@ def _membership(
 
 
 class StubStorage:
-    """Recording ``Storage`` stub implementing only the methods task 4 touches.
+    """Recording ``Storage`` stub implementing only the methods implementation touches.
 
     Call lists are append-only so tests can assert exact counts; identity
     lookups match the full ``(provider, provider_subject, provider_tenant)``
@@ -467,7 +468,7 @@ def test_miss_without_injected_ids_mints_prefix_valid_ids() -> None:
 
 def test_miss_lookup_uses_pinned_cognito_tuple() -> None:
     """The lookup pins ``(cognito, sub, None)`` — Shopify-shaped reads can never
-    collide with the Cognito seam (decision 4)."""
+    collide with the Cognito seam (design choice 4)."""
     storage = StubStorage()
     resolve_or_provision(
         storage, _claims(), now=_NOW, ids=_IDS, profile_provider=lambda: _profile()
@@ -563,7 +564,7 @@ def test_profile_gate_failure_raises_before_any_provision() -> None:
 
 
 def test_miss_without_profile_provider_raises_before_any_write() -> None:
-    """Task 5: the claims-only fallback is gone. A first-login miss with no
+    """implementation: the claims-only fallback is gone. A first-login miss with no
     profile provider is a 401-class refusal with zero storage mutation."""
     storage = StubStorage()
     with pytest.raises(TokenValidationError, match="verified profile required for provisioning"):
@@ -599,7 +600,7 @@ def test_verified_provisioning_profile_refuses_subject_mismatch() -> None:
 
 
 def test_race_convergence_never_depends_on_the_batch_email() -> None:
-    """§6 convergence is keyed on the identity tuple alone: the winner's
+    """identity contract convergence is keyed on the identity tuple alone: the winner's
     stored email differs from this attempt's profile email and the adapter
     resolves no winner id, yet the service still converges — and returns the
     stored user, never an email rewritten from the profile."""
@@ -663,7 +664,7 @@ def test_race_convergence_ignores_existing_user_id_when_none() -> None:
 
 
 def test_identity_conflict_without_winner_raises_conflict_and_ignores_reported_id() -> None:
-    """Phase 12's inverted collision case: a same-email user is now a
+    """application-role implementation inverted collision case: a same-email user is now a
     legitimate separate account, so the adapter's reported
     ``existing_user_id`` can only ever name the identity-tuple winner — and
     here the identity re-read finds no winner at all. The service must raise

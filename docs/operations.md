@@ -1,25 +1,59 @@
 # Operations
 
-## Setup and development
+## Development
+
+The service targets Python 3.13 or newer and uses `uv` for dependency
+management. From the repository root:
 
 ```bash
 uv sync
+uv run feednow-auth
 uv run pytest
-uv run pytest src/tests/storage_contract   # storage conformance only
 uv run ruff check .
 uv run ruff format --check .
-uv run feednow-auth
 ```
 
-The project targets Python 3.13+ and pins the development toolchain to
-3.14.5. Production serving is declared as `uvicorn[standard]`, so Uvicorn
-uses `uvloop` when the platform supports it.
+The default `app.main:app` exposes `/health`. Deployment and local Docker
+compositions explicitly supply their routers and settings.
 
-## DynamoDB Local (Phase 06 harness)
+## Local Docker and Cognito
 
-Adapter tests marked `dynamodb_local` skip with an explicit reason unless
-`FEEDNOW_DYNAMODB_LOCAL_ENDPOINT` is set and reachable, so the default
-`uv run pytest` stays green on machines without Docker. To run them:
+Copy `deploy/docker/.env.example` to the local environment file and provide
+the development Cognito issuer/client settings and a locally generated pepper
+where required. The account UI and backend can be started with:
+
+```bash
+./deploy/docker/run-dev.sh --ui
+```
+
+Use `./deploy/docker/run-dev.sh --cognito` when running the backend in Docker
+and Vite separately. The local composition uses SQLite and mounts the
+browser-facing session, account, and local-admin routes. `--reset` discards
+local data; use it only when that is intended. The Cognito callback and logout
+URLs must match the local app-client configuration. See [cognito.md](cognito.md)
+and [sessions.md](sessions.md).
+
+To run the same local Cognito app with DynamoDB Local instead of SQLite, use:
+
+```bash
+./deploy/docker/run-dev.sh --dynamodb-local
+./deploy/docker/run-dev.sh --dynamodb-local --ui
+```
+
+This starts a separate DynamoDB Local container, creates the FeedNow tables,
+and points the app at it over the Compose network. DynamoDB Local data persists
+in the `feednow-auth_dynamodb-data` named volume; `--stop` preserves it. Remove
+that volume only when you intend to erase the local DynamoDB data. The same
+local platform-administration routes are mounted for SQLite and DynamoDB
+storage; each adapter provides the organization queries and lifecycle
+operations. The DynamoDB Local service is internal to the Compose network and
+does not take the API's host port 8000.
+After stopping the stack, erase its local DynamoDB data with
+`docker volume rm feednow-auth_dynamodb-data`.
+
+## DynamoDB Local
+
+The shared adapter-conformance suite can run against DynamoDB Local:
 
 ```bash
 docker run --rm -d --name feednow-dynamodb-local -p 8000:8000 \
@@ -32,241 +66,202 @@ FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
 docker stop feednow-dynamodb-local
 ```
 
-The harness (`src/tests/support/dynamodb_local.py`) authenticates with fixed
-dummy credentials against any region and creates/deletes the seven adapter
-tables under a fresh random prefix per test, so runs are isolated without
-truncation races. moto is not used: DynamoDB Local is the real transactional
-oracle for conformance evidence.
+The test harness creates isolated tables with a random prefix and uses dummy
+credentials. Without a reachable endpoint, marked cases skip with a reason.
 
-## Verified behavior
+## AWS deployment
 
-Phases 01–05 expose `/health` and the ten mounted §14 routes over the
-storage boundary: the `Storage` contract, the SQLite adapter behind
-`open_sqlite_storage`, and the adapter-neutral conformance suite. Phase 06
-adds the production DynamoDB adapter behind `open_dynamodb_storage` (schema,
-IAM matrix, and limitations in
-[docs/phases/06-dynamodb.md](phases/06-dynamodb.md)); the same suite runs
-against DynamoDB Local through the marker-gated entry. Phase 07 adds the
-deployable AWS runtime — the Python CDK stack, the import-safe Lambda
-composition root, and the HTTP API (commands and evidence in
-[docs/phases/07-aws-infrastructure.md](phases/07-aws-infrastructure.md),
-operator summary below). Phase 11 adds the verified-profile provisioning
-gate (first login requires a verified user-info profile; the placeholder
-email is gone, so the local Cognito composition needs
-`FEEDNOW_COGNITO_USERINFO_URL` for first-login provisioning) and the
-`/oauth/login` + `/oauth/callback` session boundary, mounted in the
-deployed runtime only under the complete session configuration below
-(contract and evidence in
-[docs/phases/11-cognito-authentication-profile-and-session-boundary.md](phases/11-cognito-authentication-profile-and-session-boundary.md)).
-The production `/v1/*` entrypoint still uses bearer tokens. The local Cognito
-Compose root wires `SessionManager` into its mounted browser API routers so
-the UI session cookie authenticates local account requests. Phase 13 adds the
-out-of-band administration path — the `python -m feednow_auth.admin` CLI,
-the administration service, the atomic `transition_application_role`
-storage operation on both adapters, and the (unmounted) global-admin
-dependency — with **no** new HTTP route: the deployed route surface is
-unchanged and the frozen `/v1` manifest still holds ten routes. The
-administrator runbook (Docker exec, migration ordering, rollback, and the
-operator IAM policy) is below. The service still does not
-expose an audit read surface (Phase 08). Do not infer those capabilities
-from a passing health check or a green conformance run.
+AWS deployments target `dev`, `staging`, or `prod` through standard AWS CLI
+profiles. FeedNow settings are non-secret files at
+`deploy/aws/cdk/.env.<environment>`; copy `deploy/aws/cdk/.env.example` for
+each target and set `FEEDNOW_ENV`, `AWS_ACCOUNT_ID`, `AWS_REGION`, and
+`ACCOUNT_BASE_URL`. Set `FEEDNOW_COGNITO_DOMAIN` when the imported pool's
+existing hosted domain does not use the default `feednow-auth-<environment>`
+prefix. The file must not contain AWS credentials, profile names, Google OAuth
+secrets, or plaintext API-key pepper/client-secret values. `.env.*` is ignored
+by Git; the operator stores only KMS ciphertext for Lambda secrets.
 
-## Deployed runtime (Phase 07)
-
-Full command inventory and evidence live in
-[docs/phases/07-aws-infrastructure.md](phases/07-aws-infrastructure.md).
-Operator summary:
-
-- Deployment inputs are four non-secret names — `FEEDNOW_ENV`
-  (`dev|staging|prod`), `CDK_DEFAULT_ACCOUNT`, `AWS_REGION`,
-  `COGNITO_CALLBACK_URLS` — set in the shell or in a never-committed
-  `deploy/aws/cdk/.env` (copy `.env.example`; shell wins).
-- Synth/deploy/destroy run from `deploy/aws/cdk` against the
-  `FeedNowAuth-<env>` stack; the placeholder synth command in the phase doc
-  runs as written. The runtime reads only the five stack-injected
-  `FEEDNOW_*` keys (region, table prefix, Cognito issuer/client allowlists,
-  pepper secret *name*); the pepper value is fetched once per container
-  from Secrets Manager at cold start.
-- After deploying dev/staging, prove the live path with the smoke script
-  (from the repository root; refuses `prod` without `--force`, prints only
-  ids):
-
-  ```bash
-  PYTHONPATH=. uv run python deploy/aws/smoke/smoke.py \
-    --env dev --region <region> \
-    --user-pool-id <CognitoUserPoolId> --client-id <CognitoClientId> \
-    --api-url <ApiEndpoint> --table-prefix feednow-auth-dev-
-  ```
-
-- Rollback safety: dev/staging tables are destroyed with the stack; prod
-  tables, the user pool, and the pepper secret are `RETAIN` — deleting the
-  prod stack keeps the data, and losing the prod pepper invalidates every
-  stored API-key digest (rotation is Phase 08).
-
-## Deployed session configuration (Phase 11)
-
-The session boundary is an **all-or-nothing runtime gate** of seven
-optional Lambda keys — the CDK stack deliberately does not set them; the
-operator supplies them (console or `aws lambda update-function-configuration`):
-`FEEDNOW_COGNITO_AUTHORIZE_URL`,
-`FEEDNOW_COGNITO_TOKEN_ENDPOINT`, `FEEDNOW_COGNITO_USERINFO_URL` (all
-HTTPS Cognito endpoints), `FEEDNOW_OAUTH_REDIRECT_URL` (the exact
-deployed `/oauth/callback` URL, matching the app-client registration in
-`COGNITO_CALLBACK_URLS`), `FEEDNOW_ALLOWED_RETURN_ORIGINS`
-(comma-separated bare HTTPS origins), `FEEDNOW_SESSION_TTL_SECONDS`
-(positive integer), and `FEEDNOW_COOKIE_SECURE` (`true`/`false`).
-
-- All seven present: `build_app` mounts `/oauth/login` +
-  `/oauth/callback` and wires the user-info profile source into the four
-  §14 routers.
-- None present: the deployed **route** surface is exactly the
-  pre-phase-11 app — **removing all seven keys is the rollback
-  procedure** (the next invocation cold-starts without the session
-  routes, and stored login states and sessions go unread while the gate
-  stays off, expiring on their own). The rollback restores routes, not
-  first-login behavior: with the gate off no profile source is wired, so
-  deployed bearer first-login provisioning fails 401.
-- A partial set fails cold start with a fixed message naming only the
-  missing keys — never a silent downgrade.
-
-The deployed-client settings proof (Hosted UI PKCE flow, `openid email
-profile` scopes, callback/logout registrations, native self-service
-email, Google IdP) and the two manual dev journeys are runbook §7 of
-[RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md): deployed settings,
-not source, are the operational proof.
-
-## Administrator CLI (Phase 13)
-
-The only administrator-bootstrap interface is the operator CLI; the
-contract (semantics, exit codes, env names) is pinned in
-[docs/phases/13-application-administrator-bootstrap-and-operations.md](phases/13-application-administrator-bootstrap-and-operations.md).
-The user must already exist (registered through the Cognito journey) —
-the CLI never provisions users.
-
-Against the local Cognito composition (full
-procedure in [RUNNING_WITH_COGNITO.md](RUNNING_WITH_COGNITO.md) §10):
+Preview the backend change and then deploy it with an explicit standard AWS
+profile and FeedNow environment:
 
 ```bash
-./scripts/feednow-admin.sh grant --email admin@example.com
-./scripts/feednow-admin.sh revoke --email admin@example.com
-./scripts/feednow-admin.sh list
+deploy/aws/deploy.sh --profile work --env dev diff
+deploy/aws/deploy.sh --profile work --env dev deploy
 ```
 
-The wrapper defaults to the local Docker application. Add
-`--profile <aws-profile>` before the command to explicitly target AWS; set
-`FEEDNOW_DYNAMODB_REGION` and `FEEDNOW_TABLE_PREFIX` in the environment. The
-list prints user id, email, account status, application role, and registration
-date. Last login is not persisted, so it truthfully prints `not recorded`.
-AWS listing paginates a DynamoDB table scan and should be used infrequently.
+Both commands verify `aws sts get-caller-identity` using the selected profile
+and compare its account ID to `AWS_ACCOUNT_ID` before proceeding. The backend
+stack imports the user-provisioned Cognito pool and app client, and creates
+environment-scoped DynamoDB, KMS, Lambda, and HTTP API resources. Cognito pools,
+clients, and domains are never created or replaced by this deployment. Supply
+`FEEDNOW_COGNITO_USER_POOL_ID` and `FEEDNOW_COGNITO_CLIENT_ID` in every environment file; verify
+the existing pool's domain and callback/client configuration before deploying.
+The API-key pepper is encrypted with the environment's CDK-managed KMS key;
+only base64 ciphertext is written to the ignored `.env.<environment>` file and
+passed to the Lambda environment. Lambda decrypts it at cold start with an
+environment-specific encryption context and caches plaintext only in process
+memory. Its execution role has `kms:Decrypt` on that one key with the matching
+context condition. Neither SSM Parameter Store nor Secrets Manager stores the
+pepper. On first deploy, the stack creates the key, then the operator generates
+or migrates the pepper, encrypts it, and completes the Lambda deployment.
+Existing dev pepper material is read in memory from the legacy Secrets Manager
+value and re-encrypted without changing API-key validity; the migration does
+not write a new Secrets Manager value.
 
-The exec'd process inherits the app container's environment; ensure
-`FEEDNOW_STORAGE_BACKEND` (and the backend-specific variables, see the
-phase doc) are present in `deploy/docker/.env` — the CLI derives storage
-solely through `app.storage.factory`. Exit codes: `0` success (stdout
-distinguishes `granted` / `already granted` / `revoked` / `already
-revoked`), `1` unexpected failure, `2` usage or unusable storage
-configuration, `3` no user for that email, `4` ambiguous email, `5`
-last-active-admin refusal. `deploy/docker/admin-cli-smoke.sh` proves the
-whole sequence inside the container (seed, grant, repeat grant, last-admin
-revoke) against a per-run SQLite file on the `/data` volume. Deployment
-and container startup never run the CLI and no environment-driven or
-startup-time promotion exists.
-
-### Migration release ordering
-
-**SQLite (forward-only `2 → 3`).** The phase-13 schema adds the
-non-unique `users_application_role_lookup` index and stamps
-`PRAGMA user_version = 3`. Release order:
-
-1. Take a **file copy of the SQLite database before deploying** (cold or
-   WAL-checkpointed). This copy is the only rollback artifact.
-2. Deploy the new code; the first open migrates `2 → 3` in place
-   (data-retaining).
-3. **Rollback = restore the pre-migration file copy.** Pre-phase-13 code
-   rejects an unrecognized stamp loudly (a `user_version = 3` file is
-   neither its current version nor a known migration key), so restoring
-   the copy is mandatory — there is no downgrade migration and pre-13
-   code must never be pointed at the migrated file.
-
-**DynamoDB (additive; order matters).**
-
-1. **CDK first:** deploy the stack delta that adds the
-   `users/by-application-role` GSI (`g_role`/`pk`). GSI creation is
-   online; tables are never replaced.
-2. **Code second:** deploy the phase-13 runtime. New/updated user items
-   carry `g_role` from this point (the CAS write always rewrites it from
-   the same value as `application_role`, so the index can never lag).
-3. **One-time `g_role` backfill** (operator obligation, not a runtime
-   behavior): scan the users table once and set `g_role` =
-   `application_role` on every item that lacks it — items predating
-   Phase 12 have no `application_role` attribute and backfill to
-   `'user'`. Until an item is backfilled it is **invisible** to the
-   `by-application-role` index, so the active-admin guard can see too few
-   admins; that fails **closed** to `LastActiveAdministratorError` (a
-   demotion is refused, never wrongly allowed) and the adapter never
-   falls back to a `Scan`. Run the backfill before relying on revokes.
-4. **Rollback is code-only:** the `by-application-role` GSI and the
-   `g_role` attribute are purely additive and ignored by pre-phase-13
-   code, so **keep the index online on rollback and never drop it as
-   part of a rollback** (index removal is a separate, deliberate cleanup
-   decision) — the documented equivalent of Phase 12's pinned "GSI add
-   is online and reversible" statement.
-
-### Operator IAM policy (AWS)
-
-The CLI runs **outside** Lambda under a separately restricted operator
-role — it is deliberately **not** added to the Lambda execution role,
-and carries no pepper/Secrets Manager/Cognito access. The policy is
-scoped to exactly the CLI's DynamoDB path (email resolution + audit-anchor
-read + transition), on the environment-prefixed table ARNs (e.g.
-`feednow-auth-<env>-users`):
-
-| Resource | Actions | Why |
-| --- | --- | --- |
-| `users` (base table) | `GetItem`, `Query`, `UpdateItem`, `ConditionCheckItem` | target read, CAS update, in-transaction checks (base `Query` is required because GSI reads authorize against the base ARN too, per the stack's own comment) |
-| `users/by-email` (index) | `Query` | the service's `list_users_by_email` resolution |
-| `users/by-application-role` (index) | `Query` | the active-admin guard |
-| `memberships` (base) + `memberships/by-user` (index) | `Query` | the audit-anchor `list_user_organizations` read |
-| `organizations` | `BatchGetItem`, `ConditionCheckItem` | anchor read reassembly + the transition's in-transaction parent check |
-| `audit_events` | `PutItem` **only** | audit is append-only and no adapter operation ever reads it — no `GetItem`/`Get` grant |
-
-No `Scan`, no writes to `organizations`/`memberships`, no other table
-touched. Separately, the Lambda execution role gained exactly one
-accepted read: mirroring the `by-application-role` index into the stack
-`_SCHEMA` extends it with `Query` on that index even though no Lambda
-code path queries it (the transition is CLI-only); this is accepted
-because the grant exposes no data the role cannot already read (base-table
-`GetItem`/`Query` on the same `users` items are already granted) and
-excludes nothing writable, while an exclusion mechanism would fork the
-`_SCHEMA` mirror invariant pinned field-for-field by
-`src/tests/unit/test_cdk_dynamodb.py` (justification recorded in the
-`INDEX_MATRIX` docstring of `src/tests/unit/test_cdk_iam.py`).
-
-## Verification
+Deploy the backend and static account UI together with one profile and target:
 
 ```bash
-uv run pytest -q --tb=short                       # default env: DynamoDB Local cases skip by name
-uv run pytest src/tests/storage_contract -q       # SQLite conformance entry (86)
+deploy/aws/deploy-all.sh --profile work --env prod
+```
+
+To redeploy only the UI against an already-deployed backend, add `--ui`:
+
+```bash
+deploy/aws/deploy-all.sh --profile work --env prod --ui
+```
+
+The coordinator deploys the backend first, reads `ApiEndpoint` from stack
+outputs, verifies or securely configures the environment's Cognito Google IdP,
+and adds the environment's callback and logout URLs to its existing Cognito
+app client before running the UI checks and deploying private S3/CloudFront.
+The `--ui` mode skips backend deployment but still synchronizes the existing
+Cognito app-client redirects, authorization-code flow, and required OIDC
+scopes before publishing the UI. Custom-domain values
+(`ACCOUNT_DOMAIN_NAME`, `ACM_CERTIFICATE_ARN` in `us-east-1`, and
+`ROUTE53_HOSTED_ZONE_ID`) belong in the selected non-secret environment file.
+The Google OAuth client is created separately in Google Console; enter its
+client ID and secret only when the secure operator prompt requests them.
+
+To rotate the Google secret without printing it or writing it to configuration:
+
+```bash
+deploy/aws/feednow-auth.sh --profile work --env prod rotate-google-credentials
+```
+
+To restart Google provider configuration even when Cognito reports it is
+already configured, add `--reset` to `ensure-google`. This updates the existing
+provider and prompts for the client ID and secret again; it does not recreate
+the user pool:
+
+```bash
+deploy/aws/feednow-auth.sh --profile work --env prod ensure-google --reset
+```
+
+Production data resources use retention policies. Review the selected
+`cdk diff` and CloudFormation changes before deployment; never infer the target
+from a profile name or fall back to `prod`.
+
+The deployed browser-session routes use an all-or-nothing set of seven Lambda
+environment values: `FEEDNOW_COGNITO_AUTHORIZE_URL`,
+`FEEDNOW_COGNITO_TOKEN_ENDPOINT`, `FEEDNOW_COGNITO_USERINFO_URL`,
+`FEEDNOW_OAUTH_REDIRECT_URL`, `FEEDNOW_ALLOWED_RETURN_ORIGINS`,
+`FEEDNOW_SESSION_TTL_SECONDS`, and `FEEDNOW_COOKIE_SECURE`. The CDK stack does
+not set this optional set. A partial set fails startup; with no set, those
+routes are not mounted. Removing the set does not provide first-login profile
+data for bearer-only provisioning.
+
+After a non-production deployment, the smoke script can exercise the deployed
+API using explicit resource identifiers:
+
+```bash
+PYTHONPATH=. uv run python deploy/aws/smoke/smoke.py \
+  --env dev --region <region> \
+  --user-pool-id <CognitoUserPoolId> --client-id <CognitoClientId> \
+  --api-url <ApiEndpoint> --table-prefix feednow-auth-dev-
+```
+
+A local test, CDK synthesis, or configuration review is not evidence of a
+successful deployed login or production request.
+
+## Administrator CLI
+
+The operator CLI grants and revokes global application-admin status for an
+existing user:
+
+```bash
+python -m feednow_auth.admin grant --email <address>
+python -m feednow_auth.admin revoke --email <address>
+```
+
+`scripts/feednow-admin.sh` targets the running local Docker app and inherits its
+configured storage backend by default, so local role changes are visible to the
+API. AWS access requires an explicit standard AWS profile and FeedNow environment.
+`--env` selects the matching `.env.<environment>` file; the script verifies the
+profile identity against `AWS_ACCOUNT_ID` before any operation. The table prefix
+is derived from the selected environment using the same naming rule as the CDK
+stack:
+
+```bash
+scripts/feednow-admin.sh grant --email <address>
+scripts/feednow-admin.sh --profile <aws-profile> --env dev list
+scripts/feednow-admin.sh --profile <aws-profile> --env dev grant --email <address>
+```
+
+See `scripts/feednow-admin.sh --help` for the complete command syntax. Do not
+pass credential values on command lines or log secrets.
+
+## SQLite migrations
+
+SQLite migrations are forward-only. Before upgrading a persistent local or
+operator database, take a file-level backup and stop writers. To roll back a
+failed migration, restore that backup; there is no automatic downgrade path.
+See [storage.md](storage.md) for the current schema and migration boundary.
+
+Before a forward-only schema change, stop writers and take a file-level
+database copy. A cold or WAL-checkpointed copy is the rollback artifact. New
+code can migrate the database in place; rollback requires restoring the
+pre-migration copy because older code can reject a newer schema stamp.
+
+## DynamoDB index changes
+
+Deploy additive table/index infrastructure before code that depends on a new
+index. If existing items need an index attribute, backfill it before relying
+on index-based authorization decisions. Runtime code does not fall back to a
+base-table scan. Keep additive indexes during code rollback unless a
+separately reviewed cleanup removes them.
+
+## AWS account application
+
+The Lambda runtime composes the same account and authentication routes used by
+the local Docker runtime over DynamoDB storage. CDK supplies the Cognito
+authorize, token, and user-info endpoints, the HTTPS callback routed through
+the account CloudFront `/api/*` behavior, the account return origin, and secure
+cookie settings. The seven session inputs are therefore mandatory in a
+deployed stack; an incomplete runtime configuration fails during cold start.
+
+Application-wide administration uses the same storage contract and is
+available in the AWS runtime. Its global summary/search and organization
+cleanup operations require table-scoped DynamoDB `Scan`, `UpdateItem`, and
+`DeleteItem` permissions. These permissions are not granted to the administrator CLI role.
+Organization cleanup spans multiple DynamoDB writes; a failed cleanup leaves
+the organization suspended and may require operator follow-up. Confirm this
+behavior and recovery procedure before exposing the delete action to production
+operators.
+
+The account UI infrastructure is in the sibling `feednow-auth-ui` repository.
+It provisions a private S3 origin and CloudFront OAC, forwards `/api/*` to the
+backend HTTP API without caching, and rewrites only extensionless UI routes to
+`index.html`. See that repository's `docs/deployment.md` for stack inputs and
+upload steps.
+
+## Operator AWS access
+
+Run the administrator CLI with a separate restricted role scoped to the
+environment-prefixed DynamoDB tables and required indexes. It needs user
+resolution and application-role reads, conditional updates and transaction
+checks, membership and organization reads for the audit anchor, and append-only
+audit-event writes. It does not need `Scan`, Cognito, SSM, or pepper access. The Lambda execution role is a separate principal.
+
+## Verification commands
+
+```bash
+uv run pytest -q --tb=short
+uv run pytest src/tests/storage_contract -q
 uv run ruff check .
 uv run ruff format --check .
 git diff --check
-
-# Phase 13 focused (storage transition, factory, service, dependency, CLI, hygiene):
-uv run pytest src/tests/unit/test_storage_contract.py \
-  src/tests/unit/test_sqlite_identity_ops.py src/tests/unit/test_storage_factory.py \
-  src/tests/unit/test_administration_service.py src/tests/integration/test_administration_sqlite.py \
-  src/tests/unit/test_application_access.py src/tests/integration/test_application_admin_dependency.py \
-  src/tests/unit/test_admin_cli.py src/tests/integration/test_admin_cli_sqlite.py \
-  src/tests/integration/test_audit_hygiene.py -q
-
-# With DynamoDB Local running (see above):
-FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest -q                                # full suite, gated cases included
-FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest src/tests/storage_contract -q     # both adapter entries (86 + 85)
-FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest src/tests/integration/test_dynamodb_identity_ops.py -q  # transition parity + race
 ```
 
-Report test results, third-party warnings, environment blocks, and any
-unperformed remote or deployment checks separately.
+Report local checks, emulator-dependent checks, live Cognito journeys, and
+deployed AWS checks separately. A green local suite does not establish live
+provider or deployment behavior.

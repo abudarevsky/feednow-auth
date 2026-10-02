@@ -6,7 +6,7 @@ deliberately encodes no status; see its module docstring). Every error
 response the service produces serializes through
 :class:`app.models.errors.Error`, so consumers parse exactly one shape.
 
-Mapping rules (Phase 01 contract):
+Mapping rules (initial contract):
 
 - ``RequestValidationError`` (malformed body/query/path against a Pydantic
   schema) → 422 with ``validation_error`` and one
@@ -15,7 +15,7 @@ Mapping rules (Phase 01 contract):
   the envelope never degrades to the default ``{"detail": ...}`` shape) →
   its own status with the code from :data:`HTTP_STATUS_TO_ERROR_CODE`;
   unmapped statuses below 500 fall back to ``validation_error`` and 5xx to
-  ``internal_error`` (adding a dedicated stable code is a spec-revision,
+  ``internal_error`` (adding a dedicated stable code is a contract-revision,
   additive-only change).
 - Any other unhandled exception → 500 ``internal_error`` with a fixed
   message. Exception text is **never** echoed: it may contain credentials
@@ -28,7 +28,8 @@ include submitted *key names* (e.g. ``body.<some_key>``); raise sites must
 not use caller-controlled key names as secret carriers. The ``request_id``
 is taken from the ``X-Request-ID`` header when the caller supplies one;
 nothing here generates IDs.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

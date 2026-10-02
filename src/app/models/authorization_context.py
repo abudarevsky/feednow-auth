@@ -1,20 +1,21 @@
 """``AuthorizationContext`` — the single internal authorization
-representation every authentication mechanism resolves to (spec §10).
+representation every authentication mechanism resolves to (authorization-context contract).
 
-Phase 01 contract notes:
+initial contract notes:
 
-- ``actor_type`` values are exactly the §10 strings ``user`` and ``api_key``.
+- ``actor_type`` values are exactly the authorization-context contract strings ``user`` and ``api_key``.
   They are a :data:`~typing.Literal`, not a member of the pinned enum set
-  (the Phase 01 Planner decisions enumerate every *stored* enum; ``actor_type``
+  (the initial Planner decisions enumerate every *stored* enum; ``actor_type``
   is a transient context discriminator that never lands in a status column).
-- ``actor_id`` is the task-2 :data:`~app.models.ids.ActorId` union: a ``usr_``
+- ``actor_id`` is the implementation :data:`~app.models.ids.ActorId` union: a ``usr_``
   or ``key_`` application identity — never a record ID (``extid_``/``mem_``/
   ``aud_``) and never a provider subject (AGENTS.md).
 - Consistency rule: ``actor_type`` must match the concrete class of
   ``actor_id`` (``user`` ↔ ``UserId``, ``api_key`` ↔ ``ApiKeyId``).
 - Future providers (e.g. Shopify) must resolve into this same shape; that is
-  a Phase 04+ auth concern, not a model extension.
-"""
+  a organization+ auth concern, not a model extension.
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 
@@ -34,7 +35,7 @@ def ensure_actor_id_matches_actor_type(actor_type: ActorType, actor_id: ActorId)
     """Raise ``ValueError`` unless ``actor_id``'s concrete type matches the actor kind.
 
     Shared by :class:`AuthorizationContext` and
-    :class:`~app.models.audit_event.AuditEvent` so the §10 invariant has a
+    :class:`~app.models.audit_event.AuditEvent` so the authorization-context contract invariant has a
     single source.
     """
     expected = UserId if actor_type == "user" else ApiKeyId
@@ -46,12 +47,12 @@ def ensure_actor_id_matches_actor_type(actor_type: ActorType, actor_id: ActorId)
 
 
 def actor_type_for(actor_id: ActorId) -> ActorType:
-    """Derive the §10 actor kind from the concrete class of ``actor_id``.
+    """Derive the authorization-context contract actor kind from the concrete class of ``actor_id``.
 
     The inverse direction of :func:`ensure_actor_id_matches_actor_type`
     (which validates a given pair): callers that *hold* an actor identity
     and must build a consistent ``actor_type``/``actor_id`` pair — e.g. the
-    generalized denial-audit builders (Phase 05 decision 7) — use this so
+    generalized denial-audit builders (API-key design choice 7) — use this so
     the derivation shares the same single source as the validation.
     Raises ``ValueError`` for anything that is not a ``UserId``/``ApiKeyId``
     (record IDs and plain strings are never actor identities).

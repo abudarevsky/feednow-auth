@@ -1,9 +1,9 @@
-"""Shared organization-access dependency (Phase 04 task 3; spec §9/§14;
-Phase 05 decisions 6/7/8 — the API-key branch is now live here).
+"""Shared organization-access dependency (organization; authorization contract/API contract;
+API-key decisions 6/7/8 — the API-key branch is now live here).
 
 The single authorization seam every organization-scoped router registers
-through (breakdown decisions 4/5): it composes the published Phase 03
-authentication chain — or, once a ``pepper_source`` is wired, the Phase 05
+through (design notes decisions 4/5): it composes the published identity
+authentication chain — or, once a ``pepper_source`` is wired, the API-key
 prefix-dispatching :func:`~app.auth.dependencies.build_current_principal` —
 with the pure decision-2/4 classification rules, so routers carry **no**
 authz logic — they only mount manifest routes and depend on what this module
@@ -21,37 +21,38 @@ Pipeline of one request::
         -> api_key actor on a human-only route?
                          audit_denial(human_only) -> uniform 403
 
-Denial semantics (decision 4): unknown organization, inactive organization,
+Denial semantics (design choice 4): unknown organization, inactive organization,
 missing membership, inactive membership, insufficient role — and, from
-Phase 05, ``human_only`` on the management factories plus ``organization_mismatch``
+API-key, ``human_only`` on the management factories plus ``organization_mismatch``
 and ``insufficient_scope`` on the scope dependency — all answer the **same**
-403 with one fixed message — deliberately mirroring Phase 03 decision 9's
+403 with one fixed message — deliberately mirroring identity design choice 9's
 pinned explicit-org branch so the two seams never disagree and no existence
 oracle leaks. Unknown-organization denials cannot be audited (the
-audit→organization FK has no target; documented §16 exception); every denial
+audit→organization FK has no target; documented audit contract exception); every denial
 whose organization row exists appends ``authorization.denied`` with exactly
 ``{"reason", "operation"}`` metadata **before** the 403 is raised — and an
 append failure propagates as a 500 (fail-closed), never a silent 403. The
-denial actor is any §10 identity (decision 7): a ``key_`` actor is audited
+denial actor is any authorization-context contract identity (design choice 7): a ``key_`` actor is audited
 as ``api_key`` via the generalized :func:`~app.services.authorization.audit_denial`.
 
-Authentication precedes authorization (spec §6): a request that will be
+Authentication precedes authorization (identity contract): a request that will be
 denied still auto-provisions a first-seen Cognito identity — consistent with
-``/v1/me`` and documented in the phase handoff.
+``/v1/me`` and documented in the capability handoff.
 
-Phase 05 extension point (decision 6), now implemented: the member/admin
+API-key extension point (design choice 6), now implemented: the member/admin
 factories gain a keyword-only ``pepper_source: PepperSource | None = None``.
-When ``None`` they compose exactly the Phase 03 chain (byte-stable
+When ``None`` they compose exactly the identity chain (byte-stable
 regression — a ``fn_`` literal on those routes simply fails JWT verification
 → 401); when provided they compose ``build_current_principal`` and a
 non-``user`` actor is refused with the uniform 403 **audited** ``human_only``
 after the organization fetch (so the denial row has its FK target).
 :func:`build_organization_scope_dependency` is the key-carrying seam for
-product routes: human branch = Phase 04 member-rank rules (roles govern,
+product routes: human branch = organization member-rank rules (roles govern,
 ``required_scope`` never applies to humans); API-key branch = org status →
 ``organization_mismatch`` → ``insufficient_scope``, every denial the same
 uniform 403 with its deterministic audit reason.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``me.py``
 # precedent): the dependency signatures reference closure locals in
@@ -94,11 +95,11 @@ ORGANIZATION_FORBIDDEN_MESSAGE: Final = "you do not have permission to access th
 class OrganizationAccess:
     """The granted access a protected handler receives: who, where, as what.
 
-    ``identity`` is the full Phase 03 resolution (user + context) so handlers
+    ``identity`` is the full identity resolution (user + context) so handlers
     can reach the actor id; ``organization`` and ``membership`` are the
     already-authorized tenancy rows — handlers must not re-check them. This
-    type stays **human-only** (decision 6): ``membership`` is non-optional by
-    the frozen Phase 04 shape, API-key actors never receive it, and
+    type stays **human-only** (design choice 6): ``membership`` is non-optional by
+    the frozen organization shape, API-key actors never receive it, and
     :class:`PrincipalAccess` is the key-carrying type.
     """
 
@@ -111,9 +112,9 @@ class OrganizationAccess:
 class PrincipalAccess:
     """Granted access from the scope dependency: actor + organization.
 
-    The Phase 06/07/08 handoff type (decision 6): ``principal`` is the
+    The DynamoDB and AWS and securityhandoff type (design choice 6): ``principal`` is the
     dispatching :class:`~app.auth.principal.Principal` — human (with its
-    unchanged §10 context) or API-key (``roles == []``, stored scopes) — and
+    unchanged authorization-context contract context) or API-key (``roles == []``, stored scopes) — and
     ``organization`` is the already-authorized path row. No ``membership``
     field: API-key actors have none, and product handlers authorize through
     the principal's context, not a human role.
@@ -124,7 +125,7 @@ class PrincipalAccess:
 
 
 def _forbidden() -> NoReturn:
-    """Raise the one uniform 403 every denial shape renders (decision 4)."""
+    """Raise the one uniform 403 every denial shape renders (design choice 4)."""
     raise HTTPException(status_code=403, detail=ORGANIZATION_FORBIDDEN_MESSAGE)
 
 
@@ -132,9 +133,9 @@ def _require_organization(storage: Storage, organization_id: OrganizationId) -> 
     """Fetch the path organization or answer the uniform 403.
 
     Unknown organization: the same 403, provably no audit row — the
-    audit→organization FK has no target (decision 4, escalated to §16).
+    audit→organization FK has no target (design choice 4, escalated to audit contract).
     Every denial audit in this module runs **after** this fetch, which is the
-    pinned ordering for the Phase 05 ``human_only`` refusal (decision 6).
+    pinned ordering for the API-key ``human_only`` refusal (design choice 6).
     """
     try:
         return storage.get_organization(organization_id)
@@ -151,7 +152,7 @@ def _deny(
 ) -> NoReturn:
     """Audit one denial (the org row exists by construction) then raise 403.
 
-    ``actor_id`` is any §10 actor (``usr_`` or ``key_`` — decision 7); the
+    ``actor_id`` is any authorization-context contract actor (``usr_`` or ``key_`` — design choice 7); the
     append failure propagates (fail-closed 500, never a silent 403).
     """
     audit_denial(storage, actor_id, organization.id, reason, operation_id)
@@ -166,7 +167,7 @@ def _authorize_human(
     min_role: MembershipRole,
     operation_id: str,
 ) -> OrganizationAccess:
-    """The Phase 04 member-rank rules for a human actor — unchanged logic.
+    """The organization member-rank rules for a human actor — unchanged logic.
 
     Organization status was already fetched; ``classify_access`` applies the
     fixed precedence (org status, presence, membership status, role rank).
@@ -199,13 +200,13 @@ def _authorize_principal(
     min_role: MembershipRole,
     operation_id: str,
 ) -> OrganizationAccess:
-    """Shared member/admin pipeline for a human-or-key principal (decision 6).
+    """Shared member/admin pipeline for a human-or-key principal (design choice 6).
 
     Ordering pinned: the organization fetch runs **before** the ``human_only``
     refusal so the denial audit has its FK target; an unknown organization
-    still answers the same 403 with provably no audit row (the §16
+    still answers the same 403 with provably no audit row (the audit contract
     structural exception, unchanged for key actors). The non-``user`` branch
-    is unreachable when ``pepper_source`` is not wired (the Phase 03 chain
+    is unreachable when ``pepper_source`` is not wired (the identity chain
     never yields a key principal), so the ``None`` default stays byte-stable.
     """
     context = principal.context
@@ -229,17 +230,17 @@ def _build_organization_access_dependency(
     profile_source: ProfileSource | None,
     session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
-    """Return the access dependency enforcing ``min_role`` (decision 3 rank).
+    """Return the access dependency enforcing ``min_role`` (design choice 3 rank).
 
     A pure wiring factory (no I/O at construction), like
     :func:`~app.auth.dependencies.build_current_user`. ``operation_id`` is
     the frozen manifest entry the route registered from — it is the only
     ``operation`` value that may enter a denial audit. With
-    ``pepper_source=None`` the dependency composes exactly the Phase 03
+    ``pepper_source=None`` the dependency composes exactly the identity
     chain (byte-stable regression); with one provided it composes
     :func:`~app.auth.dependencies.build_current_principal` and API-key
     bearers are refused with the audited ``human_only`` denial.
-    ``profile_source`` (Phase 11 task 4) is forwarded to whichever chain is
+    ``profile_source`` (session) is forwarded to whichever chain is
     composed; it only ever matters for a first-login human miss.
     """
     if pepper_source is None:
@@ -278,10 +279,9 @@ def build_organization_member_dependency(
 ) -> Callable[..., OrganizationAccess]:
     """Read access: any **active** membership (rank >= ``viewer``).
 
-    ``pepper_source`` (decision 6): ``None`` keeps the exact Phase 03/04
-    chain; wiring one makes API-key bearers answer the uniform 403 audited
-    ``human_only`` (management routes are human-only, decision 8).
-    ``profile_source`` (Phase 11 task 4) forwards the verified user-info
+    ``pepper_source`` (design choice 6): ``None`` keeps the exact identity and organizationchain; wiring one makes API-key bearers answer the uniform 403 audited
+    ``human_only`` (management routes are human-only, design choice 8).
+    ``profile_source`` (session) forwards the verified user-info
     seam to the human authentication chain.
     """
     return _build_organization_access_dependency(
@@ -298,7 +298,7 @@ def build_organization_admin_dependency(
     profile_source: ProfileSource | None = None,
     session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
-    """Mutation access: rank >= ``admin`` (owner or admin only, decision 3).
+    """Mutation access: rank >= ``admin`` (owner or admin only, design choice 3).
 
     ``pepper_source`` and ``profile_source`` behave exactly as in
     :func:`build_organization_member_dependency`.
@@ -315,24 +315,24 @@ def build_organization_scope_dependency(
     required_scope: Scope,
     operation_id: str,
 ) -> Callable[..., PrincipalAccess]:
-    """Return the scope-enforcing access dependency (decision 6, task 5).
+    """Return the scope-enforcing access dependency (design choice 6, implementation).
 
-    **The Phase 06/07/08 handoff seam** for product operations: composes
+    **The DynamoDB and AWS and securityhandoff seam** for product operations: composes
     :func:`~app.auth.dependencies.build_current_principal` and yields a
     :class:`PrincipalAccess` for either actor kind.
 
-    - Human branch: the Phase 04 member-rank rules (rank >= ``viewer``,
+    - Human branch: the organization member-rank rules (rank >= ``viewer``,
       roles govern). ``required_scope`` **never applies to humans** —
       product permissions are API-key scopes only (AGENTS.md), and human
       contexts carry an empty scope list by construction.
     - API-key branch: the fixed precedence org status → ``organization_mismatch``
       (the key's organization must equal the path organization) →
       ``insufficient_scope`` (exact-string membership of ``required_scope``
-      in the context's scopes — decision 7: no wildcards, no hierarchy).
+      in the context's scopes — design choice 7: no wildcards, no hierarchy).
 
     Every denial is the same uniform 403 body with its deterministic audit
     reason, appended whenever the organization row exists (unknown org: the
-    §16 exception, no audit row).
+    audit contract exception, no audit row).
     """
     current_principal = build_current_principal(storage, verifier, pepper_source)
 

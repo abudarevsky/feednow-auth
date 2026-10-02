@@ -1,40 +1,6 @@
-"""Issuer-bound JWKS retrieval for Cognito access tokens (Phase 03 task 2).
+"""Issuer-bound JWKS retrieval for Cognito access tokens. A key identifier is resolved only from its configured issuer, with refresh on an unknown key identifier.
 
-Implements planner decision "JWKS" from the Phase 03 breakdown:
-
-- The key-set URL is derived as ``{iss}/.well-known/jwks.json`` — Cognito's
-  OIDC-standard discovery path. The issuer string is only ever taken from the
-  configured allowlist (exact set membership), so no attacker-controlled
-  token claim can steer a fetch URL (SSRF boundary; the pinned PyJWT floor
-  also rejects non-http(s) schemes inside ``PyJWKClient``).
-- One ``jwt.PyJWKClient(url, cache_keys=True)`` is built **lazily per allowed
-  issuer** and held for the source's lifetime. ``cache_keys=True`` enables
-  PyJWT's per-key LRU so repeat lookups of a known ``kid`` never re-fetch.
-- Key rotation rides on PyJWKClient's refetch-on-unknown-kid behavior. The
-  ``cooldown_duration`` parameter is deliberately **not** passed: it exists
-  only from 2.14 while the dependency floor is 2.13, so passing it would
-  break the minimum supported version. On the resolved 2.14 its default
-  30-second cooldown gates the rotation refetch (an unknown kid within 30s
-  of a successful fetch raises ``UnknownKeyIdError`` without refetching);
-  proactive TTL refresh, immediate-rotation tuning, and fetch rate-limiting
-  are deferred to Phase 08.
-- Failure classification (PyJWT's own hierarchy makes this message-free):
-  ``PyJWKClientConnectionError`` (HTTP failure of any kind, including 4xx/5xx
-  responses) → :class:`TokenProviderUnavailableError`; a plain
-  ``PyJWKClientError`` (no key matched the ``kid``) →
-  :class:`UnknownKeyIdError`. A degenerate endpoint that returns valid JSON
-  but no usable keys therefore surfaces as ``UnknownKeyIdError`` — fail-closed
-  as an invalid token, which is acceptable until Phase 08 hardening.
-
-The :class:`JwksSource` protocol is the **published handoff interface**
-(task 7). It is issuer-bound — ``signing_key(issuer, kid)`` — because with a
-plural allowlist a kid-only lookup would force cross-issuer scanning, and two
-issuers may legitimately reuse a kid string; changing that shape later would
-be a breaking change for Phases 06/07.
-
-No verifier logic lives here — claim validation and decoding arrive with the
-task-3 :mod:`app.auth.cognito` module.
-"""
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -54,7 +20,7 @@ JWKS_PATH: Final = "/.well-known/jwks.json"
 
 @runtime_checkable
 class JwksSource(Protocol):
-    """Issuer-bound signing-key lookup — the Phase 03 published interface.
+    """Issuer-bound signing-key lookup — the identity published interface.
 
     Implementations resolve a key **only** from the key set published by
     ``issuer``; a ``kid`` that exists under a different issuer must never be

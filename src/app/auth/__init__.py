@@ -1,19 +1,19 @@
 """JWT/API-key authentication and authorization resolution.
 
-Phase 03 tasks 2—3 publish the auth-boundary contracts re-exported below:
-the token-error hierarchy and issuer-bound :class:`JwksSource` (task 2) and
+identity tasks 2—3 publish the auth-boundary contracts re-exported below:
+the token-error hierarchy and issuer-bound :class:`JwksSource` (implementation) and
 the access-token verifier with its frozen claims and the
-:class:`AccessTokenVerifier` handoff protocol (task 3). Phase 04 task 3 adds
-the shared organization-access dependency (member/admin minimums). Phase 05
-task 1 adds the API-key credential primitives (format, parse, peppered
-hash) and the :class:`PepperSource` abstraction; task 3 adds the verification
+:class:`AccessTokenVerifier` handoff protocol (implementation). organization adds
+the shared organization-access dependency (member/admin minimums). API-key adds the API-key credential primitives (format, parse, peppered
+hash) and the :class:`PepperSource` abstraction; implementation adds the verification
 pipeline (:func:`verify_api_key`, its uniform :class:`ApiKeyAuthenticationError`,
-and :func:`build_api_key_context`/ :func:`key_has_scope`); task 5 adds the
+and :func:`build_api_key_context`/ :func:`key_has_scope`); implementation adds the
 principal dispatch (:class:`Principal`, :func:`build_current_principal`) and
 the organization-access API-key branch (the ``pepper_source``-wired
 factories, :class:`PrincipalAccess`, and
 :func:`build_organization_scope_dependency`).
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from app.auth.api_key_auth import (
     ApiKeyAuthenticationError,

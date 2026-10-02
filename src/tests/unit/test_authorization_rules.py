@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 04 task-2 authorization rules and audit builders.
+"""Unit tests for the organization implementation authorization rules and audit builders.
 
 Covers the task's verify lines against stub storage (zero-write proofs) and
 pure-function assertions:
@@ -15,10 +15,11 @@ pure-function assertions:
 4. The decision-3 guards raise the pinned errors with fixed, identifier-free
    messages.
 5. Module purity: no FastAPI import (AST proof, suite-harness precedent).
-6. Phase 05 task 4 (decision 7): ``actor_type_for`` derivation, the
+6. API-key (design choice 7): ``actor_type_for`` derivation, the
    generalized ``build_denial_audit``/``audit_denial`` actor surface
    (``usr_``/``key_``), and the extended seven-reason denial vocabulary.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

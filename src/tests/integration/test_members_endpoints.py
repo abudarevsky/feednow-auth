@@ -1,6 +1,6 @@
-"""Integration tests for the member endpoints (Phase 04 task 5).
+"""Integration tests for the member endpoints (organization).
 
-Same Phase 03-proven stack as the organization tests (decision 9): loopback
+Same identity-proven stack as the organization tests (design choice 9): loopback
 JWKS-signed tokens, real SQLite, seeded owner/admin/member/viewer matrix in
 one organization plus an outsider with their own anchor organization. Audit
 and mutation-count assertions read the SQLite file directly.
@@ -19,7 +19,8 @@ Acceptance mapping (AC 2/3/4/5 for the three member routes):
 - cross-tenant outsider attempts on all three routes answer the identical
   403 body with zero mutation;
 - no response body carries ``mem_`` record ids or emails.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

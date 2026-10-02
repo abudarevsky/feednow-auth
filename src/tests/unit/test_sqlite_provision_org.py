@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 04 task-1 SQLite ``provision_organization`` compound.
+"""Unit tests for the organization implementation SQLite ``provision_organization`` compound.
 
 Scope mirrors ``test_sqlite_provision.py``: cross-adapter *behavior* (atomic
 read-back, conflict kinds, rollback) is owned by the conformance suite; this
@@ -10,7 +10,8 @@ persists a partial row), the deliberate **absence** of race-convergence
 mapping (a slug conflict stays a plain ``organization_slug`` duplicate, never
 ``DuplicateExternalIdentityError``), and the mid-batch non-integrity
 driver-error path.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

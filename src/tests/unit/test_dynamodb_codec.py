@@ -1,4 +1,4 @@
-"""Unit proofs for the DynamoDB adapter skeleton (Phase 06 task 2).
+"""Unit proofs for the DynamoDB adapter skeleton (DynamoDB).
 
 No Docker, no network: the codecs, key builders, cursor round-trip, and the
 factory's injected-resource seam are pure/off-line, so every assertion here
@@ -14,17 +14,18 @@ Verify lines covered:
   range mis-sorts).
 - Tenant ``None`` <-> ``""`` normalization is lossless.
 - Sort-key builders put the ``#``-separated id tiebreaker last.
-- The Phase 12 users item carries ``application_role``/``g_email``, an absent
-  role (pre-Phase-12 item) reads back as ``user``, and a present-but-invalid
+- The application-role users item carries ``application_role``/``g_email``, an absent
+  role (pre-capability-12 item) reads back as ``user``, and a present-but-invalid
   role fails validation; no constraint kind or mapping names email any more.
-- The Phase 13 users item additionally carries ``g_role`` (the
+- The admin users item additionally carries ``g_role`` (the
   ``by-application-role`` GSI partition attribute, always the exact
   ``application_role`` value), and the users ``TableSpec`` declares both GSIs.
 - Cursor garbage/tampered/foreign-scope -> ``InvalidCursorError`` with fixed
   messages and no echo of the cursor content.
 - The factory with an injected fake resource constructs without any network
   call, and ``close()`` shuts the client down / blocks reuse.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

@@ -1,25 +1,26 @@
-"""API-key endpoint schemas (spec §14 keys endpoints, §15 creation payloads).
+"""API-key endpoint schemas (API contract keys endpoints, key-creation contract creation payloads).
 
-Secret policy (AGENTS.md; Phase 01 acceptance criterion):
+Secret policy (AGENTS.md; initial acceptance criterion):
 
 - :class:`ApiKeyCreateRequest` and :class:`ApiKeyCreatedResponse` are copied
-  **verbatim** from spec §15 — not derived. ``ApiKeyCreatedResponse.key`` is
+  **verbatim** from key-creation contract — not derived. ``ApiKeyCreatedResponse.key`` is
   the only field anywhere in the API surface that carries a full credential
   literal: it is returned once at creation and is never stored, logged,
   audited, or re-served by any other endpoint.
 - :class:`ApiKeySummary` is the list representation: identification and
   lifecycle data only (``key_prefix``, status, scopes, environment,
   timestamps). It has no ``secret_hash`` field, no plaintext field, and does
-  not expose the §8 non-secret ``key_id`` credential segment — that is a
-  verification-lookup detail owned by Phase 05. Clients target revocation
+  not expose the credential contract non-secret ``key_id`` credential segment — that is a
+  verification-lookup detail owned by API-key. Clients target revocation
   with the ``key_`` application identity (``ApiKeySummary.id``), which is
-  what the §14 ``{key_id}`` path parameter carries.
+  what the API contract ``{key_id}`` path parameter carries.
 - ``scopes`` reuses the single-source :data:`~app.models.api_key.Scope`
   value type; the shape pattern is never re-declared here. A creation
   request must include the ``scopes`` field, but an empty list is valid
   (a zero-scope key simply authorizes nothing) — plan/rate-limit policy
   must never be encoded in scopes (design rule, not a runtime denylist).
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ FullApiKey = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 
 
 class ApiKeyCreateRequest(ApiSchema):
-    """Body for ``POST /v1/organizations/{organization_id}/api-keys`` (spec §15, verbatim)."""
+    """Body for ``POST /v1/organizations/{organization_id}/api-keys`` (key-creation contract, verbatim)."""
 
     name: ApiKeyName
     environment: ApiKeyEnvironment
@@ -48,7 +49,7 @@ class ApiKeyCreateRequest(ApiSchema):
 
 
 class ApiKeyCreatedResponse(ApiSchema):
-    """Response of key creation (spec §15, verbatim).
+    """Response of key creation (key-creation contract, verbatim).
 
     The **only** response type that exposes the full key. Returned once;
     every later read serves :class:`ApiKeySummary` (masked) instead.
@@ -63,7 +64,7 @@ class ApiKeyCreatedResponse(ApiSchema):
 class ApiKeySummary(ApiSchema):
     """Masked key representation for list items (derived).
 
-    Never contains ``secret_hash``, the plaintext secret, or the raw §8
+    Never contains ``secret_hash``, the plaintext secret, or the raw credential contract
     ``key_id`` segment — only the display prefix, lifecycle status, scopes,
     and timestamps (plus non-secret identification: id/name/environment).
     """

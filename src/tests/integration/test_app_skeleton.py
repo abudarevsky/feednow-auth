@@ -1,4 +1,4 @@
-"""Integration tests for the Phase 01 task-6 app skeleton.
+"""Integration tests for the initial implementation app skeleton.
 
 Covers the task's verify lines:
 
@@ -6,12 +6,13 @@ Covers the task's verify lines:
    variables removed from the environment (no AWS, no DB to boot).
 2. Subprocess-isolated ``boto3``-free import of ``app.main`` — a fresh
    interpreter, so test order can never skew the result (planner decision;
-   an in-process ``sys.modules`` assertion would false-fail in Phase 06).
+   an in-process ``sys.modules`` assertion would false-fail in DynamoDB).
 3. Validation-error envelope shape asserted field-for-field, plus the
    HTTPException/unhandled-exception mappings from ``app.api.errors``.
-4. The ``create_app`` router extension point works and Phase 01 mounts no
-   §14 routers.
-"""
+4. The ``create_app`` router extension point works and initial mounts no
+   API contract routers.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

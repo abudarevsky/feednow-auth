@@ -1,10 +1,9 @@
-"""Phase 06 acceptance proofs: the DynamoDB boundary holds repo-wide (task 9).
+"""DynamoDB acceptance proofs: the DynamoDB boundary holds repo-wide (implementation).
 
-AC 1 of the phase spec: "No service/API module imports DynamoDB client types
-or catches DynamoDB exceptions." The per-file subprocess proofs from Phases
-01/02 (``test_app_skeleton.py``, ``test_storage_contract.py``) pin the two
+AC 1 of the capability contract: "No service/API module imports DynamoDB client types
+or catches DynamoDB exceptions." The per-file subprocess proofs from initial and storage(``test_app_skeleton.py``, ``test_storage_contract.py``) pin the two
 known import roots; this file adds the **repo-wide AST scan** promised by
-breakdown decision 7: every ``.py`` under ``src/app`` except
+design notes design choice 7: every ``.py`` under ``src/app`` except
 ``storage/dynamodb.py`` itself is parsed and may not import ``boto3``,
 ``botocore`` (any submodule), or the adapter module
 ``app.storage.dynamodb`` (absolute *or* relative form, resolved to dotted
@@ -12,7 +11,7 @@ names so ``from . import dynamodb`` inside ``app/storage`` cannot smuggle
 it past a substring check). Catching a driver exception requires importing
 it, so the import ban covers AC 1's "catches" clause structurally.
 
-Phase 13 exception (pinned, narrow): ``storage/factory.py`` — the
+admin exception (pinned, narrow): ``storage/factory.py`` — the
 CLI-facing configuration→adapter seam — may import the adapter module
 ``app.storage.dynamodb`` (in practice its documented
 ``open_dynamodb_storage`` factory function), mirroring how the Lambda
@@ -29,8 +28,9 @@ The positive-control test proves the scan is not vacuous: the adapter module
 is the **only** file under ``src/app`` whose imports mention the drivers.
 The final test re-runs the established subprocess-isolated proof for the
 whole app entrypoint (fresh interpreter, so test order can never skew the
-result) with the Phase 06 module names added to the leak list.
-"""
+result) with the DynamoDB module names added to the leak list.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

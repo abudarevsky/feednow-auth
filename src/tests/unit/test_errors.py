@@ -1,4 +1,6 @@
-"""Unit tests for the error envelope and codes (Phase 01 task 2)."""
+"""Unit tests for the error envelope and codes (initial).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

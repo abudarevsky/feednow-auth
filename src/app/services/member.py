@@ -1,15 +1,15 @@
-"""Membership add/remove rules (Phase 04 task 5).
+"""Membership add/remove rules (organization).
 
-Mutation rules for ``POST``/``DELETE .../members`` (breakdown decisions
+Mutation rules for ``POST``/``DELETE .../members`` (design notes decisions
 3/6/7), functions-with-injected-storage like :mod:`app.services.organization`
-(the abandoned class scaffold was replaced wholesale, decision 0). The
+(the abandoned class scaffold was replaced wholesale, design choice 0). The
 caller's right to mutate (rank >= admin) is enforced by the shared access
 dependency *before* these functions run; what is enforced here is the role
-policy of decision 3: ``owner`` is not grantable (guard) and not removable
+policy of design choice 3: ``owner`` is not grantable (guard) and not removable
 (immutability check), and the (organization, user) pair stays unique through
 the storage constraint.
 
-Audit ordering (decision 7): ``membership.created``/``membership.removed``
+Audit ordering (design choice 7): ``membership.created``/``membership.removed``
 are appended **after** the successful write — a mutation that failed must
 never audit as success. The accepted, documented limitation: a committed
 mutation whose audit append fails returns 500 with the mutation persisted
@@ -17,14 +17,15 @@ mutation whose audit append fails returns 500 with the mutation persisted
 atomic unit, and membership add/remove has no invariant that would need
 one).
 
-Error translation (decision 6): the adapter's ``ReferenceNotFoundError`` on
+Error translation (design choice 6): the adapter's ``ReferenceNotFoundError`` on
 an unknown target ``usr_`` becomes :class:`TargetUserNotFoundError` (404 —
 the organization FK is already proven by the dependency, so the only parent
 that can be missing is the user), and ``kind="membership"`` duplicates
 become :class:`MembershipConflictError` (409). A delete that races another
 removal (the contract pins delete as non-idempotent) also surfaces as
 :class:`MemberNotFoundError` (404): the pair is simply gone.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 
@@ -85,7 +86,7 @@ def add_member(
 
     Order: owner-role guard (zero writes when refused) → single
     ``create_membership`` → ``membership.created`` audit **after** the
-    successful write (decision 7). ``now``/``ids`` are injectable;
+    successful write (design choice 7). ``now``/``ids`` are injectable;
     production reads the clock once per grant.
 
     Raises:
@@ -138,10 +139,10 @@ def remove_member(
     """Physically remove a membership, preserving the owner invariant.
 
     ``get_membership`` first (miss → 404), then the owner immutability guard
-    (decision 3: nobody — including owners — may delete an owner membership
+    (design choice 3: nobody — including owners — may delete an owner membership
     through this API; there is deliberately no update path either), then
     ``delete_membership``, then the ``membership.removed`` audit **after**
-    the delete commits (decision 7) carrying the role *at removal*.
+    the delete commits (design choice 7) carrying the role *at removal*.
 
     Raises:
         MemberNotFoundError: no such membership (including a delete that
@@ -176,7 +177,7 @@ def list_members(
     """Pass-through of the contract's org-scoped membership page.
 
     The contract returns **all statuses** (``disabled`` is suspension and
-    stays visible; ``MemberResponse`` carries ``status`` — decision 8, no
+    stays visible; ``MemberResponse`` carries ``status`` — design choice 8, no
     filter invented here).
     """
     return storage.list_memberships(organization_id, page)

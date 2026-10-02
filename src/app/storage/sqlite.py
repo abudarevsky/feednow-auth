@@ -1,4 +1,4 @@
-"""SQLite adapter core: schema, connections, codecs, and mappers (Phase 02 task 2).
+"""SQLite adapter core: schema, connections, codecs, and mappers (storage).
 
 This module owns everything SQLite-specific in the application. Nothing here
 may leak above the adapter: the contract operations added by tasks 3-7
@@ -6,10 +6,10 @@ translate ``sqlite3`` errors into the domain vocabulary in
 :mod:`app.storage.contract`, and application code is typed only against that
 contract and reaches this adapter through :func:`open_sqlite_storage`.
 
-Design pinned by the Phase 02 breakdown:
+Design pinned by the storage design notes:
 
 - **Stdlib only.** ``sqlite3`` is the single driver; no ORM (SQLAlchemy is a
-  spec §11 leak example).
+  storage contract leak example).
 - **Connection model.** Thread-local connections, ``journal_mode=WAL``,
   ``busy_timeout`` 5 s, and ``foreign_keys`` enforced as the *first*
   statements after ``connect()`` on every connection (``PRAGMA foreign_keys``
@@ -43,40 +43,40 @@ Design pinned by the Phase 02 breakdown:
   through ``model_validate``, so a bad enum string or ID prefix raises
   (documented tripwire, not silent coercion).
 
-Task boundary: task 3 implemented the users/external-identity operations
+Task boundary: implementation implemented the users/external-identity operations
 (:meth:`SQLiteStorage.create_user`, :meth:`SQLiteStorage.get_user`,
 :meth:`SQLiteStorage.create_external_identity`,
 :meth:`SQLiteStorage.get_user_by_external_identity`) with the sqlite3→domain
-error translation below; task 4 added the organization and membership
+error translation below; implementation added the organization and membership
 operations (:meth:`SQLiteStorage.create_organization`,
 :meth:`SQLiteStorage.get_organization`,
 :meth:`SQLiteStorage.list_user_organizations`,
 :meth:`SQLiteStorage.create_membership`, :meth:`SQLiteStorage.get_membership`,
 :meth:`SQLiteStorage.list_memberships`,
 :meth:`SQLiteStorage.delete_membership`) on top of the keyset-pagination
-helper; task 5 added the API-key operations
+helper; implementation added the API-key operations
 (:meth:`SQLiteStorage.create_api_key`, :meth:`SQLiteStorage.get_api_key`,
 :meth:`SQLiteStorage.get_api_key_by_key_id`,
 :meth:`SQLiteStorage.list_api_keys`, :meth:`SQLiteStorage.revoke_api_key`)
-including the first-write-wins revocation CAS; task 6 added the standalone
+including the first-write-wins revocation CAS; implementation added the standalone
 audit write (:meth:`SQLiteStorage.append_audit_event`) on the shared
-``_insert_audit_event_row`` helper; task 7 completed the contract surface with
+``_insert_audit_event_row`` helper; implementation completed the contract surface with
 the :meth:`SQLiteStorage.provision_user` atomic compound — a single-transaction
 batch write (``BEGIN IMMEDIATE``) over the shared row-insert helpers the
-standalone ``create_*`` methods now delegate to, with the spec §6
-race-error mapping pinned in the contract. Phase 04 task 1 added the second
+standalone ``create_*`` methods now delegate to, with the identity contract
+race-error mapping pinned in the contract. organization added the second
 compound, :meth:`SQLiteStorage.provision_organization` (organization +
 membership + audits in one transaction, deliberately **no** race-convergence
 mapping — a slug conflict is a plain translated ``DuplicateEntityError``).
 Behavior/conformance testing is owned by ``src/tests/storage_contract/``.
-Phase 11 task 6 added the additive login-state/session surface
+session added the additive login-state/session surface
 (:meth:`SQLiteStorage.save_oauth_login_state`,
 :meth:`SQLiteStorage.consume_oauth_login_state` — a single
 ``DELETE ... RETURNING`` so exactly one concurrent caller wins —
 :meth:`SQLiteStorage.create_app_session`, and
 :meth:`SQLiteStorage.get_app_session`) on two new tables created
 idempotently at every open; expiry is evaluated against the adapter clock
-on read, and storage still mints nothing. Phase 12 task 2 flipped email
+on read, and storage still mints nothing. application-role flipped email
 uniqueness: the users table is now v2 (``application_role`` column,
 non-unique ``users_email_lookup`` index, no ``users_email_unique``), a
 file stamped v1 is brought forward by the ordered :data:`_MIGRATIONS`
@@ -84,7 +84,7 @@ table at open (forward-only, data-retaining),
 :meth:`SQLiteStorage.list_users_by_email` lands as the bounded exact-
 lookup read, and the ``provision_user`` race mapping narrows to the
 identity tuple alone (the users-by-email winner-resolution fallback is
-gone — email can no longer name a unique winner). Phase 13 task 1 added
+gone — email can no longer name a unique winner). admin added
 the atomic administrator transition
 :meth:`SQLiteStorage.transition_application_role` (CAS role write +
 audit append in one ``BEGIN IMMEDIATE`` transaction, with the
@@ -93,7 +93,8 @@ now v3: the ``2 → 3`` migration adds the non-unique
 ``users_application_role_lookup`` index that backs the active-admin
 guard's role predicate; the ``1 → 2`` file is carried forward through
 the whole chain at open.
-"""
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -394,7 +395,7 @@ def encode_json_column(value: object) -> str:
 
     Key order and array order are preserved exactly — no ``sort_keys`` — so
     ``scopes`` round-trip with duplicates and order intact (normalization is
-    Phase 05 domain work).
+    API-key domain work).
     """
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -793,15 +794,15 @@ class SQLiteStorage:
         :data:`_SCHEMA_STATEMENTS` shape and stamp it); :data:`SCHEMA_VERSION`
         is current (no DDL); any other stamp listed in :data:`_MIGRATIONS` is
         brought forward by the ordered migration chain (forward-only,
-        data-retaining — the Phase 12 ``1 → 2`` migration adds the
+        data-retaining — the application-role ``1 → 2`` migration adds the
         ``application_role`` column with its ``'user'`` default backfill,
         drops ``users_email_unique``, and creates ``users_email_lookup``; the
-        Phase 13 ``2 → 3`` migration creates
+        admin ``2 → 3`` migration creates
         ``users_application_role_lookup``). Every other stamp is rejected
         loudly.
 
-        The Phase 11 session tables (:data:`_SESSION_SCHEMA_STATEMENTS`) run
-        on every initialization — a pre-Phase-11 file gains them additively
+        The session session tables (:data:`_SESSION_SCHEMA_STATEMENTS`) run
+        on every initialization — a pre-capability-11 file gains them additively
         (``CREATE TABLE IF NOT EXISTS``, no data migration, no version bump).
         """
         with self._lock:
@@ -887,12 +888,12 @@ class SQLiteStorage:
         """Insert one user row inside the **caller's** transaction.
 
         Shared by :meth:`create_user` (standalone path) and
-        :meth:`provision_user` (batch, task 7): the helper never commits or
+        :meth:`provision_user` (batch, implementation): the helper never commits or
         rolls back — transaction discipline belongs to the calling contract
         method. Storage mints nothing: the row is exactly the caller-supplied
         entity, with both temporal columns through the fixed-width codec and
-        the Phase 12 ``application_role`` stored as its enum string (the
-        column's ``'user'`` DEFAULT exists only to backfill pre-Phase-12 rows
+        the application-role ``application_role`` stored as its enum string (the
+        column's ``'user'`` DEFAULT exists only to backfill pre-capability-12 rows
         during the 1→2 migration; every write names the value).
         """
         conn.execute(
@@ -914,7 +915,7 @@ class SQLiteStorage:
         """Persist a new user and echo the caller-supplied entity back.
 
         Storage mints nothing: the row is exactly ``user``. Email is not a
-        uniqueness constraint (Phase 12), so duplicate addresses are legal
+        uniqueness constraint (application-role), so duplicate addresses are legal
         and only ``usr_`` id collisions surface as translated
         :class:`~app.storage.contract.DuplicateEntityError`
         (``kind="entity_id"``); the failed transaction is rolled back so the
@@ -955,7 +956,7 @@ class SQLiteStorage:
         return user
 
     def list_users_by_email(self, email: str) -> list[User]:
-        """Exact-match lookup of every user carrying ``email`` (Phase 12).
+        """Exact-match lookup of every user carrying ``email`` (application-role).
 
         Email is non-unique, so this returns zero/one/many users ordered by
         ``(created_at, id)`` ascending (contract-pinned; ``id`` is the
@@ -1038,7 +1039,7 @@ class SQLiteStorage:
         same way writes store it) and projects the owning ``users`` row — the
         provider subject is never compared against ``users.id``, and no
         identity/row data crosses the boundary. A miss raises
-        :class:`~app.storage.contract.EntityNotFoundError`; it is Phase 03's
+        :class:`~app.storage.contract.EntityNotFoundError`; it is identity implementation
         "needs provisioning" signal and never a ``None`` return.
         """
         conn = self._connection()
@@ -1072,7 +1073,7 @@ class SQLiteStorage:
 
         ``BEGIN IMMEDIATE`` is the first statement so the write lock is held
         *before* the guard's read snapshot exists: the last-ACTIVE-admin check
-        and the role write are **one** concurrency-safe operation (spec 13
+        and the role write are **one** concurrency-safe operation (contract 13
         required behavior 3) — a racing demotion blocks on ``busy_timeout``
         and then re-evaluates the guard against committed truth, so two
         racing last-pair revocations can never both succeed.
@@ -1226,25 +1227,46 @@ class SQLiteStorage:
 
     def update_organization(self, organization: Organization) -> Organization:
         conn = self._connection()
-        cursor = conn.execute(
-            "UPDATE organizations SET name = ?, name_status = ?, updated_at = ? WHERE id = ?",
-            (
-                organization.name,
-                str(organization.name_status),
-                encode_timestamp(organization.updated_at),
-                str(organization.id),
-            ),
-        )
+        try:
+            cursor = conn.execute(
+                "UPDATE organizations SET name = ?, slug = ?, name_status = ?, updated_at = ? WHERE id = ?",
+                (
+                    organization.name,
+                    organization.slug,
+                    str(organization.name_status),
+                    encode_timestamp(organization.updated_at),
+                    str(organization.id),
+                ),
+            )
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
         if cursor.rowcount == 0:
             conn.rollback()
             raise EntityNotFoundError("organization not found")
         conn.commit()
         return organization
 
+    def is_organization_slug_available(
+        self,
+        slug: str,
+        excluding_organization_id: OrganizationId | None = None,
+    ) -> bool:
+        conn = self._connection()
+        row = conn.execute(
+            "SELECT 1 FROM organizations WHERE slug = ? AND id != ? LIMIT 1"
+            if excluding_organization_id is not None
+            else "SELECT 1 FROM organizations WHERE slug = ? LIMIT 1",
+            (slug, str(excluding_organization_id))
+            if excluding_organization_id is not None
+            else (slug,),
+        ).fetchone()
+        return row is None
+
     def list_user_organizations(self, user_id: UserId, page: PageParams) -> Page[Organization]:
         """Page through organizations where the user holds an **active**
         membership (contract-pinned domain operation: ``disabled`` is a
-        suspension and hides the organization; Phase 04 re-checks roles).
+        suspension and hides the organization; organization re-checks roles).
 
         Ordered by ``(organizations.created_at, organizations.id)`` ascending;
         the ``memberships_pair_unique`` index guarantees at most one
@@ -1516,12 +1538,12 @@ class SQLiteStorage:
     def delete_membership(self, *, organization_id: OrganizationId, user_id: UserId) -> None:
         """Physically remove one ``(organization, user)`` membership.
 
-        Removal is a physical delete (Phase 01 pinned ``disabled`` as
+        Removal is a physical delete (initial pinned ``disabled`` as
         suspension, not removal), so the pair is free for a fresh membership
         afterwards. Idempotency is *not* provided: a zero-rowcount delete
         rolls back and raises
         :class:`~app.storage.contract.EntityNotFoundError`; whether HTTP
-        answers 204 or 404 is Phase 04's decision.
+        answers 204 or 404 is organization implementation decision.
         """
         conn = self._connection()
         try:
@@ -1545,12 +1567,12 @@ class SQLiteStorage:
         """Persist a new API-key credential row (caller-echo).
 
         Storage mints nothing: the row is exactly ``api_key``. The non-secret
-        §8 ``key_id`` credential segment is unique (``api_keys_key_id_unique``
+        credential contract ``key_id`` credential segment is unique (``api_keys_key_id_unique``
         → ``kind="api_key_id"``); a ``key_`` record-id collision surfaces as
         ``kind="entity_id"``; an unknown organization or creating user
         surfaces as :class:`~app.storage.contract.ReferenceNotFoundError` via
         the foreign keys. ``scopes`` are stored through the JSON codec with
-        order and duplicates preserved exactly (normalization is Phase 05
+        order and duplicates preserved exactly (normalization is API-key
         domain work). No plaintext secret exists on the model and none is
         derived or logged here.
         """
@@ -1598,11 +1620,11 @@ class SQLiteStorage:
         ``EntityNotFoundError``.
 
         Tenancy is deliberately **not** filtered here (contract-pinned): the
-        §8 verification path must resolve the organization *from* the key, so
+        credential contract verification path must resolve the organization *from* the key, so
         the full row is returned regardless of organization and enforcing the
-        §14 org-scoped route contract is the Phase 05 service's check of
+        API contract org-scoped route contract is the API-key service's check of
         ``api_key.organization_id``, not a storage filter. ``api_key_id`` is
-        the ``key_`` identity — not the §8 credential segment (see
+        the ``key_`` identity — not the API-key credential segment (see
         :meth:`get_api_key_by_key_id`).
         """
         conn = self._connection()
@@ -1612,14 +1634,14 @@ class SQLiteStorage:
         return api_key_from_row(row)
 
     def get_api_key_by_key_id(self, key_id: KeyId) -> ApiKey:
-        """Load a key by the §8 non-secret ``<key-id>`` credential segment.
+        """Load a key by the credential contract non-secret ``<key-id>`` credential segment.
 
         Point lookup on the unique segment inside ``fn_live_<key-id>_<secret>``
         (backed by ``api_keys_key_id_unique``) — a different column and type
         from the ``key_`` identity of :meth:`get_api_key`. Returns stored
         truth: after revocation the row still resolves with
         ``status=revoked`` and ``revoked_at`` set, because status is data and
-        rejection is Phase 05 verification work. A miss raises
+        rejection is API-key verification work. A miss raises
         :class:`~app.storage.contract.EntityNotFoundError`.
         """
         conn = self._connection()
@@ -1719,12 +1741,12 @@ class SQLiteStorage:
         """Insert one audit row inside the **caller's** transaction.
 
         Shared by :meth:`append_audit_event` (standalone path, the shape
-        Phase 03-05 services use) and :meth:`provision_user` (batch path,
-        task 7): the helper never commits or rolls back — transaction
+        identity-05 services use) and :meth:`provision_user` (batch path,
+        implementation): the helper never commits or rolls back — transaction
         discipline belongs to the calling contract method. Storage mints
         nothing: the row is exactly the caller-supplied event, with
         ``metadata`` stored through the JSON codec (exact round-trip) and
-        ``actor_type`` stored verbatim (the §10 ``user``/``api_key`` strings;
+        ``actor_type`` stored verbatim (the authorization-context contract ``user``/``api_key`` strings;
         the model boundary already pins the actor-type/actor-id consistency).
         """
         conn.execute(
@@ -1749,16 +1771,16 @@ class SQLiteStorage:
         """Append one fully formed audit event (standalone write path).
 
         Returns ``None`` — storage mints nothing and re-reads nothing, so
-        there is nothing to return (contract-pinned). Phase 03-05 services
+        there is nothing to return (contract-pinned). identity-05 services
         use this for events outside any compound operation
         (``membership.removed``, ``api_key.revoked``, ...); only provisioning
         batches go through :meth:`provision_user`, which shares the row-insert
         helper above. A duplicate ``aud_`` record id surfaces as
         ``DuplicateEntityError(kind="entity_id")`` and an unknown
         organization as :class:`~app.storage.contract.ReferenceNotFoundError`
-        via the foreign key (the actor id is §10 application identity, not an
+        via the foreign key (the actor id is authorization-context contract application identity, not an
         FK — enforced at the model boundary). There is no audit read or list
-        surface in this phase: append is write-only by contract, and
+        surface in this capability: append is write-only by contract, and
         ``metadata`` round-trips exactly as JSON.
         """
         conn = self._connection()
@@ -1787,11 +1809,11 @@ class SQLiteStorage:
         Runs post-rollback (autocommit, so the read sees the concurrent
         winner's committed rows): re-read the identity row for the batch's
         ``(provider, provider_subject, tenant_normalized)`` tuple — the
-        **sole** convergence key from Phase 12 on. The old users-by-email
+        **sole** convergence key from application-role on. The old users-by-email
         fallback is gone: email is non-unique, so a by-email read could name
         an arbitrary member of a shared-address crowd rather than the actual
         winner. The read is adapter-internal — the contract gains no separate
-        resolve method — and returns the winner's ``usr_`` id so Phase 03
+        resolve method — and returns the winner's ``usr_`` id so identity
         converges without a second query, or ``None`` when it does not
         resolve.
         """
@@ -1818,7 +1840,7 @@ class SQLiteStorage:
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
-        audit events in one transaction (spec §6/§12).
+        audit events in one transaction (identity contract/storage contract).
 
         ``BEGIN IMMEDIATE`` is the first statement so the write lock is held
         *before* any read snapshot exists: a concurrent loser blocks on
@@ -1830,8 +1852,8 @@ class SQLiteStorage:
         committed until the whole batch has succeeded.
 
         Duplicate/concurrency semantics (contract-pinned): the identity
-        tuple is the **sole** race/convergence key from Phase 12 on — a
-        UNIQUE violation on it is spec §6's concurrent-first-login race
+        tuple is the **sole** race/convergence key from application-role on — a
+        UNIQUE violation on it is identity contract's concurrent-first-login race
         (both attempts carry the same tuple, distinct record ids) and
         surfaces as :class:`~app.storage.contract.DuplicateExternalIdentityError`
         with ``existing_user_id`` resolved post-rollback by
@@ -1897,7 +1919,7 @@ class SQLiteStorage:
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedOrganization:
         """Atomically write organization + membership + audit events in one
-        transaction (Phase 04 breakdown decision 2; contract-pinned).
+        transaction (organization design notes design choice 2; contract-pinned).
 
         ``BEGIN IMMEDIATE`` is the first statement so the write lock is held
         *before* any read snapshot exists (same discipline as

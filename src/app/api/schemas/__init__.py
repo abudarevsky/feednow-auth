@@ -1,19 +1,20 @@
-"""Versioned request/response schemas for the §14 API surface.
+"""Versioned request/response schemas for the API contract API surface.
 
-Phase 01 contract surface (frozen for Phase 04/05 mounting):
+initial contract surface (frozen for organization and API-keymounting):
 
 - :mod:`app.api.schemas.common` — :class:`ApiSchema` base (``extra="forbid"``
   everywhere) and the pagination re-exports (``Page``, ``PageParams``).
 - Resource modules :mod:`me`, :mod:`organizations`, :mod:`members`,
-  :mod:`api_keys` — request/response models per §14 endpoint group.
+  :mod:`api_keys` — request/response models per API contract endpoint group.
 - :mod:`app.api.schemas.manifest` — the frozen endpoint manifest
   (``API_V1_PREFIX``, ``EndpointSpec``, ``ENDPOINTS``, ``endpoint_for``)
   declaring method, path, models, success status, pagination usage, and
-  path-parameter identity types for every §14 route.
+  path-parameter identity types for every API contract route.
 
-No routers or handlers live here; endpoint behavior is owner-phase work
-(Phase 01 non-goal).
-"""
+No routers or handlers live here; endpoint behavior is owner-capability work
+(initial non-goal).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from app.api.schemas.admin import (
     AdminMember,
@@ -41,6 +42,8 @@ from app.api.schemas.organizations import (
     OrganizationCreateRequest,
     OrganizationRenameRequest,
     OrganizationResponse,
+    OrganizationSlugAvailabilityQuery,
+    OrganizationSlugAvailabilityResponse,
 )
 
 __all__ = [
@@ -63,6 +66,8 @@ __all__ = [
     "OrganizationCreateRequest",
     "OrganizationRenameRequest",
     "OrganizationResponse",
+    "OrganizationSlugAvailabilityQuery",
+    "OrganizationSlugAvailabilityResponse",
     "Page",
     "PageParams",
     "endpoint_for",

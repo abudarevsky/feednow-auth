@@ -1,56 +1,6 @@
-"""Domain-oriented storage contract (Phase 02, spec §11/§12).
+"""Domain-oriented storage protocol and error vocabulary. The 28 operations use domain entities and typed results; adapter details remain behind this boundary.
 
-This module is the *only* storage surface application code (Phases 03, 05, 06)
-may depend on. It declares the 19 §11/§12 operations plus the four additive
-Phase 11 login-state/session operations plus the additive Phase 12
-``list_users_by_email`` exact-lookup plus the additive Phase 13
-``transition_application_role`` atomic role transition (25 total) as a
-:class:`typing.Protocol` plus the domain error vocabulary adapters raise.
-
-Contract-wide rules (pinned by the Phase 02 breakdown; adapters must not
-reinterpret them):
-
-- **Synchronous protocol.** Spec §11's example and both target adapters
-  (stdlib ``sqlite3``, ``boto3``) are synchronous, and FastAPI runs sync calls
-  through its threadpool. ``Storage`` methods are plain ``def``; async would be
-  an invented constraint.
-- **Domain types only.** Every signature uses :mod:`app.models` types plus the
-  :class:`ProvisionedUser`/:class:`ProvisionedOrganization` result bundles
-  below. No SQL/SQLite/DynamoDB-specific
-  value may cross this boundary: no rows, no ``LastEvaluatedKey``, no
-  ``ConditionalCheckFailedException``, no sessions, no pagination tokens with
-  interpretable content, and no driver exceptions (spec §11 leak examples;
-  acceptance criterion 1). Adapters translate driver errors into the classes
-  below; HTTP mapping (404/409) is Phase 04+ work in ``app/api``, untouched by
-  this phase.
-- **Storage never mints IDs or timestamps.** Every write receives a fully
-  formed domain entity: ``usr_``/``org_``/``key_``/``extid_``/``mem_``/``aud_``
-  ids and ``created_at``/``updated_at`` are caller-populated (generation
-  strategies are Phase 03/05 work; a storage-side generator would become the
-  de facto entropy contract). ``revoke_api_key`` likewise takes ``revoked_at``
-  from the caller (:func:`app.models.timestamps.utc_now` is the clock source).
-- **Referential integrity.** Child rows with unknown parents
-  (identity→user; membership→organization+user; api_key→organization+creator;
-  audit→organization) raise :class:`ReferenceNotFoundError`. DynamoDB has no
-  foreign keys, so this docstring is the obligation for Phase 06 to replicate
-  the checks inside its conditional writes; conformance pins the observable
-  behavior, not the mechanism.
-- **Primary-key collisions are domain conflicts.** A ``create_*``/``append_*``
-  call may receive an already-persisted record id; that violation surfaces as
-  :class:`DuplicateEntityError` with ``kind="entity_id"``, **never** a raw
-  driver error. The five domain-uniqueness kinds below do not express it.
-- **Tenant normalization.** ``provider_tenant=None`` participates in the
-  external-identity uniqueness tuple as a normalized empty string and reads
-  back as ``None``; the mapping is lossless because
-  :data:`~app.models.external_identity.ProviderTenant` pins ``min_length=1``.
-  Adapters must apply it so NULL cannot smuggle duplicate identities past a
-  ``UNIQUE`` index (SQLite treats NULLs as distinct).
-- **Corrupt stored values fail loudly.** Row→domain reconstruction goes
-  through ``model_validate``, so a bad enum string or ID prefix raises rather
-  than being silently coerced (documented tripwire).
-- **No read/list surface for audit events this phase.** Audit is append-only
-  by contract; listing/querying is deferred to Phase 08.
-"""
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -67,7 +17,7 @@ from app.models.enums import ApplicationRole, IdentityProvider
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
-from app.models.organization import Organization
+from app.models.organization import Organization, OrganizationSlug
 from app.models.pagination import Page, PageParams
 from app.models.session import AppSession, OAuthLoginState
 from app.models.timestamps import UtcDatetime
@@ -94,21 +44,21 @@ class EntityNotFoundError(StorageError):
 
     Raised by every ``get_*``/``revoke_api_key`` miss and by
     :meth:`Storage.get_user_by_external_identity` — an identity lookup miss is
-    *not* a ``None`` return; raising is Phase 03's "needs provisioning" signal.
-    Whether HTTP answers 404 or 204 is Phase 04+ mapping work.
+    *not* a ``None`` return; raising is identity implementation "needs provisioning" signal.
+    Whether HTTP answers 404 or 204 is organization+ mapping work.
     """
 
 
 class DuplicateEntityKind(StrEnum):
-    """Stable discriminator for :class:`DuplicateEntityError` (spec §4/§8).
+    """Stable discriminator for :class:`DuplicateEntityError` (domain model contract/credential contract).
 
     Additive vocabulary: renaming or removing a value is a contract change
-    requiring a spec revision. ``entity_id`` covers PRIMARY KEY (``id``)
+    requiring a contract revision. ``entity_id`` covers PRIMARY KEY (``id``)
     collisions on any stored record; the remaining values name the
     domain-uniqueness constraints (external-identity tuple, membership pair,
     organization slug, user email, ``api_keys.key_id`` credential segment).
     ``USER_EMAIL`` is retained per this enum's own frozen additive-vocabulary
-    rule but is **never raised** from Phase 12 on: shadow registration made
+    rule but is **never raised** from application-role on: shadow registration made
     equal emails valid separate users, so email is no longer a uniqueness
     constraint and no adapter may translate a violation into this kind.
     """
@@ -141,15 +91,15 @@ class DuplicateExternalIdentityError(DuplicateEntityError):
     """Concurrent-provisioning signal raised by :meth:`Storage.provision_user`.
 
     The external-identity tuple ``(provider, provider_subject,
-    provider_tenant)`` is the **sole** race/convergence key (Phase 12): in
-    spec §6's concurrent-first-login race both attempts carry the same
+    provider_tenant)`` is the **sole** race/convergence key (application-role): in
+    identity contract's concurrent-first-login race both attempts carry the same
     tuple, and the loser's UNIQUE violation on it surfaces as this error
     (kind is pinned to ``external_identity``). Email is no longer part of
     the race story — two attempts sharing an address but carrying distinct
     identity tuples are two legitimate separate users, never a conflict.
 
     ``existing_user_id`` is the winner's ``usr_`` identity when the adapter can
-    resolve it after rolling back, else ``None`` — so Phase 03 converges
+    resolve it after rolling back, else ``None`` — so identity converges
     without a second query. Every failure path is fully rolled back.
     """
 
@@ -184,12 +134,12 @@ class InvalidCursorError(StorageError):
 
 
 class LastActiveAdministratorError(StorageError):
-    """Additive Phase 13 refusal raised by
+    """Additive admin refusal raised by
     :meth:`Storage.transition_application_role`.
 
     A demotion ``ADMIN → USER`` whose target is ``ACTIVE`` is refused when no
     **other** ``ACTIVE`` admin user exists: the system must never be left
-    without an active application administrator (spec 13 required
+    without an active application administrator (contract 13 required
     behavior 3). The refusal is fully rolled back — the target keeps
     ``ADMIN``, no timestamp moves, and no audit row is written. A demotion of
     a ``DISABLED`` admin never raises it (the active-admin count cannot
@@ -210,7 +160,7 @@ class ProvisionedUser(BaseModel):
     objects *unchanged*. Storage mints nothing and does not re-read what it
     wrote — there is no read-back, no id/timestamp regeneration, and no
     adapter row leakage. Persistence is proven by the conformance suite's read
-    cases and, for audit rows, by the duplicate-append proof; Phase 06 must
+    cases and, for audit rows, by the duplicate-append proof; DynamoDB must
     not add reads to honor this shape.
     """
 
@@ -230,7 +180,7 @@ class ProvisionedOrganization(BaseModel):
     — the bundle carries the caller-supplied domain objects *unchanged*;
     storage mints nothing and does not re-read what it wrote. Persistence is
     proven by the conformance suite's read cases and, for audit rows, by the
-    duplicate-append proof; Phase 06 must not add reads to honor this shape.
+    duplicate-append proof; DynamoDB must not add reads to honor this shape.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -284,7 +234,7 @@ class RoleTransition:
 
 @runtime_checkable
 class Storage(Protocol):
-    """Domain-oriented storage operations (spec §11/§12).
+    """Domain-oriented storage operations (storage contract/storage contract).
 
     Implementations are adapters (``app.storage.sqlite``, later
     ``app.storage.dynamodb``); application code is typed against this Protocol
@@ -302,7 +252,7 @@ class Storage(Protocol):
     def create_user(self, user: User) -> User:
         """Persist a new user.
 
-        Email is **not** a uniqueness constraint from Phase 12 on: two
+        Email is **not** a uniqueness constraint from application-role on: two
         distinct ``usr_`` identities may carry the same address (shadow
         registration), so this operation never raises a ``user_email``
         conflict.
@@ -326,15 +276,15 @@ class Storage(Protocol):
         ...
 
     def list_users_by_email(self, email: str) -> list[User]:
-        """Exact-match lookup of every user that carries ``email`` (Phase 12).
+        """Exact-match lookup of every user that carries ``email`` (application-role).
 
         Email is a non-unique exact-lookup field, so this returns a list and
         the consumer must handle zero/one/many results explicitly rather than
-        guessing (spec 12 invariant 5). Results are ordered by
+        guessing (contract 12 invariant 5). Results are ordered by
         ``(created_at, id)`` ascending — the same deterministic key the
         paginated lists use, with ``id`` the tiebreaker. An unknown address
         returns an empty list and **never** raises
-        :class:`EntityNotFoundError` (this is a lookup, not the §12 resolve
+        :class:`EntityNotFoundError` (this is a lookup, not the storage contract resolve
         signal). There is deliberately no pagination cursor: this is a
         documented **bounded** domain operation serving the provisioning and
         administration resolution rules, not a generic adapter query API.
@@ -372,14 +322,14 @@ class Storage(Protocol):
     ) -> User:
         """Resolve a provider identity to the internal :class:`User`.
 
-        **This method *is* spec §12's ``resolve_external_identity``** — one
-        operation, §11's name; there is no *separate* ``resolve_external_identity`` method
-        on this protocol (the naming mismatch is a spec-revision proposal).
+        **This method *is* storage contract's ``resolve_external_identity``** — one
+        operation, storage contract's name; there is no *separate* ``resolve_external_identity`` method
+        on this protocol (the naming mismatch is a contract-revision proposal).
 
         ``provider_subject`` is a provider-side string (Cognito ``sub``,
         Shopify shop ID) and is never coerced into, or matched against, a
         ``usr_`` application identity. A miss raises and never returns ``None``
-        — that exception is Phase 03's "needs provisioning" signal.
+        — that exception is identity implementation "needs provisioning" signal.
 
         Raises:
             EntityNotFoundError: when no identity matches the tuple.
@@ -403,9 +353,9 @@ class Storage(Protocol):
         audit_event: AuditEvent,
     ) -> RoleTransition:
         """Atomically CAS the user's global ``application_role`` and append
-        the caller-formed ``audit_event`` in one transaction (Phase 13).
+        the caller-formed ``audit_event`` in one transaction (admin).
 
-        Pinned semantics (this docstring **is** the spec-13 storage-transition
+        Pinned semantics (this docstring **is** the contract-13 storage-transition
         contract; adapters must not reinterpret them):
 
         - Unknown user → :class:`EntityNotFoundError`.
@@ -439,7 +389,7 @@ class Storage(Protocol):
           ``organization_id=None`` → no parent check (the contract keeps
           org-less audits legal).
 
-        **Phase 13 replication obligation:** DynamoDB must enforce the same
+        **admin replication obligation:** DynamoDB must enforce the same
         all-or-nothing transition, the same no-op/refusal/guard semantics, and
         the same parent check inside its conditional transaction; the
         conformance suite pins the observable behavior, not the mechanism.
@@ -476,7 +426,21 @@ class Storage(Protocol):
         ...
 
     def update_organization(self, organization: Organization) -> Organization:
-        """Persist mutable organization name/status/timestamp fields."""
+        """Persist mutable organization name/slug/status/timestamp fields.
+
+        Raises:
+            DuplicateEntityError: ``kind="organization_slug"`` if the new
+                slug belongs to another organization.
+            EntityNotFoundError: if the organization does not exist.
+        """
+        ...
+
+    def is_organization_slug_available(
+        self,
+        slug: OrganizationSlug,
+        excluding_organization_id: OrganizationId | None = None,
+    ) -> bool:
+        """Whether ``slug`` is free globally, optionally ignoring one organization."""
         ...
 
     def list_user_organizations(
@@ -488,7 +452,7 @@ class Storage(Protocol):
 
         Domain operation, not a join helper: returns only organizations where
         the user holds an **active** membership — ``disabled`` is a suspension
-        and hides the organization (Phase 04 re-checks roles). Results are
+        and hides the organization (organization re-checks roles). Results are
         ordered by ``(created_at, id)`` ascending; ``id`` is the tiebreaker
         that makes keyset traversal deterministic.
 
@@ -543,7 +507,7 @@ class Storage(Protocol):
     def delete_membership(self, *, organization_id: OrganizationId, user_id: UserId) -> None:
         """Physically remove one ``(organization, user)`` membership.
 
-        Removal is a physical delete (Phase 01 pinned ``disabled`` as
+        Removal is a physical delete (initial pinned ``disabled`` as
         suspension, not removal). Idempotency is *not* provided: a second
         delete of the same pair raises.
 
@@ -557,9 +521,9 @@ class Storage(Protocol):
     def create_api_key(self, api_key: ApiKey) -> ApiKey:
         """Persist a new API-key credential row.
 
-        The non-secret §8 ``key_id`` credential segment is unique. ``scopes``
+        The non-secret credential contract ``key_id`` credential segment is unique. ``scopes``
         round-trip exactly (order and duplicates preserved — normalization is
-        Phase 05 domain work). No plaintext secret exists on the model and none
+        API-key domain work). No plaintext secret exists on the model and none
         may be derived or logged here.
 
         Raises:
@@ -574,14 +538,14 @@ class Storage(Protocol):
     def get_api_key(self, api_key_id: ApiKeyId) -> ApiKey:
         """Load a key by its ``key_`` application identity.
 
-        Tenancy is deliberately **not** filtered here: the §8 verification path
+        Tenancy is deliberately **not** filtered here: the credential contract verification path
         must resolve the organization *from* the key, so the full row is
-        returned regardless of organization and enforcing the §14 org-scoped
-        route contract is the Phase 05 service's check of
+        returned regardless of organization and enforcing the API contract org-scoped
+        route contract is the API-key service's check of
         ``api_key.organization_id``, not a storage filter.
 
         ``api_key_id`` is the :class:`~app.models.ids.ApiKeyId` application
-        identity — not the §8 credential segment (see
+        identity — not the API-key credential segment (see
         :meth:`get_api_key_by_key_id`; the collision is also flagged in
         :mod:`app.api.schemas.manifest`).
 
@@ -591,14 +555,14 @@ class Storage(Protocol):
         ...
 
     def get_api_key_by_key_id(self, key_id: KeyId) -> ApiKey:
-        """Load a key by the §8 non-secret ``<key-id>`` credential segment.
+        """Load a key by the credential contract non-secret ``<key-id>`` credential segment.
 
         Point lookup on the unique segment inside ``fn_live_<key-id>_<secret>``
         — keyed by :data:`~app.models.api_key.KeyId`, a different type from the
         ``key_`` :class:`~app.models.ids.ApiKeyId` used by
         :meth:`get_api_key`. Returns stored truth: after revocation the row
         still resolves with ``status=revoked`` and ``revoked_at`` set, because
-        status is data and rejection is Phase 05 verification work.
+        status is data and rejection is API-key verification work.
 
         Raises:
             EntityNotFoundError: when no key carries that segment.
@@ -641,11 +605,11 @@ class Storage(Protocol):
         """Append one fully formed audit event (standalone write path).
 
         Returns ``None`` — storage mints nothing and re-reads nothing, so there
-        is nothing to return. Phase 03-05 services use this for events outside
+        is nothing to return. identity-05 services use this for events outside
         any compound operation (``membership.removed``, ``api_key.revoked``,
         ...); only provisioning batches go through :meth:`provision_user`.
         ``metadata`` round-trips exactly as JSON. There is no audit read or
-        list surface in this phase.
+        list surface in this capability.
 
         Raises:
             DuplicateEntityError: ``kind="entity_id"`` when the ``aud_`` record
@@ -667,16 +631,16 @@ class Storage(Protocol):
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
-        audit events in one transaction (spec §6/§12).
+        audit events in one transaction (identity contract/storage contract).
 
         ``audit_events`` is **required** keyword-only: provisioning events are
-        part of the atomic unit (spec §16) and no default may let a caller
+        part of the atomic unit (audit contract) and no default may let a caller
         silently skip them. The returned :class:`ProvisionedUser` echoes the
         caller-supplied objects unchanged — nothing is minted or re-read.
 
         Duplicate/concurrency semantics: the identity tuple is the **sole**
-        race/convergence key (Phase 12). A UNIQUE violation on it is
-        interpreted as spec §6's concurrent first-login race (both attempts
+        race/convergence key (application-role). A UNIQUE violation on it is
+        interpreted as identity contract's concurrent first-login race (both attempts
         carry the same identity tuple) and raises
         :class:`DuplicateExternalIdentityError` after a full rollback, with
         ``existing_user_id`` resolved by the adapter when it can and ``None``
@@ -707,8 +671,8 @@ class Storage(Protocol):
         audit_events: Sequence[AuditEvent],
     ) -> ProvisionedOrganization:
         """Atomically write organization + membership + audit events in one
-        transaction (Phase 04 breakdown decision 2; a spec §12 compound —
-        the §12 addition is an escalated spec-revision proposal).
+        transaction (organization design notes design choice 2; a storage contract compound —
+        the storage contract addition is an escalated contract-revision proposal).
 
         Organization creation must not be two sequential writes: the owner
         membership has no repair path (no organization update/delete exists),
@@ -721,7 +685,7 @@ class Storage(Protocol):
 
         ``audit_events`` is **required** keyword-only (same discipline as
         :meth:`provision_user`): creation events are part of the atomic unit
-        (spec §16) and no default may let a caller silently skip them. The
+        (audit contract) and no default may let a caller silently skip them. The
         returned :class:`ProvisionedOrganization` echoes the caller-supplied
         objects unchanged — storage mints nothing and does not re-read.
 
@@ -734,7 +698,7 @@ class Storage(Protocol):
         :class:`ReferenceNotFoundError` (the organization and audit FKs are
         satisfied inside the batch).
 
-        **Phase 06 replication obligation:** DynamoDB must enforce the same
+        **DynamoDB replication obligation:** DynamoDB must enforce the same
         all-or-nothing batch, the same conflict kinds, and the same reference
         checks inside its conditional writes; the conformance suite pins the
         observable behavior, not the mechanism.

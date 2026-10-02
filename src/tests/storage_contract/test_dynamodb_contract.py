@@ -1,10 +1,10 @@
-"""DynamoDB Local conformance entry point for the Phase 02 storage suite (task 8).
+"""DynamoDB Local conformance entry point for the storage storage suite (implementation).
 
 This module is the documented replication of ``test_sqlite_contract.py`` for
-the second adapter (Phase 06, AC 2): it provides the ``storage`` fixture
+the second adapter (DynamoDB, AC 2): it provides the ``storage`` fixture
 required by ``suite.py``'s fixture contract — an initialized adapter with all
 tables empty, **per test** — by creating the seven adapter tables under a
-fresh random prefix (harness decision 8) and deleting them on teardown, and
+fresh random prefix (harness design choice 8) and deleting them on teardown, and
 it re-exports every suite case unchanged so pytest collects the same 82
 adapter-neutral behaviors that SQLite runs. ``suite.py`` is consumed as a
 frozen oracle: if a case fails here, the **adapter** changes (the entry-local
@@ -19,10 +19,11 @@ proofs below need no server and run in every configuration.
 
 The entry-local proofs pin this file's coupling rules: the shared suite file
 is byte-identical to the one the SQLite entry runs (sha256 against the
-Phase 06 baseline), the fixture really starts empty, and every suite case
+DynamoDB baseline), the fixture really starts empty, and every suite case
 couples only to the ``storage`` fixture — no adapter-conditional test logic
 exists anywhere in the suite.
-"""
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 
@@ -64,7 +65,7 @@ SUITE_SHA256_AT_BASELINE = "9b37b815be86976062af9a2bfd792044fd27820dd0ec6f404802
 def storage() -> Iterator[Storage]:
     """Fresh initialized DynamoDB adapter with all seven tables empty (per test).
 
-    Harness decision 8: a new random table prefix per test, created empty and
+    Harness design choice 8: a new random table prefix per test, created empty and
     deleted on teardown (no truncation races). The adapter gets its **own**
     boto3 resource so ``close()`` on teardown cannot take the harness client
     that deletes the tables with it. The isinstance check is the

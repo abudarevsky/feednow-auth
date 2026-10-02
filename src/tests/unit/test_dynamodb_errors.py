@@ -1,9 +1,9 @@
-"""Unit proofs for DynamoDB error translation (Phase 06 task 2).
+"""Unit proofs for DynamoDB error translation (DynamoDB).
 
 The classifier is a **pure function over parsed reason dicts**, so every
 positional failure mode is exercised with synthetic payloads — no Docker, no
 live calls, and no botocore object beyond a ``ClientError`` factory. Proven
-here (breakdown decision 3):
+here (design notes design choice 3):
 
 - The first ``ConditionalCheckFailed`` in submission order decides the error
   (multi-failure priority), mapped through the positionally-aligned descriptor.
@@ -16,7 +16,8 @@ here (breakdown decision 3):
   ``StorageError``.
 - Throughput faults and unknown codes become the base ``StorageError``.
 - No translated message ever contains a table name, region, or request id.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

@@ -1,13 +1,13 @@
-"""Tests for the Phase 05 task-3 API-key verification seam (:mod:`app.auth.api_key_auth`).
+"""Tests for the API-key implementation API-key verification seam (:mod:`app.auth.api_key_auth`).
 
-Covers the task-3 Verify line (breakdown decision 4/5): the fixed-order
-verification pipeline, the one uniform authentication failure, and the §10
+Covers the implementation Verify line (design notes design choice 4/5): the fixed-order
+verification pipeline, the one uniform authentication failure, and the authorization-context contract
 API-key context. Two storage backings are exercised —
 
 * a recording :class:`StubKeyStorage` for the full failure **matrix** and the
   call-count proofs (no database, deterministic clock), and
-* the **real Phase 02 SQLite adapter** for a round-trip of a genuinely stored
-  credential (seeded directly, since no create API path exists yet — decision 12).
+* the **real storage SQLite adapter** for a round-trip of a genuinely stored
+  credential (seeded directly, since no create API path exists yet — design choice 12).
 
 The acceptance-critical pins proven here:
 
@@ -19,14 +19,15 @@ The acceptance-critical pins proven here:
 - the unknown-key-id branch performs the **dummy constant-time comparison**
   exactly once and never the real one, while every found-key branch performs
   the real comparison exactly once and never the dummy (timing-axis
-  equalization, decision 4);
+  equalization, design choice 4);
 - a malformed literal is rejected **before** the pepper source or storage is
   touched, and a non-``EntityNotFoundError`` ``StorageError`` propagates
-  untranslated (decision 11 → 500, never a misleading 401);
+  untranslated (design choice 11 → 500, never a misleading 401);
 - the success context is ``actor_type="api_key"``, ``actor_id=`` the ``key_``
   application identity, ``roles == []`` (no human escalation), and the stored
   scopes; ``key_has_scope`` is exact-match only (no wildcards/hierarchy).
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -113,7 +114,7 @@ def _stored_key(
 
 
 class StubKeyStorage:
-    """Minimal recording ``Storage`` stub exposing only the §8 point lookup.
+    """Minimal recording ``Storage`` stub exposing only the credential contract point lookup.
 
     Records every ``get_api_key_by_key_id`` call so tests can prove malformed
     literals never reach storage and that the unknown-key branch runs the
@@ -509,7 +510,7 @@ def test_malformed_literal_never_resolves_pepper() -> None:
 
 
 def test_non_notfound_storage_error_propagates_untranslated() -> None:
-    """Decision 11: a backend outage is not a bad credential → never a 401."""
+    """design choice 11: a backend outage is not a bad credential → never a 401."""
     storage = StubKeyStorage()
     storage.get_error = StorageError("backend down")
 

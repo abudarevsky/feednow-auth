@@ -1,26 +1,26 @@
-"""HTTP auth dependency chain for bearer-authenticated routes (Phase 03 task 5).
+"""HTTP auth dependency chain for bearer-authenticated routes (identity).
 
-The published Phase 03 chain, one seam per stage::
+The published identity chain, one seam per stage::
 
     Authorization header -> AccessTokenVerifier.verify -> resolve_or_provision
                          -> ResolvedIdentity(user, context)
 
 :func:`build_current_user` closes over the injected :class:`Storage` and
-:class:`AccessTokenVerifier` (no import-time environment reads; the Phase 01
+:class:`AccessTokenVerifier` (no import-time environment reads; the initial
 boot contract) and returns a FastAPI dependency yielding the resolved
-:class:`~app.services.identity.ResolvedIdentity` — the same object Phase 05's
+:class:`~app.services.identity.ResolvedIdentity` — the same object API-key implementation
 API-key path will produce from the other verifier seam.
 
-Phase 05 task 5 adds the sibling :func:`build_current_principal`, which
-**dispatches on the bearer literal's prefix** (breakdown decision 6):
-``fn_live_``/``fn_test_`` → the task-3 API-key verification seam (failure →
-the one uniform 401), anything else → the unchanged Phase 03 chain above.
+API-key adds the sibling :func:`build_current_principal`, which
+**dispatches on the bearer literal's prefix** (design notes design choice 6):
+``fn_live_``/``fn_test_`` → the implementation API-key verification seam (failure →
+the one uniform 401), anything else → the unchanged identity chain above.
 Prefix collision is impossible: a JWS compact token always starts ``eyJ``
 (base64url of ``{"``), never an ``fn_`` credential prefix, so the two
 verifiers can never receive each other's input.
 
-Failure mapping (breakdown decision: HTTP mapping is task 5's job, joined
-here and rendered through the frozen Phase 01 envelope by
+Failure mapping (design notes decision: HTTP mapping is implementation's job, joined
+here and rendered through the frozen initial envelope by
 :func:`app.api.errors.http_exception_handler`):
 
 - missing/malformed bearer header, any :class:`~app.auth.errors.
@@ -28,30 +28,31 @@ here and rendered through the frozen Phase 01 envelope by
   → **401** ``unauthenticated``;
 - :class:`~app.auth.errors.TokenProviderUnavailableError` → **503**
   ``internal_error`` (a provider outage is deliberately *not* a 401; the
-  frozen envelope maps 503 to ``internal_error`` — no spec-revision code is
+  frozen envelope maps 503 to ``internal_error`` — no contract-revision code is
   invented here);
 - :class:`~app.services.identity.DisabledUserError` /
   :class:`~app.services.identity.NoActiveOrganizationError` → **403**;
 - :class:`~app.services.identity.ProvisioningConflictError` → **409**;
 - :class:`~app.auth.api_key_auth.ApiKeyAuthenticationError` (API-key branch
   only) → **401** ``unauthenticated`` with the single fixed credential-free
-  message (decision 4); any other :class:`~app.storage.contract.StorageError`
-  propagates untranslated → 500 (decision 11).
+  message (design choice 4); any other :class:`~app.storage.contract.StorageError`
+  propagates untranslated → 500 (design choice 11).
 
 Messages are the exceptions' fixed, safe reasons — never token, key, or
 email material (AGENTS.md). Verification failures raise *before* any storage
 touch, which is what makes the acceptance proof "rejected without storage
 mutation" hold structurally, not just by test.
 
-Phase 11 (task 4) adds the optional ``profile_source`` seam to both
+session (implementation) adds the optional ``profile_source`` seam to both
 factories: when a :class:`~app.auth.cognito.ProfileSource` is configured, the
 **human** branch closes the raw bearer token and the verified ``claims.sub``
 into a ``profile_provider`` thunk handed to :func:`resolve_or_provision`, so
 first-login provisioning fetches the authoritative user-info profile. The
 thunk runs only on the identity-tuple miss path (a known user triggers zero
 user-info requests), and the API-key branch never touches it. With no source
-configured the chain behaves exactly as before Phase 11.
-"""
+configured the chain behaves exactly as before session.
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -173,14 +174,14 @@ def build_current_user(
     """Return the ``ResolvedIdentity`` dependency bound to ``storage``/``verifier``.
 
     The returned callable is the whole chain: bearer parse → verify →
-    resolve-or-provision (with an optional Phase 11 ``profile_source`` for
+    resolve-or-provision (with an optional session ``profile_source`` for
     first-login provisioning) → domain-error mapping. It is a pure wiring
     factory (no I/O at construction), so routers built from it stay
     import-safe.
     """
 
     def current_user(request: Request) -> ResolvedIdentity:
-        """Execute the Phase 03 authentication chain for one request."""
+        """Execute the identity authentication chain for one request."""
         if session_manager is not None and not request.headers.get("authorization"):
             session_id = read_session_cookie(request)
             user_id = session_manager.verify(session_id) if session_id else None
@@ -254,23 +255,23 @@ def build_current_principal(
 ) -> Callable[..., Principal]:
     """Return the ``Principal`` dependency: prefix-dispatched human-or-key auth.
 
-    The dispatch is on the **literal prefix** only (decision 6): a bearer
+    The dispatch is on the **literal prefix** only (design choice 6): a bearer
     token starting ``fn_live_``/``fn_test_`` goes to the API-key verification
     seam (:func:`~app.auth.api_key_auth.verify_api_key`); everything else
-    goes to the unchanged Phase 03 chain, so a JWT-looking token is never
+    goes to the unchanged identity chain, so a JWT-looking token is never
     parsed as a credential and an ``fn_`` literal is never sent to the JWT
     verifier. Both branches wrap their outcome in the same
-    :class:`~app.auth.principal.Principal` (human path: the Phase 03
+    :class:`~app.auth.principal.Principal` (human path: the identity
     ``ResolvedIdentity`` pair verbatim; key path: the verified row plus its
-    §10 context).
+    authorization-context contract context).
 
     Failure mapping matches the published seams: every API-key
     authentication failure is the one uniform **401** carrying
     :data:`~app.auth.api_key_auth.API_KEY_AUTHENTICATION_MESSAGE` (no branch
-    message, no credential fragment — decision 4); human-path and header
-    failures keep the Phase 03 mapping exactly; any other ``StorageError``
-    on the key branch propagates untranslated → 500 (decision 11). The
-    human branch alone consumes ``profile_source`` (Phase 11 task 4); the
+    message, no credential fragment — design choice 4); human-path and header
+    failures keep the identity mapping exactly; any other ``StorageError``
+    on the key branch propagates untranslated → 500 (design choice 11). The
+    human branch alone consumes ``profile_source`` (session); the
     API-key branch never fetches a profile. Pure wiring factory, like
     :func:`build_current_user`.
     """

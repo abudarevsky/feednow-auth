@@ -1,26 +1,27 @@
-"""Token-error hierarchy owned by Phase 03 (the auth boundary's error contract).
+"""Token-error hierarchy owned by identity (the auth boundary's error contract).
 
-Three exceptions cover every failure the JWKS source and (from task 3) the
+Three exceptions cover every failure the JWKS source and (from implementation) the
 access-token verifier can raise:
 
 - :class:`TokenValidationError` is the base for **claim/signature failures** —
   a token that the service will never accept. Producers pass a fixed, safe
   ``reason`` string; reasons must never embed token material, keys, or raw
-  provider payloads (AGENTS.md no-secrets rule; task 3 pins the reason set).
+  provider payloads (AGENTS.md no-secrets rule; implementation pins the reason set).
 - :class:`UnknownKeyIdError` is the specific claim-side failure "no signing
   key matched the (issuer, kid) pair". It subclasses ``TokenValidationError``
   so callers that only care about "this token is invalid" catch the base.
 - :class:`TokenProviderUnavailableError` covers the **infrastructure** case:
   the provider's key set could not be fetched. It is deliberately *not* a
   ``TokenValidationError`` subclass — a provider outage is not the caller's
-  bad token, and task 5 maps ``TokenValidationError`` → HTTP 401 while
+  bad token, and implementation maps ``TokenValidationError`` → HTTP 401 while
   ``TokenProviderUnavailableError`` → HTTP 503. Sharing the base would let a
   naive ``except TokenValidationError`` (401) handler swallow outages unless
   catch order were pinned; the sibling shape keeps that mapping order-free.
 
-HTTP mapping itself lives in ``app/api`` (task 5), exactly like the Phase 01
+HTTP mapping itself lives in ``app/api`` (implementation), exactly like the initial
 split between ``app.models.errors`` (codes) and ``app.api.errors`` (status).
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ class UnknownKeyIdError(TokenValidationError):
 class TokenProviderUnavailableError(Exception):
     """The identity provider's key set could not be fetched (outage, not a bad token).
 
-    Task 5 maps this to HTTP 503; see the module docstring for why it is a
+    implementation maps this to HTTP 503; see the module docstring for why it is a
     sibling of :class:`TokenValidationError` rather than a subclass.
     """
 

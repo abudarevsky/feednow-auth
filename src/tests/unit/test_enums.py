@@ -1,4 +1,6 @@
-"""Unit tests for pinned domain enums (Phase 01 task 3)."""
+"""Unit tests for pinned domain enums (initial).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

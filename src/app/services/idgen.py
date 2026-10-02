@@ -1,27 +1,8 @@
-"""Application ID minting for FeedNow internal identifiers (Phase 03 task 1,
-extended by Phase 05 task 1).
+"""Mint typed FeedNow application and record identifiers.
 
-This module discharges **Phase 03's half of the Phase 01 ID-generation
-deferral**. Phase 01 shipped prefix-validating value types only and explicitly
-postponed concrete generation strategies: "Concrete generation strategies
-(entropy source, ULID-style ``key_id`` per spec §8) belong to owner phases
-03/05" (:mod:`app.models.ids`). With Phase 05 task 1 the deferral is now
-fully discharged, one half per owner phase:
-
-- Owned here (Phase 03): ``usr_``, ``org_``, ``extid_``, ``mem_``, ``aud_``.
-- Owned here since **Phase 05 task 1**: the ``key_`` application identity
-  (:func:`new_api_key_id`) — the same ``prefix + "_" + uuid4().hex``
-  strategy as every other application ID.
-- **Not owned here:** the §8 ``key_id`` credential segment inside
-  ``fn_live_<key-id>_<secret>`` lives in :mod:`app.auth.credentials`, not in
-  this module, so credential entropy (ULID/CSPRNG) never masquerades as
-  application-ID entropy.
-
-Strategy (per the Phase 03 breakdown, planner decision "ID generation"):
-``prefix + "_" + uuid.uuid4().hex`` — 32 lowercase hex characters, which
-validate against :data:`app.models.ids.ID_SUFFIX_PATTERN` without widening the
-frozen Phase 01 shape rules. ``uuid.uuid4()`` is backed by :mod:`secrets`, so
-no new entropy dependency is introduced.
+Application IDs use their model-defined prefix and a UUID4 hexadecimal suffix.
+The separate ``key_id`` API-key credential segment has a ULID/CSPRNG generator
+in ``app.auth.credentials``. See ``docs/contracts.md``.
 
 Boundary rules preserved here:
 
@@ -33,8 +14,9 @@ Boundary rules preserved here:
   :mod:`app.models.ids`, so prefix/shape validation stays the single source of
   truth in the model layer and this module cannot mint an invalid ID silently.
 - Storage adapters mint nothing; callers build a batch with these functions and
-  pass complete entities down (Phase 02 contract).
-"""
+  pass complete entities down (storage contract).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -55,7 +37,7 @@ from app.models.ids import (
 def _mint[IdClass: (ApplicationId, RecordId)](id_class: type[IdClass]) -> IdClass:
     """Build ``{prefix}_{uuid4 hex}`` and return it as ``id_class``.
 
-    Construction goes through the value type itself, so the Phase 01 prefix and
+    Construction goes through the value type itself, so the initial prefix and
     shape validation always applies.
     """
     return id_class(f"{id_class.prefix}_{uuid.uuid4().hex}")
@@ -89,9 +71,9 @@ def new_audit_event_id() -> AuditEventId:
 def new_api_key_id() -> ApiKeyId:
     """Mint a new internal FeedNow API-key identity (``key_``).
 
-    Phase 05 task 1 discharges this half of the Phase 01 deferral. It is the
+    API-key discharges this half of the initial deferral. It is the
     **application identity** of the credential row — deliberately distinct
-    from the §8 ``key_id`` credential segment inside the literal, which is
+    from the credential contract ``key_id`` credential segment inside the literal, which is
     minted by :func:`app.auth.credentials.generate_key_id`.
     """
     return _mint(ApiKeyId)

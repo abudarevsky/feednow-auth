@@ -1,4 +1,4 @@
-"""Login-state and application-session records (Phase 11, spec §session boundary).
+"""Login-state and application-session records (session, contract §session boundary).
 
 Two frozen, provider-neutral records back the authorization-code session flow:
 
@@ -24,7 +24,8 @@ Deliberate boundaries:
 - Id length floors (16) sit well below what the issuers mint
   (``secrets.token_urlsafe(32)`` → 43 chars) so a truncated or forged
   caller-supplied id fails validation before it ever reaches storage.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -71,7 +72,7 @@ class AppSession(BaseModel):
     """One issued application session mapping to a ``usr_`` identity.
 
     A read at/past ``expires_at`` behaves as absent; revocation beyond
-    expiry is not part of this phase's contract.
+    expiry is not part of this capability's contract.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

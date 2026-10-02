@@ -1,4 +1,6 @@
-"""Unit tests for typed ID value objects (Phase 01 task 2)."""
+"""Unit tests for typed ID value objects (initial).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

@@ -1,24 +1,25 @@
-"""``GET /v1/me`` router (Phase 03 task 5; spec §14 "Current User").
+"""``GET /v1/me`` router (identity; API contract "Current User").
 
 :func:`build_me_router` is the documented mounting shape: a factory closing
 over the injected :class:`~app.storage.contract.Storage` and
 :class:`~app.auth.cognito.AccessTokenVerifier`, returning an
 :class:`~fastapi.APIRouter` to hand to ``create_app(routers=[...])`` — the
-Phase 01 boot contract (no import-time environment reads, no module-level
+initial boot contract (no import-time environment reads, no module-level
 singletons) stays intact.
 
 The route is registered **from the frozen manifest entry itself**
 (:func:`~app.api.schemas.manifest.endpoint_for`), so method, path, success
-status, and response model cannot drift from the §14 contract — Phase 12
+status, and response model cannot drift from the API contract — application-role
 extended the response schema (:class:`~app.api.schemas.me.MeResponse`) with
 ``application_role`` but left the frozen route entry untouched.
 
 The handler returns the caller's own :class:`~app.models.user.User` fields
 only: the resolved ``AuthorizationContext`` (organization, roles) exists for
 downstream routers, and provider material (``sub``, ``client_id``, tokens)
-never enters the response — the §4/§10 identity rule (AGENTS.md) is the
+never enters the response — the domain model contract/authorization-context contract identity rule (AGENTS.md) is the
 acceptance criterion this endpoint is named for.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 # No ``from __future__ import annotations`` here on purpose: the route
 # signature's ``Annotated[..., Depends(current_user)]`` references a closure
@@ -54,7 +55,7 @@ def build_me_router(
     The auth chain (bearer → verify → resolve_or_provision → domain-error
     mapping) lives in :func:`app.auth.dependencies.build_current_user`; this
     module only joins it to the manifest-pinned route and the response shape.
-    ``profile_source`` (Phase 11 task 4) is forwarded to the chain so a
+    ``profile_source`` (session) is forwarded to the chain so a
     first-login miss provisions from the verified user-info profile.
     """
     router = APIRouter(tags=["identity"])

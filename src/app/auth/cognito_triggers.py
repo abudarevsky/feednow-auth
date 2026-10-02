@@ -7,16 +7,16 @@ confirmation** (a signed-up user just confirmed their account). Cognito invokes
 one Lambda function bound to those triggers with the JSON event documented in
 the developer guide; this module parses, validates, and answers that event.
 
-Boundary (AGENTS.md / spec 12): a Cognito trigger establishes an *external*
+Boundary (AGENTS.md / contract 12): a Cognito trigger establishes an *external*
 identity only. It never creates, mutates, or looks up a FeedNow ``User`` —
 shadow registration stays where the verified-profile login flow put it
 (:func:`app.services.identity.resolve_or_provision`), so a sign-up without a
 first login still produces zero internal rows. Consequently this module
 imports **no** storage, service, or model types: it works on the raw event
 mapping with plain integer bounds mirroring the Cognito verifier's caps
-(``app.auth.cognito`` decision 4), and the email rule is the provisioning
+(``app.auth.cognito`` design choice 4), and the email rule is the provisioning
 gate's rule — present and bounded, never format-validated here (``User``
-docstring: format rules are owner-phase work).
+docstring: format rules are owner-capability work).
 
 Dispatch is by ``triggerSource`` (the event carries no trigger-name field):
 
@@ -48,7 +48,8 @@ Dispatch is by ``triggerSource`` (the event carries no trigger-name field):
 Secrecy rules (AGENTS.md): no logging import, no persistence, and every
 rejection carries one fixed module-level message that echoes no email,
 attribute, subject, or token material.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -206,8 +207,8 @@ def _require_registration_source(parsed: CognitoRegistrationEvent, *, prefix: st
 def _require_valid_registration_email(parsed: CognitoRegistrationEvent) -> None:
     """Enforce the pool-boundary email rule: present, string, bounded.
 
-    Deliberately *not* format validation (owner-phase rule, see module
-    docstring) and never a uniqueness claim (Phase 12: email is non-unique).
+    Deliberately *not* format validation (owner-capability rule, see module
+    docstring) and never a uniqueness claim (application-role: email is non-unique).
     """
     email = parsed.user_attributes.get("email")
     if not isinstance(email, str) or not email:

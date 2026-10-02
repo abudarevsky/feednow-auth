@@ -1,11 +1,12 @@
-"""Unit tests for the versioned API schemas (Phase 01 task 5).
+"""Unit tests for the versioned API schemas (initial).
 
-Covers the task-5 verify list: summary/list models have no secret or hash
+Covers the implementation verify list: summary/list models have no secret or hash
 fields (field-name introspection + ``extra="forbid"``), unknown response
 fields are forbidden, the key-creation request rejects invalid environment
-and invalid scope shapes, §15 payloads round-trip verbatim, and list
+and invalid scope shapes, key-creation contract payloads round-trip verbatim, and list
 endpoints return ``Page[...]`` with opaque cursors.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

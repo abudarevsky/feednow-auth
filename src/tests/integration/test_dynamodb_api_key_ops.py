@@ -1,24 +1,25 @@
-"""DynamoDB Local proofs for the API-keys operations, incl. the revoke CAS (task 5).
+"""DynamoDB Local proofs for the API-keys operations, incl. the revoke CAS (implementation).
 
 Marker-gated (``dynamodb_local``): every test here skips with an explicit reason
 unless ``FEEDNOW_DYNAMODB_LOCAL_ENDPOINT`` is set and reachable, so the default
 suite stays green without Docker (``docs/operations.md`` carries the run
 command).
 
-These are **direct adapter calls**, not the conformance suite (task 8 runs the
+These are **direct adapter calls**, not the conformance suite (implementation runs the
 shared 60 cases unchanged): the point is to pin the DynamoDB translation of the
-14 key behaviors on the real transactional path — the ``key_`` base put + §8
+14 key behaviors on the real transactional path — the ``key_`` base put + credential contract
 ``api_key_id`` segment constraint + organization/creator ``ConditionCheck``s in
-one ``TransactWriteItems`` (decision 3), the key-only constraint lookup behind
-``get_api_key_by_key_id`` (decision 2), the org-**un**filtered identity read the
-contract pins, native-L ``scopes`` round-trip (decision 6), the by-organization
-GSI keyset traversal, and decision 4's conditional-update CAS field-for-field
+one ``TransactWriteItems`` (design choice 3), the key-only constraint lookup behind
+``get_api_key_by_key_id`` (design choice 2), the org-**un**filtered identity read the
+contract pins, native-L ``scopes`` round-trip (design choice 6), the by-organization
+GSI keyset traversal, and design choice 4's conditional-update CAS field-for-field
 (only ``status``/``revoked_at`` written; stored-truth idempotency; absence is
 absence). Domain inputs come from the suite's own deterministic builders so the
 fixtures match the conformance cases exactly. Every failure path asserts the
 domain error *class*, the conflict *kind*, an echo-free message, and — by
 scanning the tables directly — that the rejected batch left no residue.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 

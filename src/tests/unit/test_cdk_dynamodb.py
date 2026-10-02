@@ -1,6 +1,6 @@
-"""Unit proofs for the Phase 07 CDK DynamoDB tables (task 2).
+"""Unit proofs for the AWS CDK DynamoDB tables (implementation).
 
-The stack must declare the seven Phase 06 ``SCHEMA`` tables verbatim:
+The stack must declare the seven DynamoDB ``SCHEMA`` tables verbatim:
 ``aws_cdk.assertions.Template`` finds exactly 7 ``AWS::DynamoDB::Table``
 per environment with the runtime schema's partition/sort keys and GSI
 names/key schemas (ALL projection), the physical names carry the
@@ -8,7 +8,8 @@ environment's ``table_prefix``, billing is ``PAY_PER_REQUEST`` everywhere
 with no drift, there is no customer-managed ``EncryptionKey``, removal is
 ``DESTROY`` for dev/staging and ``RETAIN`` for prod, and point-in-time
 recovery is enabled for prod only.
-"""
+
+Current behavior and invariants: ``docs/operations.md``."""
 
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ FeedNowAuthStack = stack_module.FeedNowAuthStack
 
 ENVIRONMENTS = ("dev", "staging", "prod")
 
-# Task 3 made COGNITO_CALLBACK_URLS a required synth input; the DynamoDB
+# Task 3 made FEEDNOW_COGNITO_CALLBACK_URLS a required synth input; the DynamoDB
 # proofs do not care about its value, only that the stack synthesizes.
 CALLBACK_URLS = ["https://app.example.invalid/oauth/callback"]
 
@@ -59,6 +60,9 @@ def _template(env_name: str) -> Template:
         f"FeedNowAuth-{env_name}",
         feednow_env=env_name,
         cognito_callback_urls=CALLBACK_URLS,
+        account_origin="https://account.example.invalid",
+        existing_user_pool_id=f"eu-north-1_{env_name}",
+        existing_client_id=f"{env_name}client",
         env=cdk.Environment(account="123456789012", region="eu-north-1"),
     )
     return Template.from_stack(stack)
@@ -137,6 +141,9 @@ def test_table_names_carry_the_env_prefix() -> None:
             f"FeedNowAuth-{env_name}",
             feednow_env=env_name,
             cognito_callback_urls=CALLBACK_URLS,
+            account_origin="https://account.example.invalid",
+        existing_user_pool_id=f"eu-north-1_{env_name}",
+        existing_client_id=f"{env_name}client",
         )
         assert stack.table_prefix == prefix
         names = {resource["Properties"]["TableName"] for resource in _tables(env_name).values()}

@@ -1,7 +1,7 @@
-"""SQLite-backed tests for the Phase 03 task-4 identity service.
+"""SQLite-backed tests for the identity implementation identity service.
 
 The stub suite (``test_identity_service.py``) proves the decision rules; this
-module proves the same service against the **real Phase 02 adapter** (WAL,
+module proves the same service against the **real storage adapter** (WAL,
 ``BEGIN IMMEDIATE``, unique indexes) on tmp files, per the test-strategy
 decision. Acceptance mapping:
 
@@ -12,22 +12,23 @@ decision. Acceptance mapping:
 - a repeated request resolves the same ``usr_``/``org_`` with stable row
   counts (no duplicate tenants);
 - a disabled user raises with zero mutation;
-- Phase 12 coexistence (different ``sub``, same email): the second login
+- application-role coexistence (different ``sub``, same email): the second login
   provisions a **second, independent user** with its own personal org and
   owner membership — email is no longer a conflict, the identity tuple is
   the only convergence key, and neither batch leaves partial rows;
-- Phase 12 role persistence: a store-seeded ``application_role=ADMIN`` user
+- application-role role persistence: a store-seeded ``application_role=ADMIN`` user
   comes back from the login hit path with role, status, email, and
   ``updated_at`` unchanged (set directly through the adapter; no service API
   grants roles);
-- Phase 11's verified profile (task 5): the miss path provisions **only**
+- session implementation verified profile (implementation): the miss path provisions **only**
   from a gated :class:`~app.auth.cognito.CognitoProfile` (email and display
   name), a miss without a profile provider raises ``TokenValidationError``
   with no rows written, the hit path performs zero profile work and never
   overwrites the stored email, and a profile failing
   :func:`~app.auth.cognito.require_provisioning_profile` raises
   ``TokenValidationError`` with **no rows written**.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -249,7 +250,7 @@ def test_email_coexistence_provisions_two_users_with_own_orgs(db_path: Path) -> 
     """A *different* sub whose verified profile carries an existing user's
     email is a legitimate second shadow user: the service provisions it in
     full through the same batch path, the two users coexist with separate
-    personal orgs, and nothing partial is left behind (Phase 12 retired the
+    personal orgs, and nothing partial is left behind (application-role retired the
     old email-collision conflict and the adapter's by-email fallback)."""
     storage: Storage = open_sqlite_storage(db_path)
     try:
@@ -294,7 +295,7 @@ def test_admin_role_survives_login_hit_path_unchanged(db_path: Path) -> None:
     """A user seeded with ``application_role=ADMIN`` **directly through the
     adapter** (no service API grants roles) comes back from a login hit with
     role, status, email, and ``updated_at`` unchanged: login never rewrites
-    or escalates the global role (spec 12 invariants 2—3)."""
+    or escalates the global role (contract 12 invariants 2—3)."""
     storage: Storage = open_sqlite_storage(db_path)
     try:
         seeded = storage.create_user(
@@ -526,7 +527,7 @@ def test_profile_subject_mismatch_provisions_nothing(db_path: Path) -> None:
 
 
 def test_miss_without_profile_provider_provisions_nothing(db_path: Path) -> None:
-    """Task 5: the claims-only fallback is gone — a first-login miss with no
+    """implementation: the claims-only fallback is gone — a first-login miss with no
     provider is a 401-class refusal (email-carrying claims included) and the
     store stays empty."""
     storage: Storage = open_sqlite_storage(db_path)

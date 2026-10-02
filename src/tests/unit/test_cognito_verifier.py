@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 03 task-3 Cognito access-token verifier.
+"""Unit tests for the identity implementation Cognito access-token verifier.
 
 Every case uses the sanctioned fixtures (``support.cognito``: RSA keygen,
 claim-override signer, loopback JWKS test server — never a live Cognito pool)
@@ -18,7 +18,8 @@ and covers the task's verify lines:
 
 Each test asserts the exact fixed reason string, so a failure-path that
 accidentally leaks a PyJWT message (or reorders checks) breaks loudly.
-"""
+
+Current behavior and invariants: ``docs/cognito.md``."""
 
 from __future__ import annotations
 
@@ -228,7 +229,7 @@ def test_unknown_kid_under_verified_issuer_is_unknown_key_id_error(key_a: TestKe
 
 
 def test_key_lookup_is_bound_to_the_verified_issuer(key_a: TestKey, key_b: TestKey) -> None:
-    """Pinned-order proof at the verifier level (breakdown B2).
+    """Pinned-order proof at the verifier level (design notes B2).
 
     A token claiming issuer A with issuer B's kid must fail as
     ``UnknownKeyIdError`` **without ever fetching B's key set** — no
@@ -369,7 +370,7 @@ def test_sub_shape_failures_rejected(key_a: TestKey, override: Any, reason: str)
 
 
 def test_missing_email_yields_none(key_a: TestKey) -> None:
-    """Phase 11 task 5: no placeholder synthesis — the claims email is
+    """session: no placeholder synthesis — the claims email is
     optional and provisioning reads the verified user-info profile instead."""
     with JwksTestServer({"pool-a": [key_a]}) as server:
         verifier = _verifier(server)
@@ -476,7 +477,7 @@ def test_non_string_token_rejected() -> None:
 
 def test_no_rejection_message_contains_token_bytes(key_a: TestKey, key_b: TestKey) -> None:
     """Every rejection path: neither ``str(error)`` nor ``error.reason`` may
-    carry the token (or any claim value from it) — task 5 logs these."""
+    carry the token (or any claim value from it) — implementation logs these."""
     with JwksTestServer({"pool-a": [key_a]}) as server:
         issuer = server.issuer("pool-a")
         verifier = _verifier(server)

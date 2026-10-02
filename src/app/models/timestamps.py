@@ -1,6 +1,6 @@
 """UTC-only datetime conventions for domain models and API payloads.
 
-Rules (Phase 01 contract, per spec and AGENTS.md):
+Rules (initial contract, per contract and AGENTS.md):
 
 - Models reject naive datetimes on input; every stored/transmitted instant is
   timezone-aware and normalized to UTC.
@@ -9,7 +9,8 @@ Rules (Phase 01 contract, per spec and AGENTS.md):
   comparable across adapters.
 - Python-mode dumps keep real :class:`~datetime.datetime` objects so storage
   adapters can compare them without reparsing.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""``/v1/organizations/{organization_id}/api-keys`` routers (Phase 05 task 6; spec §14/§15).
+"""``/v1/organizations/{organization_id}/api-keys`` routers (API-key; API contract/key-creation contract).
 
 :func:`build_api_keys_router` mirrors the published ``organizations.py`` /
 ``members.py`` shape: a factory closing over the injected
@@ -6,7 +6,7 @@
 AccessTokenVerifier`, and :class:`~app.auth.pepper.PepperSource`, registering
 **from the frozen manifest entries themselves** (:func:`~app.api.schemas.
 manifest.endpoint_for`) so method, path, success status, and response model
-cannot drift from the §14 contract.
+cannot drift from the API contract.
 
 Authorization wiring (decisions 6/8):
 
@@ -15,18 +15,18 @@ Authorization wiring (decisions 6/8):
   both with ``pepper_source`` wired, so the key-rejection branch is live: an
   API-key bearer on any management route gets the uniform 403 with the
   audited ``human_only`` denial (AC 4's no-escalation proof). All tenancy,
-  rank, and denial-audit logic lives in the task-5 dependency — this module
+  rank, and denial-audit logic lives in the implementation dependency — this module
   carries none of it.
 - The path ``{key_id}`` carries the **``key_`` application identity**
   (:class:`~app.models.ids.ApiKeyId`, per the frozen manifest and
-  ``ApiKeySummary.id``) — never the §8 non-secret credential segment, which
+  ``ApiKeySummary.id``) — never the credential contract non-secret credential segment, which
   appears in no path and no response.
 
 HTTP translation is the decision-11 table only (shape validation stays with
 the frozen schemas/422 handler; anything unmapped stays untranslated and
 lands on the frozen 500 handler, adapter text never echoed):
 
-- ``InvalidCursorError`` → 400 ``validation_error`` (Phase 04 precedent);
+- ``InvalidCursorError`` → 400 ``validation_error`` (organization precedent);
 - :class:`~app.services.api_key_service.ApiKeyConflictError` (ULID/record-id
   collision) → 409 ``conflict`` with the fixed retry message;
 - :class:`~app.services.api_key_service.ApiKeyNotFoundError` (unknown **or**
@@ -39,14 +39,15 @@ lands on the frozen 500 handler, adapter text never echoed):
 
 The literal crosses into an HTTP response at exactly **one** point: the
 201 :class:`~app.api.schemas.api_keys.ApiKeyCreatedResponse.key` below
-(spec §15; AGENTS.md). List responses are field-by-field
+(key-creation contract; AGENTS.md). List responses are field-by-field
 :class:`~app.api.schemas.api_keys.ApiKeySummary` projections — masked
-``key_prefix`` only, no ``secret_hash``, no plaintext, no §8 segment — with
-``limit``/``next_cursor`` passed through verbatim (Phase 04 decision-8
+``key_prefix`` only, no ``secret_hash``, no plaintext, no credential contract segment — with
+``limit``/``next_cursor`` passed through verbatim (organization decision-8
 pattern). The pepper is resolved from the injected source once per creation
-(``current()`` is the Phase 07 rotation seam); nothing here persists or logs
+(``current()`` is the AWS rotation seam); nothing here persists or logs
 it.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``me.py``
 # precedent): the handler signatures reference closure locals in
@@ -87,8 +88,8 @@ def _to_summary(api_key: ApiKey) -> ApiKeySummary:
     """Project a stored key onto the masked list schema field-by-field.
 
     Carries identification and lifecycle data only; ``secret_hash``, the
-    plaintext secret, and the §8 ``key_id`` segment are structurally absent
-    from the target schema (frozen Phase 01 contract).
+    plaintext secret, and the credential contract ``key_id`` segment are structurally absent
+    from the target schema (frozen initial contract).
     """
     return ApiKeySummary(
         id=api_key.id,
@@ -115,7 +116,7 @@ def build_api_keys_router(
 ) -> APIRouter:
     """Build the API-key routers bound to ``storage``, ``verifier``, and ``pepper_source``.
 
-    ``profile_source`` (Phase 11 task 4) is forwarded to every access
+    ``profile_source`` (session) is forwarded to every access
     dependency's human auth chain; the API-key branch never fetches a profile.
     """
     router = APIRouter(tags=["api-keys"])

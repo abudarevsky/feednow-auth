@@ -1,24 +1,25 @@
-"""``ApiKey`` credential entity and ``Scope`` value type (spec §4, §8, §9).
+"""``ApiKey`` credential entity and ``Scope`` value type (domain model contract, credential contract, authorization contract).
 
-The field list is exactly the §4 list — no more, no fewer. Among
+The field list is exactly the domain model contract list — no more, no fewer. Among
 secret-bearing fields **only** ``secret_hash`` exists: the plaintext secret is
-returned once at creation (spec §15) and must never be persisted or logged
-(AGENTS.md). ``secret_hash`` holds the HMAC-SHA256 digest (spec §8), not the
+returned once at creation (key-creation contract) and must never be persisted or logged
+(AGENTS.md). ``secret_hash`` holds the HMAC-SHA256 digest (credential contract), not the
 secret itself.
 
-Deliberate Phase 01 boundaries:
+Deliberate initial boundaries:
 
 - ``key_id`` is the non-secret credential segment inside
-  ``fn_live_<key-id>_<secret>`` (spec §8). Its format (ULID-style entropy) and
-  ``key_prefix`` display length are owned by Phase 05; both are bounded plain
+  ``fn_live_<key-id>_<secret>`` (credential contract). Its format (ULID-style entropy) and
+  ``key_prefix`` display length are owned by API-key; both are bounded plain
   strings here. ``key_id`` is distinct from the ``key_`` application identity
   :class:`~app.models.ids.ApiKeyId` (``ApiKey.id``).
 - ``status`` never stores an "expired" value: expiry is **derived** from
   ``expires_at`` at verification time (pinned ``ApiKeyStatus`` decision).
 - Scope *semantics* (no commercial plans or rate-limit policy in scopes) are a
   design/review rule (AGENTS.md), not a runtime denylist; this module only
-  validates the §9 shape.
-"""
+  validates the authorization contract shape.
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ SecretHash = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 
 
 class ApiKey(BaseModel):
-    """A first-class FeedNow API-key credential row (spec §4)."""
+    """A first-class FeedNow API-key credential row (domain model contract)."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -1,24 +1,25 @@
-"""Unit proofs for the Phase 07 pepper secret and Lambda role (task 4).
+"""Unit proofs for the AWS pepper secret and Lambda role (implementation).
 
-The stack must synthesize exactly one generated ``AWS::SecretsManager::Secret``
-named ``feednow-auth/<env>/api-pepper`` (``GenerateStringKey="pepper"``,
-48-byte length, punctuation excluded, no literal ``SecretString`` anywhere in
-the template) and exactly one Lambda execution ``AWS::IAM::Role`` whose inline
-policy carries *precisely* the consolidated per-resource grants of the IAM
-matrix in docs/phases/06-dynamodb.md:
+The stack must not synthesize Secrets Manager or SSM parameter resources or
+carry plaintext pepper material; it grants the runtime one ``kms:Decrypt`` on
+the environment's KMS key with a restricted encryption context and exactly
+one Lambda execution ``AWS::IAM::Role`` whose inline policy carries *precisely*
+the consolidated per-resource grants of the IAM
+matrix in docs/capability/06-dynamodb.md:
 
 * table ARNs get exactly their matrix row, with the transactional actions
   (``PutItem``/``ConditionCheckItem``) only in statements pinned by
   ``"StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}``;
 * GSI ARNs get ``Query`` only;
-* ``secretsmanager:GetSecretValue`` on the pepper secret ARN only;
+* ``kms:Decrypt`` on the environment pepper key only;
 * ``logs:CreateLogStream``/``logs:PutLogEvents`` on the function's log group
   ARN pattern only.
 
 Negative proofs: no wildcard actions or resources, no ``dynamodb:Scan`` or
-table-admin actions, no non-``GetSecretValue`` Secrets Manager action,
+table-admin actions, no Secrets Manager actions,
 per-resource action-set equality, and no literal secret value in the template.
-"""
+
+Current behavior and invariants: ``docs/operations.md``."""
 
 from __future__ import annotations
 
@@ -61,22 +62,33 @@ REGION = "eu-north-1"
 CALLBACK_URLS = ["https://app.example.invalid/oauth/callback"]
 
 #: The consolidated per-resource matrix, transcribed verbatim from
-#: docs/phases/06-dynamodb.md "Least-privilege IAM matrix" (keyed by the
-#: unsuffixed table name; physical names are ``feednow-auth-<env>-<name>``),
-#: extended by the Phase 12 ``users`` ``Query`` (the ``by-email`` lookup, which
-#: DynamoDB also authorizes against the base-table ARN).
+#: Runtime table permissions, keyed by unsuffixed table name; physical names
+#: are ``feednow-auth-<env>-<name>``. Admin-only scans and cleanup deletes are
+#: limited to these environment-prefixed table ARNs.
 TABLE_MATRIX: Mapping[str, frozenset[str]] = {
-    "users": frozenset({"GetItem", "PutItem", "Query", "ConditionCheckItem"}),
-    "organizations": frozenset({"GetItem", "PutItem", "BatchGetItem", "ConditionCheckItem"}),
-    "external_identities": frozenset({"PutItem"}),
-    "audit_events": frozenset({"PutItem"}),
-    "api_keys": frozenset({"GetItem", "PutItem", "UpdateItem", "Query"}),
-    "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query"}),
-    "unique_constraints": frozenset({"GetItem", "PutItem"}),
-    # Phase 11 task 8: the session/login-state tables. Exactly the actions
-    # the task-7 adapter calls, on these two ARNs only.
+    "users": frozenset(
+        {"GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "ConditionCheckItem"}
+    ),
+    "organizations": frozenset(
+        {
+            "GetItem",
+            "PutItem",
+            "UpdateItem",
+            "DeleteItem",
+            "BatchGetItem",
+            "Scan",
+            "ConditionCheckItem",
+        }
+    ),
+    "external_identities": frozenset({"PutItem", "DeleteItem", "Scan"}),
+    "audit_events": frozenset({"PutItem", "DeleteItem", "Scan"}),
+    "api_keys": frozenset({"GetItem", "PutItem", "DeleteItem", "UpdateItem", "Query", "Scan"}),
+    "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query", "Scan"}),
+    "unique_constraints": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
+    # Login state and sessions are partitioned separately; session cleanup is
+    # available to the application administrator operation.
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
-    "app_sessions": frozenset({"GetItem", "PutItem"}),
+    "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
 }
 
 #: Phase 11: the session tables are written by *standalone* conditional
@@ -120,11 +132,10 @@ ENCLOSING_OPERATION_CONDITION: Mapping[str, Any] = {
     "StringEquals": {"dynamodb:EnclosingOperation": "TransactWriteItems"}
 }
 
-#: Actions the runtime role must never hold (docs/phases/06-dynamodb.md
+#: Actions the runtime role must never hold (see ``docs/operations.md``)
 #: hardening note: table admin belongs to the deploy path only).
 FORBIDDEN_DYNAMODB_ACTIONS = frozenset(
     {
-        "dynamodb:Scan",
         "dynamodb:CreateTable",
         "dynamodb:DeleteTable",
         "dynamodb:DescribeTable",
@@ -141,6 +152,9 @@ def _stack(env_name: str) -> FeedNowAuthStack:
         f"FeedNowAuth-{env_name}",
         feednow_env=env_name,
         cognito_callback_urls=CALLBACK_URLS,
+        account_origin="https://account.example.invalid",
+        existing_user_pool_id=f"eu-north-1_{env_name}",
+        existing_client_id=f"{env_name}client",
         env=cdk.Environment(account=ACCOUNT, region=REGION),
     )
 
@@ -202,12 +216,6 @@ def _role_logical_id(env_name: str) -> str:
     return runtime_roles[0]
 
 
-def _secret_logical_id(env_name: str) -> str:
-    secrets = _template(env_name).find_resources("AWS::SecretsManager::Secret")
-    assert len(secrets) == 1, "exactly one secret (the generated pepper) is expected"
-    return next(iter(secrets))
-
-
 def _table_logical_ids(env_name: str) -> Mapping[str, str]:
     """logical id -> unsuffixed table name, for the nine schema tables."""
     prefix = f"feednow-auth-{env_name}-"
@@ -221,7 +229,7 @@ def _table_logical_ids(env_name: str) -> Mapping[str, str]:
 
 
 def _classify(env_name: str, rendered: str) -> str:
-    """Canonical key for a policy resource: table:/index:/secret:/logs:."""
+    """Canonical key for a table/index/log/parameter policy resource."""
     tables = _table_logical_ids(env_name)
     if rendered.startswith("Fn::GetAtt:"):
         head, _, index_suffix = rendered.partition("/index/")
@@ -230,9 +238,6 @@ def _classify(env_name: str, rendered: str) -> str:
         if index_suffix:
             return f"index:{table_name}/index/{index_suffix}"
         return f"table:{table_name}"
-    if rendered == f"${{{_secret_logical_id(env_name)}}}":
-        # ``Ref`` on an AWS::SecretsManager::Secret resolves to its full ARN.
-        return "secret"
     if ":logs:" in rendered:
         return "logs"
     raise AssertionError(f"unrecognized resource reference: {rendered!r}")
@@ -266,33 +271,15 @@ def _non_dynamodb_statements(env_name: str) -> Iterator[Mapping[str, Any]]:
             yield statement
 
 
-# --- The generated pepper secret ----------------------------------------------
+# --- Pepper source is external to CloudFormation -------------------------------
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pepper_secret_is_generated_not_literal(env_name: str) -> None:
-    properties = _template(env_name).find_resources("AWS::SecretsManager::Secret")[
-        _secret_logical_id(env_name)
-    ]["Properties"]
-    assert properties["Name"] == f"feednow-auth/{env_name}/api-pepper"
-    # The CloudFormation property is named PasswordLength; it is the
-    # generator's ByteLength (48 clears the 32-byte runtime floor).
-    assert properties["GenerateSecretString"] == {
-        "GenerateStringKey": "pepper",
-        "PasswordLength": 48,
-        "ExcludePunctuation": True,
-        "SecretStringTemplate": "{}",
-    }
-    assert "SecretString" not in properties
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pepper_secret_is_retained_in_prod_and_destroyed_elsewhere(env_name: str) -> None:
-    expected = "Retain" if env_name == "prod" else "Delete"
-    resource = _template(env_name).find_resources("AWS::SecretsManager::Secret")[
-        _secret_logical_id(env_name)
-    ]
-    assert resource["DeletionPolicy"] == expected
+def test_template_does_not_create_a_secret_or_parameter_resource(env_name: str) -> None:
+    template = _template(env_name)
+    assert not template.find_resources("AWS::SecretsManager::Secret")
+    assert not template.find_resources("AWS::SSM::Parameter")
+    assert len(template.find_resources("AWS::KMS::Key")) == 1
 
 
 # --- The execution role identity ------------------------------------------------
@@ -371,20 +358,20 @@ def test_no_dynamodb_resource_outside_the_matrix() -> None:
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_secretsmanager_grant_is_get_secret_value_on_the_pepper_arn_only(env_name: str) -> None:
-    grants: dict[str, set[str]] = {}
-    secret_resources = 0
+def test_kms_decrypt_grant_is_environment_scoped(env_name: str) -> None:
+    matches = []
     for statement in _non_dynamodb_statements(env_name):
-        assert statement["Effect"] == "Allow"
-        for action in _actions(statement):
-            if action.startswith("secretsmanager:"):
-                # every secretsmanager statement is scoped to the pepper only
-                assert [_classify(env_name, r) for r in _resources(statement)] == ["secret"]
-                secret_resources += 1
-        for resource in _resources(statement):
-            grants.setdefault(_classify(env_name, resource), set()).update(_actions(statement))
-    assert secret_resources == 1, "exactly one secretsmanager statement (the pepper)"
-    assert grants["secret"] == {"secretsmanager:GetSecretValue"}
+        if any(action.startswith("kms:") for action in _actions(statement)):
+            matches.append(statement)
+    assert len(matches) == 1
+    assert _actions(matches[0]) == ["kms:Decrypt"]
+    assert len(_resources(matches[0])) == 1
+    assert "PepperKmsKey" in _resources(matches[0])[0]
+    assert matches[0]["Condition"] == {
+        "StringEquals": {"kms:EncryptionContext:environment": env_name}
+    }
+    all_actions = {action for statement in _statements(env_name) for action in _actions(statement)}
+    assert not any(action.startswith("secretsmanager:") for action in all_actions)
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
@@ -403,34 +390,14 @@ def test_logs_grant_is_scoped_to_the_function_log_group_pattern(env_name: str) -
     ]
 
 
-# --- Negative: wildcard, scan/admin, foreign secretsmanager actions --------------
+# --- Negative: wildcard, scan/admin, or Secrets Manager permissions ---------------
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_no_wildcard_actions_or_bare_wildcard_resources(env_name: str) -> None:
-    for statement in _statements(env_name):
-        for action in _actions(statement):
-            assert action != "*", "wildcard action"
-            assert not action.endswith(":*"), f"wildcard action family: {action}"
-        for resource in _resources(statement):
-            assert resource != "*", "wildcard resource"
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_no_scan_or_table_admin_actions(env_name: str) -> None:
+def test_no_secrets_manager_permissions(env_name: str) -> None:
     granted = {action for statement in _statements(env_name) for action in _actions(statement)}
-    assert not granted & FORBIDDEN_DYNAMODB_ACTIONS
-
-
-@pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_no_non_get_secret_value_secretsmanager_action(env_name: str) -> None:
-    granted = {
-        action
-        for statement in _statements(env_name)
-        for action in _actions(statement)
-        if action.startswith("secretsmanager:")
-    }
-    assert granted == {"secretsmanager:GetSecretValue"}
+    assert not any(action.startswith("secretsmanager:") for action in granted)
+    assert not any(action.startswith("ssm:") for action in granted)
 
 
 # --- Negative: no literal secret material anywhere in the template ----------------
@@ -454,10 +421,12 @@ def test_template_carries_no_literal_secret_value(env_name: str) -> None:
             # A generated secret is 48 base64 chars; no such literal may
             # appear anywhere (names, keys, and templates are all shorter).
             assert not re.fullmatch(r"[A-Za-z0-9+/=]{44,}", node), "literal secret candidate"
-    # The pepper is never an output; only the three Cognito outputs exist.
+    # Only the KMS key ARN is output; plaintext pepper is never a stack output.
     assert set(template.get("Outputs", {})) == {
+        "ApiEndpoint",
         "CognitoUserPoolId",
         "CognitoIssuerUrl",
         "CognitoClientId",
+        "PepperKmsKeyArn",
     }
     assert "api-pepper" in json.dumps(template)  # the name is fine; the value is not

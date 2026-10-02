@@ -1,15 +1,15 @@
-"""API-key verification seam and context resolution (Phase 05 task 3; spec §8/§10).
+"""API-key verification seam and context resolution (API-key; credential contract/authorization-context contract).
 
 The pure, in-process half of the credential boundary: a bearer literal comes
-in, an :class:`~app.models.api_key.ApiKey` plus its §10
+in, an :class:`~app.models.api_key.ApiKey` plus its authorization-context contract
 :class:`~app.models.authorization_context.AuthorizationContext` come out, or
 one uniform authentication failure is raised. No FastAPI import lives here —
 HTTP translation (the 401 envelope) is the dependency/router layer's job
-(task 5/6), and this module keeps the auth boundary free of framework
-coupling so the same seam is reusable by in-process authorizers (the phase
+(implementation), and this module keeps the auth boundary free of framework
+coupling so the same seam is reusable by in-process authorizers (the capability
 Handoff).
 
-Verification pipeline (spec §8 flow, breakdown decision 4) runs in a **fixed
+Verification pipeline (credential contract flow, design notes design choice 4) runs in a **fixed
 order** so no failure branch is distinguishable from any other on either the
 message or the timing axis:
 
@@ -17,7 +17,7 @@ message or the timing axis:
    environment prefix, a missing/empty segment, a key-id outside the pinned
    Crockford-26 shape, or an empty secret is a format failure — resolved
    before any secret material is touched or any storage read runs.
-2. **Point lookup** by the non-secret §8 key-id segment
+2. **Point lookup** by the non-secret credential contract key-id segment
    (:meth:`~app.storage.contract.Storage.get_api_key_by_key_id`). On a miss
    the pipeline still performs a **dummy constant-time comparison** of the
    supplied secret's peppered HMAC against a fixed same-shape digest
@@ -39,13 +39,14 @@ the single fixed message :data:`API_KEY_AUTHENTICATION_MESSAGE`. No branch
 message, and no key-id, secret, or pepper fragment ever enters an exception
 text, cause, or context. Any other :class:`~app.storage.contract.StorageError`
 (a backend outage, not a bad credential) propagates **untranslated** per
-decision 11 so it surfaces as a 500, never a misleading 401.
+design choice 11 so it surfaces as a 500, never a misleading 401.
 
 **Organization status and scopes are authorization, not authentication.**
-They are enforced by the access dependency (task 5), where denials ride the
-Phase 04 uniform audited 403; this module only answers "is this a valid,
+They are enforced by the access dependency (implementation), where denials ride the
+organization uniform audited 403; this module only answers "is this a valid,
 active, unexpired credential, and what context does it carry".
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 from __future__ import annotations
 
@@ -94,9 +95,9 @@ class VerifiedApiKey:
 
     ``api_key`` is the stored credential row (the caller may read
     ``organization_id``/``id``/``scopes`` for downstream authorization);
-    ``context`` is the §10 :class:`AuthorizationContext` derived from it via
+    ``context`` is the authorization-context contract :class:`AuthorizationContext` derived from it via
     :func:`build_api_key_context`. Neither carries the plaintext secret — it
-    is never returned past the one-time creation path (spec §15).
+    is never returned past the one-time creation path (key-creation contract).
     """
 
     api_key: ApiKey
@@ -104,7 +105,7 @@ class VerifiedApiKey:
 
 
 def build_api_key_context(api_key: ApiKey) -> AuthorizationContext:
-    """Derive the §10 API-key ``AuthorizationContext`` (decision 5).
+    """Derive the authorization-context contract API-key ``AuthorizationContext`` (design choice 5).
 
     ``actor_type`` is ``"api_key"`` and ``actor_id`` is the key's ``key_``
     **application identity** (``api_key.id``) — never the creator ``usr_`` and
@@ -131,7 +132,7 @@ def verify_api_key(
 ) -> VerifiedApiKey:
     """Verify one credential ``literal`` against ``storage`` or fail uniformly.
 
-    Runs the fixed pipeline documented at module scope (decision 4). The
+    Runs the fixed pipeline documented at module scope (design choice 4). The
     pepper is resolved exactly once per verification (after the format check,
     so a malformed token never touches the secret source) and reused for both
     the real and the dummy comparison, keeping the two branches
@@ -146,7 +147,7 @@ def verify_api_key(
             literal, unknown key-id, wrong secret, environment skew, revoked,
             or expired — always with the single fixed message.
         StorageError: any non-``EntityNotFoundError`` storage failure (e.g. a
-            backend outage) propagates untranslated (decision 11 → 500).
+            backend outage) propagates untranslated (design choice 11 → 500).
     """
     try:
         parsed = parse_literal(literal)
@@ -182,12 +183,12 @@ def verify_api_key(
 
 
 def key_has_scope(context: AuthorizationContext, scope: Scope) -> bool:
-    """Return whether ``context`` carries ``scope`` (decision 7: exact match).
+    """Return whether ``context`` carries ``scope`` (design choice 7: exact match).
 
     API-key scope enforcement is exact string membership — no wildcards, no
-    hierarchy (spec §9 defines none, and inventing ``vispector:*`` would be
+    hierarchy (authorization contract defines none, and inventing ``vispector:*`` would be
     smuggled entitlement semantics). Human contexts carry an empty scope
-    list, so this is always ``False`` for them; the scope dependency (task 5)
+    list, so this is always ``False`` for them; the scope dependency (implementation)
     only consults it on the API-key branch.
     """
     return scope in context.scopes

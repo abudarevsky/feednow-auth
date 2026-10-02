@@ -1,6 +1,6 @@
-"""Unit tests for Phase 05 task 1 pepper abstraction (:mod:`app.auth.pepper`).
+"""Unit tests for API-key pepper abstraction (:mod:`app.auth.pepper`).
 
-Verify lines covered (per the Phase 05 breakdown, task 1 / decision 3):
+Verify lines covered (per the API-key design notes, implementation / design choice 3):
 
 1. :class:`StaticPepper` rejects peppers shorter than 32 bytes — with an
    exception message that never contains the supplied pepper material.
@@ -9,8 +9,9 @@ Verify lines covered (per the Phase 05 breakdown, task 1 / decision 3):
    mutation-safe (bytearray input is copied).
 4. :class:`PepperSource` is a runtime-checkable protocol satisfied by
    ``StaticPepper`` and by any duck-typed ``current()`` implementation —
-   the seam Phase 07 wires to Secrets Manager without touching consumers.
-"""
+   the seam AWS wires to its KMS-decrypted runtime value without touching consumers.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -119,7 +120,7 @@ def test_protocol_is_runtime_checkable():
 
 def test_duck_typed_source_satisfies_the_protocol():
     class RotatingPepper:
-        """Shape-only stand-in for the Phase 07 Secrets Manager source."""
+        """Shape-only stand-in for the AWS KMS-backed source."""
 
         def current(self) -> bytes:
             return PEPPER

@@ -1,8 +1,8 @@
-"""Unit tests for the Phase 04 task-3 shared organization-access dependency.
+"""Unit tests for the organization implementation shared organization-access dependency.
 
-Per the breakdown, the probes run against a router defined **in this test
+Per the design notes, the probes run against a router defined **in this test
 module** (the design rule is that *shipped* routers register manifest entries
-only; nothing scans test modules), on the Phase 03 fake-verifier/real-SQLite
+only; nothing scans test modules), on the identity fake-verifier/real-SQLite
 pattern. Acceptance-critical proofs:
 
 1. Each of the five decision-4 denial outcomes (unknown org, no membership,
@@ -17,16 +17,17 @@ pattern. Acceptance-critical proofs:
    handler.
 5. Authentication failures (401) precede the dependency and are not denial
    audits; a request that will be denied still auto-provisions a first-seen
-   identity (authn precedes authz, spec §6).
+   identity (authn precedes authz, identity contract).
 6. A denial whose audit append fails is a 500 (fail-closed), never a silent
    403.
 
-Phase 05 task 5 **extends** this file additively (see the ``KeyEnv`` probes
-at the bottom): the Phase 04 suite above runs against the ``pepper_source =
+API-key **extends** this file additively (see the ``KeyEnv`` probes
+at the bottom): the organization suite above runs against the ``pepper_source =
 None`` default unchanged — that is the byte-stability proof — while the new
 section exercises the principal dispatch, the ``human_only`` refusal, and
 the scope dependency's API-key branch.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``me.py``
 # precedent): the probe handlers reference closure-local dependencies in
@@ -163,7 +164,7 @@ class FakeVerifier:
 
 
 class FakeProfileSource:
-    """Phase 11 task-5 double: verified profile per subject from the emails
+    """session implementation double: verified profile per subject from the emails
     ``Env.login`` signed (first-login provisioning reads the profile, not
     the claims)."""
 
@@ -532,7 +533,7 @@ def seed_api_key(
 ) -> str:
     """Seed a live-environment key row; return its full literal.
 
-    Keys are **seeded directly** (decision 12: no create API path exists yet).
+    Keys are **seeded directly** (design choice 12: no create API path exists yet).
     The plaintext literal exists only in this test's hands — the row carries
     just the peppered HMAC.
     """

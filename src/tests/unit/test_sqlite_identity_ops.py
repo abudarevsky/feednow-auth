@@ -1,6 +1,6 @@
-"""Unit tests for the Phase 02 task-3 SQLite error translation (identity ops).
+"""Unit tests for the storage implementation SQLite error translation (identity ops).
 
-Scope per the breakdown: storage *behavior* (duplicates, rollback, lookups)
+Scope per the design notes: storage *behavior* (duplicates, rollback, lookups)
 is owned by the conformance suite; this module pins the adapter-internal
 sqlite3→domain translation table only — including the contract-pinned rule
 that PRIMARY KEY collisions surface as ``DuplicateEntityError`` with
@@ -10,7 +10,8 @@ ever escapes the adapter.
 Violations are produced against the *real* schema (a live adapter
 connection) so the messages translated are the ones SQLite actually emits,
 not hand-written approximations.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 

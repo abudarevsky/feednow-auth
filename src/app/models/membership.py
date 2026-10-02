@@ -1,15 +1,16 @@
-"""``Membership`` domain entity (spec §4).
+"""``Membership`` domain entity (domain model contract).
 
 Grants one :class:`~app.models.user.User` a :class:`~app.models.enums.MembershipRole`
 inside one :class:`~app.models.organization.Organization`.
 
-Phase 01 semantics (pinned in the breakdown):
+initial semantics (pinned in the design notes):
 
 - Member removal is a **physical delete** (the storage contract already has
   ``delete_membership``); ``status=disabled`` is a temporary suspension.
-- Uniqueness of ``(organization_id, user_id)`` is Phase 02 storage work, not
+- Uniqueness of ``(organization_id, user_id)`` is storage storage work, not
   a model constraint.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

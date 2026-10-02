@@ -1,14 +1,14 @@
-"""DynamoDB Local proofs for the organizations + memberships operations (task 4).
+"""DynamoDB Local proofs for the organizations + memberships operations (implementation).
 
 Marker-gated (``dynamodb_local``): every test here skips with an explicit reason
 unless ``FEEDNOW_DYNAMODB_LOCAL_ENDPOINT`` is set and reachable, so the default
 suite stays green without Docker (``docs/operations.md`` carries the run
 command).
 
-These are **direct adapter calls**, not the conformance suite (task 8 runs the
+These are **direct adapter calls**, not the conformance suite (implementation runs the
 shared 60 cases unchanged): the point is to pin the DynamoDB translation of the
 15 org/membership behaviors on the real transactional path — the native
-``(organization_id, user_id)`` pair key (decision 2), the ``membership_id``
+``(organization_id, user_id)`` pair key (design choice 2), the ``membership_id``
 guard constraint, the ``org_created_at`` denormalization behind the by-user
 GSI, the single ``BatchGetItem`` read-back with the trim-before-fetch
 batch-boundary rule, the conditional-delete non-idempotency, and keyset

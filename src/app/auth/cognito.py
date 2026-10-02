@@ -1,7 +1,7 @@
-"""Cognito access-token verification (Phase 03 task 3).
+"""Cognito access-token verification (identity).
 
 Implements the token contract and the reviewer-pinned check order (B1/B2 and
-the step-0 revision in the Phase 03 breakdown).
+the step-0 revision in the identity design notes).
 :class:`CognitoAccessTokenVerifier.verify` runs exactly these stages
 (0—7), in this order — each later stage may assume the earlier ones passed,
 and every failure path raises :class:`TokenValidationError` (or propagates
@@ -53,16 +53,16 @@ that never interpolates token, key, or claim material:
 
 The length caps mirror the *model* bounds (``app.models.ids``,
 ``app.models.user``) as plain integers on purpose: the verifier must not
-import domain types (breakdown decision 4), so a token can never smuggle a
+import domain types (design notes design choice 4), so a token can never smuggle a
 value that the later ``User``/``ExternalIdentity`` construction would reject
 with a 500 instead of a clean 401.
 
-:class:`AccessTokenVerifier` is the **published handoff interface** (task 7):
-Phase 05's API-key path and future providers feed the same verification
+:class:`AccessTokenVerifier` is the **published handoff interface** (implementation):
+API-key implementation API-key path and future providers feed the same verification
 seam. This module knows nothing about storage or users — resolution and
-provisioning (task 4) consume :class:`CognitoClaims`.
+provisioning (implementation) consume :class:`CognitoClaims`.
 
-Phase 11 (profile and session boundary) extends this module with the
+session (profile and session boundary) extends this module with the
 **verified-profile seam** used by first-login provisioning:
 
 - :class:`CognitoProfile` — the frozen profile value object (subject, email,
@@ -88,7 +88,8 @@ Phase 11 (profile and session boundary) extends this module with the
   and reason-hygiene rules as the verifier: no token, email, subject, or
   payload material is ever interpolated into exception text or logged (this
   module imports no logging).
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -143,11 +144,11 @@ class CognitoClaims:
     """Verified access-token claims — the verifier's only output shape.
 
     Immutable value object; field names match the Cognito claim names so the
-    task-4 mapping to ``ExternalIdentity``/``User`` stays mechanical. No raw
+    implementation mapping to ``ExternalIdentity``/``User`` stays mechanical. No raw
     token material is retained. ``email`` is ``None`` when the token carries
     no email claim: Cognito access tokens routinely omit it, and the
     authoritative email for provisioning comes from the verified
-    :class:`CognitoProfile` (Phase 11), never from a synthesized stand-in.
+    :class:`CognitoProfile` (session), never from a synthesized stand-in.
     """
 
     sub: str
@@ -160,12 +161,12 @@ class CognitoClaims:
 
 @runtime_checkable
 class AccessTokenVerifier(Protocol):
-    """The published handoff verification interface (Phase 03 task 7 docs).
+    """The published handoff verification interface (identity docs).
 
     Implementations accept or reject a bearer token *without side effects*:
     a rejection must never mutate storage state (acceptance criterion 1) and
-    must raise :class:`TokenValidationError` (401-mapped in task 5) or
-    :class:`TokenProviderUnavailableError` (503-mapped in task 5).
+    must raise :class:`TokenValidationError` (401-mapped in implementation) or
+    :class:`TokenProviderUnavailableError` (503-mapped in implementation).
     """
 
     def verify(self, token: str) -> CognitoClaims: ...
@@ -177,7 +178,7 @@ class CognitoAccessTokenVerifier:
     The issuer and client allowlists are stored as independent frozenset
     copies (exact-match membership only, never prefix matching); the
     :class:`~app.auth.jwks.JwksSource` is injected so tests can bind the
-    loopback JWKS fixture and Phase 07 can wire real Cognito domains without
+    loopback JWKS fixture and AWS can wire real Cognito domains without
     changing this class.
     """
 
@@ -364,7 +365,7 @@ class CognitoAccessTokenVerifier:
         """Validate shapes and build the frozen claims.
 
         ``username`` is the one optional member: absent, JSON null, and empty
-        string all normalize to ``None`` so the task-4 display-name rule
+        string all normalize to ``None`` so the implementation display-name rule
         ("username when non-empty, else sub") can never see an empty string.
         """
         sub = self._require_str_claim(
@@ -454,7 +455,7 @@ class CognitoProfile:
     Immutable value object mirroring :class:`CognitoClaims`'s hygiene rules:
     no raw token, HTTP response, or provider payload material is retained,
     and the field bounds are enforced by the producing client (plain
-    integers, no ``app.models`` imports — the same breakdown decision 4 that
+    integers, no ``app.models`` imports — the same design notes design choice 4 that
     keeps the verifier free of domain types). ``email`` and ``display_name``
     are optional at the *transport* layer; the provisioning-profile gate
     (:func:`require_provisioning_profile`) decides which absences are
@@ -515,7 +516,7 @@ def require_provisioning_profile(profile: CognitoProfile, *, token_sub: str) -> 
 
 @runtime_checkable
 class ProfileSource(Protocol):
-    """The published profile-fetch interface (Phase 11 breakdown task 2).
+    """The published profile-fetch interface (session design notes implementation).
 
     Implementations exchange a **verified** bearer access token for the
     provider's authoritative profile, side-effect-free from the caller's

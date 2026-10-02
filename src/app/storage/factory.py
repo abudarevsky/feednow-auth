@@ -1,4 +1,4 @@
-"""CLI-facing storage factory (Phase 13 task 2).
+"""CLI-facing storage factory (admin).
 
 ``app.storage.__init__`` stays adapter-free, so this is a new submodule
 imported by explicit path (``from app.storage.factory import create_storage``)
@@ -6,9 +6,9 @@ by the administration CLI. The factory is the single place that turns
 deployment configuration into a :class:`~app.storage.contract.Storage`
 instance without ever constructing a FastAPI app: it imports only
 ``app.storage.*`` modules, never ``app.main`` or ``app.auth.cognito``, and
-reads no Cognito/pepper configuration (spec 13 required behavior 5).
+reads no Cognito/pepper configuration (contract 13 required behavior 5).
 
-Design pinned by the breakdown:
+Design pinned by the design notes:
 
 - Settings are frozen dataclasses; there is deliberately no
   ``dynamodb_resource`` seam in the public settings (tests inject at the
@@ -18,7 +18,8 @@ Design pinned by the breakdown:
   inject environments without touching the process.
 - Every rejection raises ``ValueError`` with a fixed, safe message that names
   only the expected variables — never a provided value, path, or region.
-"""
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from __future__ import annotations
 

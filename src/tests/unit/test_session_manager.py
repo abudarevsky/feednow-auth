@@ -1,4 +1,4 @@
-"""Unit proofs for the Phase 11 task-9 session issuer/verifier and cookie policy.
+"""Unit proofs for the session implementation session issuer/verifier and cookie policy.
 
 The module under test (``src/app/auth/session.py``) is proven against the
 real SQLite adapter (tmp file) plus small fakes for clock/expiry edges:
@@ -16,7 +16,8 @@ real SQLite adapter (tmp file) plus small fakes for clock/expiry edges:
    returns the raw value or ``None`` (absent/empty).
 4. Secrecy: the module imports no logging (AST proof) and emits zero log
    records across a full issue/verify cycle (caplog proof).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -262,7 +263,7 @@ def test_read_session_cookie_absent_or_empty_returns_none() -> None:
 def test_session_module_imports_no_logging() -> None:
     """AST proof: the module has no logging import and no logger reference.
 
-    The session id is bearer material; the spec forbids logging anywhere in
+    The session id is bearer material; the contract forbids logging anywhere in
     the module, so this guards the boundary rather than one call site.
     """
     tree = ast.parse(Path(session_module.__file__).read_text(encoding="utf-8"))

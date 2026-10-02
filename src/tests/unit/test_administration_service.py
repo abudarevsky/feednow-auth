@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 13 task-3 administration service against stub storage.
+"""Unit tests for the admin implementation administration service against stub storage.
 
 These tests prove the *decision rules* of ``app.services.administration``
 without a database, using a recording :class:`~app.storage.contract.Storage`
@@ -23,7 +23,8 @@ live here:
 
 Real-SQLite behavior (row persistence, audit counts, full rollback) is owned
 by ``test_administration_sqlite.py``.
-"""
+
+Current behavior and invariants: ``docs/administration.md``."""
 
 from __future__ import annotations
 
@@ -94,7 +95,7 @@ def _organization(
 
 
 class StubStorage:
-    """Recording ``Storage`` stub implementing only what task 3 touches.
+    """Recording ``Storage`` stub implementing only what implementation touches.
 
     ``transition_application_role`` models the adapter contract: it records
     the full call, persists the audit **only** on the scripted

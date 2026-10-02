@@ -1,4 +1,6 @@
-"""Static secrecy checks for the local Cognito PKCE test harness (Phase 11 task 14)."""
+"""Static secrecy checks for the local Cognito PKCE test harness (session).
+
+Current behavior and invariants: ``docs/cognito.md``."""
 
 from __future__ import annotations
 

@@ -1,6 +1,6 @@
-"""Secrecy acceptance sweeps (Phase 05 task 7, part a).
+"""Secrecy acceptance sweeps (API-key, part a).
 
-One full Phase 05 battery over HTTP — create (both environments), list,
+One full API-key battery over HTTP — create (both environments), list,
 revoke (twice), every denial class (``insufficient_role``, ``no_membership``,
 ``human_only``, ``insufficient_scope``, ``organization_mismatch``,
 ``inactive_organization``, unknown-org), every authentication failure class,
@@ -14,21 +14,22 @@ credential material this battery minted:
 - the full literal appears in **exactly one** response body per key (its own
   201) and in nothing else — not a list, not an error, not a log record;
 - the secret appears in no response other than that one 201, in no audit
-  row, in no log record, and in no raw database byte; the §8 key-id segment
-  (non-secret by design, decision 2) additionally appears in no response
+  row, in no log record, and in no raw database byte; the credential contract key-id segment
+  (non-secret by design, design choice 2) additionally appears in no response
   field other than the owning 201's literal and the masked ``key_prefix``
   values it is designed to live in;
 - the pepper appears nowhere at all (the row stores only
   ``HMAC-SHA256(pepper, secret)``);
 - the key-id segment's only persistence is the ``api_keys.key_id`` /
-  ``key_prefix`` columns it is designed to live in (non-secret by §8);
+  ``key_prefix`` columns it is designed to live in (non-secret by credential contract);
 - the human JWTs and the ``Bearer`` marker never reach audit metadata.
 
-The hygiene half of the sweep pins the §16 vocabulary for this phase: every
-action is inside the §16 set, every ``metadata`` key set is exactly the
+The hygiene half of the sweep pins the audit contract vocabulary for this capability: every
+action is inside the audit contract set, every ``metadata`` key set is exactly the
 decision-9/10/7 pinned shape (including the three new denial reasons), and
 every actor carries the matching ``actor_type``.
-"""
+
+Current behavior and invariants: ``docs/credentials.md``."""
 
 # No ``from __future__ import annotations``: the probe handler's
 # ``Annotated[..., Depends(scope_dep)]`` references a closure local (the
@@ -148,8 +149,8 @@ def rows(db_path: Path, table: str) -> list[dict[str, Any]]:
 def _without_key_prefixes(node: Any) -> Any:
     """Return a copy of decoded ``node`` with every ``key_prefix`` value removed.
 
-    Decision 2 pins ``key_prefix`` to ``fn_<env>_<key-id>_<6-char head>...``:
-    the §8 key-id segment is **non-secret** and legitimately lives inside the
+    design choice 2 pins ``key_prefix`` to ``fn_<env>_<key-id>_<6-char head>...``:
+    the credential contract key-id segment is **non-secret** and legitimately lives inside the
     masked display prefix (the ``api_keys.key_id``/``key_prefix`` columns are
     its designed home — see this module's docstring). The response sweeps
     therefore scan segment material against this prefix-stripped view, while
@@ -174,10 +175,10 @@ def _segment_scannable(body: bytes) -> bytes:
 
 
 def _is_segment_material(name: str) -> bool:
-    """True for the sweep's §8 key-id-segment entries (``*.segment``,
+    """True for the sweep's credential contract key-id-segment entries (``*.segment``,
     ``seeded.segment.*``).
 
-    The segment is non-secret by §8 design (decision 2): it legitimately
+    The segment is non-secret by credential contract design (design choice 2): it legitimately
     lives in the ``api_keys.key_id``/``key_prefix`` columns and, through the
     masked display prefix, in list responses. The sweeps exempt it *there*
     and nowhere else — literal, secret, and pepper bytes keep the strict
@@ -441,7 +442,7 @@ def env(tmp_path: Path, key: TestKey) -> Iterator[_SecrecyEnv]:
 
 
 def run_battery(env: _SecrecyEnv) -> dict[str, dict[str, str]]:
-    """Exercise every Phase 05 HTTP outcome; return the created-key material.
+    """Exercise every API-key HTTP outcome; return the created-key material.
 
     Each created key's ``{literal, secret, segment}`` is recorded so the sweeps
     can prove where it did and did not travel.

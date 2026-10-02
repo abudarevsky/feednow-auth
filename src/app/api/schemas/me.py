@@ -1,14 +1,15 @@
-"""``GET /v1/me`` response schema (spec §14 "Current User").
+"""``GET /v1/me`` response schema (API contract "Current User").
 
-The spec defines the endpoint but no body, so :class:`MeResponse` is a
-Phase 01 **derived payload** (listed in the manifest docstring and flagged
-as a spec-revision proposal): the caller's own user record, mirroring the
-§4 ``User`` field list exactly (plus Phase 12's ``application_role``, which
-is the only API response change of that phase). External identities,
+The contract defines the endpoint but no body, so :class:`MeResponse` is a
+**derived payload** (listed in the manifest docstring and flagged
+as a contract-revision proposal): the caller's own user record, mirroring the
+domain model contract ``User`` field list exactly (plus application-role implementation ``application_role``, which
+is the only API response change in this projection). External identities,
 memberships, and credentials are deliberately absent — each has its own
-endpoint or owner phase, and ``/me`` must not become a catch-all that later
-phases cannot close without breaking consumers.
-"""
+surface, and ``/me`` must not become a catch-all that later changes without
+breaking consumers.
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ from app.models.user import DisplayText, Email
 
 
 class MeResponse(ApiSchema):
-    """The authenticated user's own profile (derived from spec §4 ``User``)."""
+    """The authenticated user's own profile (derived from domain model contract ``User``)."""
 
     id: UserId
     display_name: DisplayText

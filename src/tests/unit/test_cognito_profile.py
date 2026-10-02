@@ -1,8 +1,8 @@
-"""Unit tests for the Phase 11 profile seam added to ``app.auth.cognito``.
+"""Unit tests for the session profile seam added to ``app.auth.cognito``.
 
 Covers the frozen :class:`CognitoProfile` value object, the provisioning
-gate :func:`require_provisioning_profile` (task-1 rules), and the narrow
-:class:`CognitoUserInfoClient` (task-2 rules):
+gate :func:`require_provisioning_profile` (implementation rules), and the narrow
+:class:`CognitoUserInfoClient` (implementation rules):
 
 - constructor configuration: absolute HTTPS only, no query/fragment,
   positive timeout;
@@ -19,7 +19,8 @@ gate :func:`require_provisioning_profile` (task-1 rules), and the narrow
 The opener is replaced with a recording fake (the client's only I/O seam),
 so no socket or TLS fixture is needed; the redirect-rejection handler is
 pinned directly because urllib only reaches it through a live 3xx.
-"""
+
+Current behavior and invariants: ``docs/cognito.md``."""
 
 from __future__ import annotations
 

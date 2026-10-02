@@ -1,30 +1,30 @@
-"""Frozen endpoint manifest for every spec §14 route (Phase 01 mount contract).
+"""Frozen endpoint manifest for every API contract route (initial mount contract).
 
-Phase 01 ships **no routers** (endpoint behavior is a non-goal). Instead,
-Phase 04/05 mount against this manifest: each entry pins the HTTP method,
+initial ships **no routers** (endpoint behavior is a non-goal). Instead,
+organization and API-keymount against this manifest: each entry pins the HTTP method,
 full versioned path, request/response models, success status, pagination
-usage, and path-parameter identity types for one §14 endpoint. Routers land
+usage, and path-parameter identity types for one API contract endpoint. Routers land
 in ``app/api/<resource>.py`` and register through ``create_app``'s documented
-extension point (task 6); a route may only be added when it appears here.
+extension point (implementation); a route may only be added when it appears here.
 
 Naming collision to keep straight (see :mod:`app.models.ids` and
 :mod:`app.models.api_key`): the ``{key_id}`` **path parameter** carries the
 ``key_`` application identity (:class:`~app.models.ids.ApiKeyId`, i.e.
-``ApiKeySummary.id``). It is *not* the §8 non-secret ``key_id`` credential
+``ApiKeySummary.id``). It is *not* the credential contract non-secret ``key_id`` credential
 segment inside ``fn_live_<key-id>_<secret>`` (``app.models.api_key.KeyId``),
 which never appears in any path or response.
 
-Derived-payload register (Phase 01 contract additions, flagged for spec
-revision — §14/§15 define no body for these; §15's key-creation request and
+Derived-payload register (initial contract additions, flagged for contract
+revision — API contract/key-creation contract define no body for these; key-creation contract's key-creation request and
 response below are copied verbatim and are NOT derived):
 
 - ``GET /v1/me`` → ``MeResponse``: ``id``, ``display_name``, ``email``,
   ``status``, ``application_role``, ``created_at``, ``updated_at`` (mirrors
-  the §4 ``User``, Phase 12 role field included).
+  the domain model contract ``User``, application-role role field included).
 - ``POST /v1/organizations`` → ``OrganizationCreateRequest``: ``name``,
   ``slug``, ``type`` (default ``customer``); → ``OrganizationResponse``:
   ``id``, ``name``, ``slug``, ``type``, ``status``, ``created_at``,
-  ``updated_at`` (mirrors §4 ``Organization``; reused by organization GETs
+  ``updated_at`` (mirrors domain model contract ``Organization``; reused by organization GETs
   and as the create response).
 - ``GET .../members`` → ``Page[MemberResponse]``; ``POST .../members`` →
   ``MemberCreateRequest``: ``user_id``, ``role``; → ``MemberResponse``:
@@ -33,15 +33,16 @@ response below are copied verbatim and are NOT derived):
 - ``GET .../api-keys`` → ``Page[ApiKeySummary]`` with ``ApiKeySummary``:
   ``id``, ``name``, ``environment``, ``key_prefix``, ``status``, ``scopes``,
   ``created_at``, ``last_used_at``, ``expires_at``, ``revoked_at`` — masked
-  only; no ``secret_hash``, no plaintext, no §8 ``key_id`` segment.
+  only; no ``secret_hash``, no plaintext, no credential contract ``key_id`` segment.
 - Success statuses: GETs are 200; creates (POST) are 201 (derived REST
-  convention — the spec pins only "deletes = 204"); both DELETEs are 204
+  convention — the contract pins only "deletes = 204"); both DELETEs are 204
   with no request or response body.
 
 Secret rule (AGENTS.md; acceptance criterion): across every model reachable
 from this manifest, the only field that may carry credential material is
 ``ApiKeyCreatedResponse.key``, returned exactly once at creation.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -68,6 +69,8 @@ from app.api.schemas.organizations import (
     OrganizationCreateRequest,
     OrganizationRenameRequest,
     OrganizationResponse,
+    OrganizationSlugAvailabilityQuery,
+    OrganizationSlugAvailabilityResponse,
 )
 from app.models.ids import ApiKeyId, OrganizationId, UserId
 from app.models.pagination import Page, PageParams
@@ -86,7 +89,7 @@ def _no_params() -> Mapping[str, type]:
 
 @dataclass(frozen=True)
 class EndpointSpec:
-    """One frozen §14 endpoint: mount contract, not implementation."""
+    """One frozen API contract endpoint: mount contract, not implementation."""
 
     operation_id: str
     method: str
@@ -120,8 +123,6 @@ class EndpointSpec:
             raise ValueError(
                 f"{self.operation_id}: paginated endpoints must derive from PageParams"
             )
-        if not self.paginated and self.query_model is not None:
-            raise ValueError(f"{self.operation_id}: only paginated endpoints may declare a query")
         if self.method in ("GET", "DELETE") and self.request_model is not None:
             raise ValueError(f"{self.operation_id}: {self.method} must not declare a request model")
         if self.method == "POST" and self.request_model is None:
@@ -202,6 +203,15 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         success_status=200,
         request_model=OrganizationRenameRequest,
         response_model=OrganizationResponse,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="check_organization_slug_availability",
+        method="GET",
+        path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/slug-availability",
+        success_status=200,
+        response_model=OrganizationSlugAvailabilityResponse,
+        query_model=OrganizationSlugAvailabilityQuery,
         path_params=_ORG_PATH_PARAMS,
     ),
     EndpointSpec(

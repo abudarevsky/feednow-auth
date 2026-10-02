@@ -1,4 +1,4 @@
-"""Unit proofs for the WIP 09 task-4 local ``/oauth/callback`` capture route.
+"""Unit proofs for the WIP 09 implementation local ``/oauth/callback`` capture route.
 
 The route lives outside the ``app`` package (``deploy/docker/oauth_callback.py``)
 and is loaded with the importlib-from-path pattern established by

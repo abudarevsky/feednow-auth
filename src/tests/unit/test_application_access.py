@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 13 task-4 global-administrator dependency
+"""Unit tests for the admin implementation global-administrator dependency
 (:mod:`app.auth.application_access`).
 
 The gate is exercised **directly against the returned dependency callable**
@@ -13,7 +13,7 @@ this module's decision is under test:
 - uniform denial: ordinary humans and **every** API-key variant (including
   a key created by an ADMIN user) answer the one fixed 403 message —
   structurally, because the key branch yields ``principal.user is None``
-  and API-key contexts stay roleless (spec 12 invariant 7; spec 13
+  and API-key contexts stay roleless (contract 12 invariant 7; contract 13
   required behavior 6);
 - oracle-freedom: every denial body is the same constant and carries no
   role, key, email, or ``usr_``/``key_`` material;
@@ -23,7 +23,8 @@ this module's decision is under test:
   ``USER``;
 - the seam never audits (no ``operation_id`` by design) and never mutates
   on denial.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -111,7 +112,7 @@ class FakeRequest:
 
 
 class RecordingVerifier:
-    """Token -> claims with a call log (the Phase 03 fake-verifier seam)."""
+    """Token -> claims with a call log (the identity fake-verifier seam)."""
 
     def __init__(self) -> None:
         self.claims_by_token: dict[str, CognitoClaims] = {}
@@ -126,7 +127,7 @@ class RecordingVerifier:
 
 
 class RecordingProfileSource:
-    """Phase 11 double: records ``(token, expected_sub)`` per fetch."""
+    """session double: records ``(token, expected_sub)`` per fetch."""
 
     def __init__(self, email: str = "first-login@example.test") -> None:
         self.email = email
@@ -346,7 +347,7 @@ def test_api_key_is_the_uniform_403_not_a_401(env: GateEnv) -> None:
 
 
 def test_key_created_by_an_admin_user_is_still_the_uniform_403(env: GateEnv) -> None:
-    """Spec 13 required behavior 6: keys owned by admins fail structurally
+    """contract 13 required behavior 6: keys owned by admins fail structurally
     (``principal.user is None`` on the key branch — no reverse lookup)."""
     with pytest.raises(HTTPException) as excinfo:
         env.call(env.bearer(env.live_literal(ADMIN_KEY_ID)))
@@ -372,7 +373,7 @@ def test_every_denial_shares_one_message_free_of_material(env: GateEnv) -> None:
 
 def test_denials_never_audit_and_never_mutate(env: GateEnv) -> None:
     """This seam carries no ``operation_id``: denial is a bare 403 (the
-    reviewed audit belongs to the administration transition, spec 13)."""
+    reviewed audit belongs to the administration transition, contract 13)."""
     for bearer in ("tok-regular", env.live_literal()):
         with pytest.raises(HTTPException):
             env.call(env.bearer(bearer))

@@ -1,13 +1,14 @@
-"""Unit tests for the Phase 02 task-4 SQLite organization/membership ops.
+"""Unit tests for the storage implementation SQLite organization/membership ops.
 
-Scope per the breakdown: storage *behavior* (duplicates, active-membership
+Scope per the design notes: storage *behavior* (duplicates, active-membership
 filtering, organization scoping, physical delete) is owned by the conformance
 suite; this module pins the adapter-internal pieces only — the sqlite3→domain
-translation for the constraints task 4 exercises (produced against the *real*
+translation for the constraints implementation exercises (produced against the *real*
 schema so the translated messages are the ones SQLite actually emits), the
 keyset ``_build_page`` helper (probe-row trimming, cursor position, scope
 tag), the defense-in-depth limit re-clamp, and exact enum string storage.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 

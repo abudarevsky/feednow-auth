@@ -5,14 +5,14 @@ unless ``FEEDNOW_DYNAMODB_LOCAL_ENDPOINT`` is set and reachable, so the default
 suite stays green without Docker (``docs/operations.md`` carries the run
 command).
 
-These are **direct adapter calls**, not the conformance suite (task 8 runs the
+These are **direct adapter calls**, not the conformance suite (implementation runs the
 shared 60 cases unchanged): the point is to pin the DynamoDB translation of the
 8 audit/provision-user behaviors and the 4 provision-organization behaviors on
 the real transactional path — the ``aud_`` native record-id conflict behind
 ``append_audit_event`` (with the organizations ``ConditionCheck`` replicating
 the audit→org foreign key), the one-``TransactWriteItems`` shape of
-``provision_user`` (decision 3: SQLite statement order, positional descriptors,
-the §6 race converge resolved by one constraint-item ``GetItem`` after the
+``provision_user`` (design choice 3: SQLite statement order, positional descriptors,
+the identity contract race converge resolved by one constraint-item ``GetItem`` after the
 rollback, external-parent cross-checks), and ``provision_organization`` (task
 7): org + slug constraint + membership (+``membership_id`` guard,
 ``org_created_at`` denormalization) + audits in one transaction, the users
@@ -24,7 +24,8 @@ residue. Domain inputs come from the suite's own deterministic builders so the
 fixtures match the conformance cases exactly. Every failure asserts the domain
 error *class*, the conflict *kind*, an echo-free message, and the winner's
 identity where the contract pins it.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -149,7 +150,7 @@ type _RaceBatch = tuple[User, ExternalIdentity, Organization, Membership, list[A
 
 
 def _race_batch(suffix: str, *, email: str, provider_subject: str) -> _RaceBatch:
-    """One §6 first-login attempt, mirroring the suite's ``_provision_race_batch``."""
+    """One identity contract first-login attempt, mirroring the suite's ``_provision_race_batch``."""
     user_id = f"usr_test_{suffix}"
     organization_id = f"org_test_{suffix}"
     return (
@@ -187,7 +188,7 @@ def _constraint_pks(
 ) -> dict[str, str]:
     """The three constraint PKs a ``provision_user`` batch writes, by kind.
 
-    Phase 12 retired the batch's ``user_email`` guard item: the identity tuple
+    application-role retired the batch's ``user_email`` guard item: the identity tuple
     is the only identity-side constraint a provisioning batch writes (plus the
     organization slug and the ``mem_`` record-id guard).
     """
@@ -217,9 +218,9 @@ def _assert_batch_absent(
     """Direct table scans: the rejected batch consumed none of its own ids.
 
     ``shared_kinds`` names constraint kinds whose PK is deliberately the same
-    as another batch's — the §6 race carries one identity tuple across winner
+    as another batch's — the identity contract race carries one identity tuple across winner
     and loser, so that item must map to the *winner* (pinned by the caller),
-    not be absent. Phase 12 removed the email kind from this vocabulary: no
+    not be absent. application-role removed the email kind from this vocabulary: no
     batch writes an email guard any more.
     """
     user, identity, organization, membership, events = batch

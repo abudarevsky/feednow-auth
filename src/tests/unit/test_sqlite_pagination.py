@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 02 task-8 pagination determinism pass.
+"""Unit tests for the storage implementation pagination determinism pass.
 
 End-to-end traversal semantics (full-order walks, clamped-limit echoes,
 foreign/garbage cursors, keyset-under-insert) are owned by the conformance
@@ -6,9 +6,10 @@ suite; this module pins the SQLite-internal guarantees the suite cannot
 express adapter-neutrally: keyset tie-breaking through the real SQL on
 identical ``created_at`` rows, chronological == lexicographic order for mixed
 zero-microsecond/microsecond stored TEXT, a cursor positioned beyond the end
-of the data, and the adapter's minimum-side limit re-clamp (task 4's unit
+of the data, and the adapter's minimum-side limit re-clamp (implementation's unit
 file already covers the maximum side).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

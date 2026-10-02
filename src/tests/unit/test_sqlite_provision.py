@@ -1,6 +1,6 @@
-"""Unit tests for the Phase 02 task-7 SQLite ``provision_user`` compound.
+"""Unit tests for the storage implementation SQLite ``provision_user`` compound.
 
-Scope per the breakdown: cross-adapter *behavior* (happy-path reads, race
+Scope per the design notes: cross-adapter *behavior* (happy-path reads, race
 mapping, rollback proofs, the barrier race) is owned by the conformance suite;
 this module pins the SQLite-internal pieces only — the row-level stored truth
 of a batch write (shared-helper encoding: normalized ``''`` tenant,
@@ -9,12 +9,13 @@ around ``BEGIN IMMEDIATE`` (a failed batch never leaves the thread-local
 connection inside an open transaction and never persists a partial row), the
 provision-scoped race error mapping (the identity-tuple UNIQUE that stays a
 plain ``external_identity`` conflict on ``create_external_identity`` maps to
-``DuplicateExternalIdentityError`` only inside ``provision_user``; Phase 12
+``DuplicateExternalIdentityError`` only inside ``provision_user``; application-role
 narrowed this to the identity tuple alone — email is no longer a conflict on
 either path), winner resolution (the identity-tuple read is the sole key;
 the users-by-email fallback is gone), and the mid-batch non-integrity
 driver-error path.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

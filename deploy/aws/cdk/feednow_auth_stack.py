@@ -1,30 +1,23 @@
-"""FeedNowAuth CDK stack module.
+"""AWS infrastructure definition for feednow-auth.
 
-Exposes the :class:`FeedNowAuthEnv` value object that validates the
-``FEEDNOW_ENV`` deployment input and derives every environment-bound name
-from it, plus the :class:`FeedNowAuthStack` class. Phase 07 task 2 adds the
-DynamoDB tables (transcribed verbatim from ``SCHEMA`` in
-``src/app/storage/dynamodb.py``; Phase 11 task 8 extends them with the two
-TTL-enabled login-state/session tables); task 3 adds the Cognito user pool, the
-public PKCE app client, and the hosted domain; task 4 adds the generated
-API-key pepper secret and the least-privilege Lambda execution role (the
-consolidated IAM matrix from docs/phases/06-dynamodb.md); task 6 adds the
-runtime Lambda (Docker-free local bundling of ``deploy/aws/runtime`` +
-``src/app`` + the payload requirements), the HTTP API on the ``$default``
-stage, and the redaction-safe access logs. The remaining resources are
-added by the later Phase 07 tasks; naming is fixed here so every task
-synthesizes against the same environment contract.
+``FeedNowAuthEnv`` validates the deployment environment and derives
+environment-scoped names. ``FeedNowAuthStack`` imports user-provisioned
+Cognito resources and creates DynamoDB tables, a KMS-encrypted pepper, the Lambda
+runtime, and an HTTP API with redaction-safe access logs. Production data
+resources use retention policies. See ``docs/operations.md`` for deployment
+inputs and runtime behavior.
 """
 
 from __future__ import annotations
 
-import json
+import os
 import shutil
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, cast
+from urllib.parse import urlsplit
 
 import aws_cdk as cdk
 import jsii
@@ -32,19 +25,8 @@ from aws_cdk import BundlingOptions, ILocalBundling
 from aws_cdk.aws_apigatewayv2 import CfnStage, HttpApi, HttpMethod
 from aws_cdk.aws_apigatewayv2_integrations import HttpLambdaIntegration
 from aws_cdk.aws_cognito import (
-    AccountRecovery,
-    AuthFlow,
-    ClientAttributes,
-    CognitoDomainOptions,
-    OAuthFlows,
-    OAuthScope,
-    OAuthSettings,
-    SignInAliases,
-    StringAttribute,
     UserPool,
     UserPoolClient,
-    UserPoolDomain,
-    UserPoolOperation,
 )
 from aws_cdk.aws_dynamodb import (
     Attribute,
@@ -55,24 +37,15 @@ from aws_cdk.aws_dynamodb import (
     Table,
 )
 from aws_cdk.aws_iam import IPrincipal, IRole, PolicyStatement, Role, ServicePrincipal
+from aws_cdk.aws_kms import Key, KeySpec, KeyUsage
 from aws_cdk.aws_lambda import Architecture, Code, Function, IFunction, Runtime
 from aws_cdk.aws_logs import LogGroup, RetentionDays
-from aws_cdk.aws_secretsmanager import Secret, SecretStringGenerator
 from constructs import Construct
 
 VALID_ENVIRONMENTS = ("dev", "staging", "prod")
 
-#: OAuth scopes the public PKCE client asks Cognito for. ``openid`` is what
-#: makes the issued token a JWT the runtime can verify against the pool JWKS;
-#: ``email``/``profile`` are the only claims identity resolution reads.
-COGNITO_OAUTH_SCOPES: Final[tuple[OAuthScope, ...]] = (
-    OAuthScope.OPENID,
-    OAuthScope.EMAIL,
-    OAuthScope.PROFILE,
-)
-
-#: The five runtime configuration keys injected into the task-6 Lambda
-#: (the Phase 07 task 5 boot contract). Duplicated rather than imported:
+#: Runtime configuration keys injected into the Lambda. Duplicated rather than
+#: imported:
 #: the synth path (``requirements.txt``) carries no fastapi/boto3, so the
 #: CDK app must not import ``deploy/aws/runtime/handler.py``.
 #: ``test_cdk_lambda_api.py`` pins these against the handler's
@@ -81,7 +54,11 @@ LAMBDA_REGION_ENV: Final = "FEEDNOW_DYNAMODB_REGION"
 LAMBDA_TABLE_PREFIX_ENV: Final = "FEEDNOW_TABLE_PREFIX"
 LAMBDA_ISSUERS_ENV: Final = "FEEDNOW_COGNITO_ISSUERS"
 LAMBDA_CLIENT_IDS_ENV: Final = "FEEDNOW_COGNITO_CLIENT_IDS"
-LAMBDA_PEPPER_SECRET_ID_ENV: Final = "FEEDNOW_PEPPER_SECRET_ID"
+LAMBDA_PEPPER_CIPHERTEXT_ENV: Final = "FEEDNOW_PEPPER_CIPHERTEXT_B64"
+LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV: Final = (
+    "FEEDNOW_COGNITO_CLIENT_SECRET_CIPHERTEXT_B64"
+)
+LAMBDA_ENVIRONMENT_ENV: Final = "FEEDNOW_ENV"
 
 #: The HTTP API stage the runtime is mounted on (matches ``handler.API_STAGE``
 #: from task 5: no released Mangum accepts an ``api_stage`` keyword, so the
@@ -103,7 +80,7 @@ API_ACCESS_LOG_FORMAT: Final = (
 
 
 def parse_cognito_callback_urls(raw: Sequence[str] | str | None) -> tuple[str, ...]:
-    """Normalize the ``COGNITO_CALLBACK_URLS`` input into an ordered URL tuple.
+    """Normalize the ``FEEDNOW_COGNITO_CALLBACK_URLS`` input into an ordered URL tuple.
 
     Accepts either the raw comma-separated ``.env`` string or an already
     split sequence. Blank entries and surrounding whitespace are dropped and
@@ -127,10 +104,10 @@ class _IndexSpec:
 
 @dataclass(frozen=True)
 class _TableSpec:
-    """One table's name suffix, key schema (decision 2's layout), and TTL.
+    """One table's name suffix, key schema (design choice 2's layout), and TTL.
 
-    ``ttl_attribute`` (Phase 11 task 8) names a non-key numeric attribute
-    DynamoDB should expire items on; it is ``None`` for every Phase 06 table.
+    ``ttl_attribute`` (session) names a non-key numeric attribute
+    DynamoDB should expire items on; it is ``None`` for every DynamoDB table.
     """
 
     name: str
@@ -141,11 +118,11 @@ class _TableSpec:
 
 
 #: The table schema, transcribed verbatim from ``SCHEMA`` in
-#: ``src/app/storage/dynamodb.py`` (docs/phases/06-dynamodb.md "Table and
-#: index schema"), plus the two additive Phase 11 session tables, the additive
-#: Phase 12 ``users/by-email`` GSI (an access path for the non-unique email
-#: lookup, never a constraint), and the additive Phase 13 ``users/
-#: by-application-role`` GSI (``g_role`` = the ``application_role`` value the
+#: ``src/app/storage/dynamodb.py`` (see ``docs/storage.md``), plus the two
+#: session tables, the additive ``users/by-email`` GSI (an access path for
+#: the non-unique email lookup, never a constraint), and the additive
+#: ``users/by-application-role`` GSI (``g_role`` = the ``application_role``
+#: value the
 #: runtime ``user_item`` codec writes on every path and the role transition
 #: rewrites in lockstep — the index mirrors that write; a GSI add is online,
 #: tables are never replaced). Duplicated
@@ -180,21 +157,21 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
         ),
     ),
     _TableSpec(name="unique_constraints", partition_key="pk"),
-    # Phase 11 task 8: the login-state and session stores, TTL-enabled on the
+    # Login-state and session stores, TTL-enabled on the
     # numeric ``expires_at_epoch`` attribute the task-7 adapter writes.
     _TableSpec(name="oauth_login_states", partition_key="pk", ttl_attribute="expires_at_epoch"),
     _TableSpec(name="app_sessions", partition_key="pk", ttl_attribute="expires_at_epoch"),
 )
 
-#: The actions the Phase 06 adapter performs *only* inside
-#: ``TransactWriteItems`` (docs/phases/06-dynamodb.md hardening note), so
+#: The actions the DynamoDB adapter performs *only* inside
+#: ``TransactWriteItems`` (see ``docs/storage.md``), so
 #: their grants are pinned with the ``dynamodb:EnclosingOperation``
 #: condition and the role can never write outside a transaction.
-#: ``UpdateItem``/``DeleteItem`` are deliberately absent: the CAS revoke and
-#: the membership delete are standalone conditional single-item writes.
+#: ``UpdateItem`` and ``DeleteItem`` are unpinned because CAS updates,
+#: membership changes, and administrator cleanup use standalone writes.
 _TRANSACTIONAL_ACTIONS: Final[frozenset[str]] = frozenset({"PutItem", "ConditionCheckItem"})
 
-#: Phase 11 task 8: the session/login-state tables are written by the task-7
+#: The session/login-state tables are written by the runtime
 #: adapter as *standalone* conditional operations (``put_item`` with
 #: ``attribute_not_exists``, ``delete_item`` with ``attribute_exists``) and
 #: read by ``get_item`` -- never inside ``TransactWriteItems``. Their grants
@@ -202,49 +179,55 @@ _TRANSACTIONAL_ACTIONS: Final[frozenset[str]] = frozenset({"PutItem", "Condition
 #: would deny the standalone write the adapter actually performs).
 _STANDALONE_WRITE_TABLES: Final[frozenset[str]] = frozenset({"oauth_login_states", "app_sessions"})
 
-#: Consolidated per-resource least-privilege matrix, transcribed verbatim
-#: from the "Least-privilege IAM matrix" table in docs/phases/06-dynamodb.md
-#: (Phase 07 CDK input, AC 5), extended by the two Phase 11 session rows with
-#: exactly the actions the task-7 adapter calls, and by the Phase 12
-#: ``users`` ``Query`` the ``by-email`` lookup performs. GSI ARNs are not rows
-#: here: they get ``dynamodb:Query`` only, and a GSI ``Query`` also needs
-#: ``Query`` on the base table ARN (already covered by the table rows below).
-#: No ``Scan``, no table-admin actions (``CreateTable``/``DeleteTable``/
-#: ``DescribeTable`` belong to the CloudFormation deploy path, never the
-#: runtime role).
+#: Per-table runtime grant matrix. Global-administrator operations require
+#: Scan and DeleteItem on application tables; these actions are granted only
+#: on the environment's named table ARNs. No table-administration actions
+#: (CreateTable/DeleteTable/DescribeTable) are granted to the runtime role.
 _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
-    # Phase 12: ``Query`` is the ``users/by-email`` GSI read, which DynamoDB
-    # authorizes against the base-table ARN as well as the index ARN.
-    "users": frozenset({"GetItem", "PutItem", "Query", "ConditionCheckItem"}),
-    "organizations": frozenset({"GetItem", "PutItem", "BatchGetItem", "ConditionCheckItem"}),
-    "external_identities": frozenset({"PutItem"}),
-    "audit_events": frozenset({"PutItem"}),
-    "api_keys": frozenset({"GetItem", "PutItem", "UpdateItem", "Query"}),
-    "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query"}),
-    "unique_constraints": frozenset({"GetItem", "PutItem"}),
-    # Phase 11: save/consume (put + conditional delete) and create/get
-    # (put + get). No Scan, no index grants (both are pk-only single tables).
+    # ``Query`` on users/by-email is authorized against both table and index ARN.
+    "users": frozenset(
+        {"GetItem", "PutItem", "UpdateItem", "DeleteItem", "Query", "ConditionCheckItem"}
+    ),
+    "organizations": frozenset(
+        {
+            "GetItem",
+            "PutItem",
+            "UpdateItem",
+            "DeleteItem",
+            "BatchGetItem",
+            "Scan",
+            "ConditionCheckItem",
+        }
+    ),
+    "external_identities": frozenset({"PutItem", "DeleteItem", "Scan"}),
+    "audit_events": frozenset({"PutItem", "DeleteItem", "Scan"}),
+    "api_keys": frozenset({"GetItem", "PutItem", "DeleteItem", "UpdateItem", "Query", "Scan"}),
+    "memberships": frozenset({"GetItem", "PutItem", "DeleteItem", "Query", "Scan"}),
+    "unique_constraints": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
+    # Login states need conditional consume; sessions support admin cleanup.
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
-    "app_sessions": frozenset({"GetItem", "PutItem"}),
+    "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
 }
 
 
 def _runtime_policy_statements(
     *,
     tables: Mapping[str, Table],
-    pepper_secret_arn: str,
+    pepper_kms_key_arn: str,
+    environment: str,
     log_group_arn: str,
 ) -> list[PolicyStatement]:
-    """One statement per matrix row for the Lambda execution role (task 4).
+    """One statement per matrix row for the Lambda execution role (implementation).
 
     Each table gets a non-transactional statement (point reads, the CAS
     ``UpdateItem``, the conditional ``DeleteItem``, base-table ``Query``)
     and, when the matrix lists them, a ``PutItem``/``ConditionCheckItem``
-    statement pinned to ``TransactWriteItems``. The Phase 11 session tables
+    statement pinned to ``TransactWriteItems``. The session session tables
     (:data:`_STANDALONE_WRITE_TABLES`) are the documented exception: their
     writes are standalone conditional operations, so all their actions are
     granted unpinned. Each GSI gets ``Query`` only. The pepper grant is
-    ``GetSecretValue`` on the secret ARN; the log grant is
+    ``kms:Decrypt`` on the environment's KMS key, restricted to its encryption
+    context; the log grant is
     ``CreateLogStream``/``PutLogEvents`` on the function's log group ARN
     pattern -- nothing else, no wildcards anywhere.
     """
@@ -279,8 +262,11 @@ def _runtime_policy_statements(
             )
     statements.append(
         PolicyStatement(
-            actions=["secretsmanager:GetSecretValue"],
-            resources=[pepper_secret_arn],
+            actions=["kms:Decrypt"],
+            resources=[pepper_kms_key_arn],
+            conditions={
+                "StringEquals": {"kms:EncryptionContext:environment": environment}
+            },
         )
     )
     statements.append(
@@ -318,10 +304,6 @@ class _LocalBundling:
 
         for module in sorted((project_root / "deploy" / "aws" / "runtime").glob("*.py")):
             shutil.copy(module, out / module.name)
-        shutil.copy(
-            project_root / "src" / "cognito_trigger_lambda.py",
-            out / "cognito_trigger_lambda.py",
-        )
         shutil.copytree(
             project_root / "src" / "app",
             out / "app",
@@ -362,7 +344,7 @@ class _LocalBundling:
 
 
 def _runtime_lambda_code() -> Code:
-    """The task-6 asset bundle: runtime modules + ``app/`` + payload wheels.
+    """The implementation asset bundle: runtime modules + ``app/`` + payload wheels.
 
     The asset source is the repository root (the bundling class selects the
     payload itself); the ``command`` is the Docker fallback that never runs
@@ -413,7 +395,7 @@ class FeedNowAuthEnv:
     def resource_prefix(self) -> str:
         """Prefix for physical resource names, e.g. ``feednow-auth-dev-``.
 
-        Matches the runtime ``table_prefix`` contract from Phase 06: table
+        Matches the runtime ``table_prefix`` contract from DynamoDB: table
         names are ``<resource_prefix><table-name>``.
         """
         return f"feednow-auth-{self.name}-"
@@ -425,41 +407,37 @@ class FeedNowAuthEnv:
 
     @property
     def cognito_client_name(self) -> str:
-        """Cognito app client name, e.g. ``feednow-auth-dev`` (task 3)."""
+        """Cognito app client name, e.g. ``feednow-auth-dev`` (implementation)."""
         return f"feednow-auth-{self.name}"
 
     @property
-    def pepper_secret_name(self) -> str:
-        """Secrets Manager name of the generated API-key pepper (task 4),
-        e.g. ``feednow-auth/dev/api-pepper``. A name, never secret material.
-        """
-        return f"feednow-auth/{self.name}/api-pepper"
+    def pepper_kms_alias(self) -> str:
+        """Environment-specific KMS alias for encrypting the runtime pepper."""
+        return f"alias/feednow-auth-{self.name}-api-pepper"
 
     @property
     def lambda_function_name(self) -> str:
-        """Runtime Lambda function name, e.g. ``feednow-auth-dev`` (task 6).
+        """Runtime Lambda function name, e.g. ``feednow-auth-dev`` (implementation).
 
-        Fixed here because the task-4 log grant is scoped to this
+        Fixed here because the implementation log grant is scoped to this
         function's log group ARN pattern.
         """
         return f"feednow-auth-{self.name}"
 
     @property
     def lambda_role_name(self) -> str:
-        """Least-privilege Lambda execution role name (task 4), e.g.
+        """Least-privilege Lambda execution role name (implementation), e.g.
         ``feednow-auth-dev-lambda``."""
         return f"feednow-auth-{self.name}-lambda"
 
     @property
     def http_api_name(self) -> str:
-        """HTTP API name (task 6), e.g. ``feednow-auth-dev``."""
+        """HTTP API name (implementation), e.g. ``feednow-auth-dev``."""
         return f"feednow-auth-{self.name}"
 
 
 class FeedNowAuthStack(cdk.Stack):
-    """Environment-bound stack; DynamoDB tables (task 2), Cognito (task 3), the
-    pepper secret + least-privilege Lambda role (task 4), and the runtime
-    Lambda + HTTP API with redaction-safe access logs (task 6) live here."""
+    """Environment-bound data, identity, KMS, Lambda, and HTTP API stack."""
 
     def __init__(
         self,
@@ -468,6 +446,11 @@ class FeedNowAuthStack(cdk.Stack):
         *,
         feednow_env: FeedNowAuthEnv | str,
         cognito_callback_urls: Sequence[str] | str | None = None,
+        cognito_domain: str | None = None,
+        account_origin: str | None = None,
+        vispector_url: str | None = None,
+        existing_user_pool_id: str | None = None,
+        existing_client_id: str | None = None,
         **kwargs: object,
     ) -> None:
         resolved = (
@@ -475,22 +458,60 @@ class FeedNowAuthStack(cdk.Stack):
         )
         super().__init__(scope, id, **kwargs)
         self.feednow_env = resolved
-        # Resolved prefix for runtime wiring (Phase 07 task 6).
+        # Resolved prefix for runtime wiring.
         self.table_prefix = resolved.resource_prefix
-        # Required non-secret deployment input (Phase 07 task 3). CDK validates
-        # OAuth redirect URIs at synth time, so an empty value cannot be
-        # deferred to deploy: fail here with the input name the operator set.
-        callback_urls = parse_cognito_callback_urls(cognito_callback_urls)
-        if not callback_urls:
-            msg = (
-                "COGNITO_CALLBACK_URLS is required and must contain at least one HTTPS "
-                "redirect URI (comma-separated); see deploy/aws/cdk/.env.example."
+        origin = (account_origin or "").strip().rstrip("/")
+        parsed_origin = urlsplit(origin)
+        local_dev_origin = (
+            resolved.name == "dev"
+            and parsed_origin.scheme == "http"
+            and parsed_origin.hostname in {"localhost", "127.0.0.1", "[::1]", "::1"}
+            and existing_user_pool_id is not None
+            and existing_client_id is not None
+        )
+        if (
+            (parsed_origin.scheme != "https" and not local_dev_origin)
+            or not parsed_origin.netloc
+            or parsed_origin.path
+            or parsed_origin.query
+            or parsed_origin.fragment
+        ):
+            raise ValueError("ACCOUNT_ORIGIN is required and must be an HTTPS origin")
+        self.account_origin = origin
+        callback_urls = parse_cognito_callback_urls(cognito_callback_urls) or (
+            f"{origin}/api/oauth/callback",
+        )
+        if any(
+            (urlsplit(url).scheme != "https" and not (
+                resolved.name == "dev"
+                and existing_user_pool_id is not None
+                and existing_client_id is not None
+                and urlsplit(url).scheme == "http"
+                and urlsplit(url).hostname in {"localhost", "127.0.0.1", "[::1]", "::1"}
+            ))
+            or not urlsplit(url).netloc
+            for url in callback_urls
+        ):
+            raise ValueError(
+                "FEEDNOW_COGNITO_CALLBACK_URLS entries must be HTTPS "
+                "(dev import permits loopback HTTP)"
             )
-            raise ValueError(msg)
+        if not existing_user_pool_id or not existing_client_id:
+            raise ValueError(
+                "User-provisioned Cognito pool and client IDs are required for every environment"
+            )
         self.cognito_callback_urls = callback_urls
-
-        # Phase 07 task 2: the Phase 06 schema tables, extended by Phase 11
-        # task 8 with the two session tables. Names are
+        service_url = (vispector_url or "").strip()
+        if service_url:
+            parsed_service_url = urlsplit(service_url)
+            if (
+                parsed_service_url.scheme != "https"
+                or not parsed_service_url.netloc
+                or parsed_service_url.username is not None
+                or parsed_service_url.password is not None
+            ):
+                raise ValueError("FEEDNOW_VISPECTOR_URL must be an absolute HTTPS URL")
+        # Schema tables include login-state and session data. Names are
         # ``<resource_prefix><table-name>`` so the runtime ``table_prefix``
         # resolves every adapter access through these physical names.
         # Billing is on-demand everywhere; data lives on in prod, is retained
@@ -512,9 +533,9 @@ class FeedNowAuthStack(cdk.Stack):
                 ),
                 billing_mode=BillingMode.PAY_PER_REQUEST,
                 removal_policy=removal_policy,
-                # Phase 11 task 8: the session tables expire items on the
+                # The session tables expire items on the
                 # numeric ``expires_at_epoch`` attribute the task-7 adapter
-                # writes (None elsewhere -> no TTL on the Phase 06 tables).
+                # writes (None elsewhere -> no TTL on core tables).
                 time_to_live_attribute=spec.ttl_attribute,
                 # PITR guards prod only (task 2); the bool shorthand is
                 # deprecated in favour of the explicit specification.
@@ -533,107 +554,43 @@ class FeedNowAuthStack(cdk.Stack):
                 )
             self.tables[spec.name] = table
 
-        # Phase 07 task 3: Cognito user pool + public PKCE app client + hosted
-        # domain. Email is the only sign-in identity (no usernames, no phone
-        # numbers) and self-service sign-up is on so first-login provisioning
-        # (Phase 03) has an identity to resolve. Password reset goes through
-        # the verified-email recovery mechanism with Cognito's default email
-        # templates -- no custom sender, so no SES grant anywhere.
-        self.user_pool = UserPool(
-            self,
-            "CognitoUserPool",
-            sign_in_aliases=SignInAliases(email=True),
-            self_sign_up_enabled=True,
-            account_recovery=AccountRecovery.EMAIL_ONLY,
-            custom_attributes={
-                # email_verified is read-only to app clients. Keep Google's
-                # upstream proof in a writable immutable-in-meaning (but
-                # Cognito-mapped/mutable) attribute; the trigger alone may
-                # translate verified=true into Cognito's standard flag.
-                "g_verified": StringAttribute(min_len=4, max_len=5, mutable=True),
-            },
-            removal_policy=removal_policy,
-        )
-
-        # Cognito must translate trusted upstream verification into its own
-        # read-only email_verified field. First-time Google identities are
-        # handled in PreSignUp; legacy profile repair is an operator action.
-        trigger_log_group = LogGroup(
-            self,
-            "CognitoTriggerLogs",
-            log_group_name=f"/aws/lambda/{resolved.resource_prefix}cognito-trigger",
-            retention=RetentionDays.ONE_WEEK,
-            removal_policy=cdk.RemovalPolicy.DESTROY,
-        )
-        trigger_role = Role(
-            self,
-            "CognitoTriggerRole",
-            assumed_by=cast(IPrincipal, cast(object, ServicePrincipal("lambda.amazonaws.com"))),
-            description="Least-privilege Cognito registration trigger role.",
-        )
-        trigger_role.add_to_policy(
-            PolicyStatement(
-                actions=["logs:CreateLogStream", "logs:PutLogEvents"],
-                resources=[f"{trigger_log_group.log_group_arn}:*"],
+        # Cognito lifecycle and configuration are user-managed. Import only;
+        # never create, replace, or mutate a pool/client as part of deployment.
+        if not existing_user_pool_id or not existing_client_id:
+            raise ValueError(
+                "A user-provisioned Cognito pool and client are required for every environment"
             )
+        self.user_pool = UserPool.from_user_pool_id(
+            self, "ExistingCognitoUserPool", existing_user_pool_id
         )
-        self.cognito_trigger_function = Function(
-            self,
-            "CognitoTriggerFunction",
-            function_name=f"{resolved.resource_prefix}cognito-trigger",
-            runtime=Runtime.PYTHON_3_13,
-            architecture=Architecture.X86_64,
-            memory_size=128,
-            timeout=cdk.Duration.seconds(10),
-            handler="cognito_trigger_lambda.handler",
-            code=_runtime_lambda_code(),
-            role=cast(IRole, cast(object, trigger_role)),
-            log_group=trigger_log_group,
+        self.user_pool_client = UserPoolClient.from_user_pool_client_id(
+            self, "ExistingCognitoClient", existing_client_id
         )
-        self.user_pool.add_trigger(UserPoolOperation.PRE_SIGN_UP, self.cognito_trigger_function)
-        self.user_pool.add_trigger(
-            UserPoolOperation.PRE_AUTHENTICATION, self.cognito_trigger_function
-        )
-
-        # Public (no-secret) client: PKCE is the only safe authorization-code
-        # flow for a browser SPA. ALLOW_USER_PASSWORD_AUTH is the explicit flow
-        # the task-7 non-prod smoke path needs; CDK pairs every explicit auth
-        # flow with ALLOW_REFRESH_TOKEN_AUTH, which is what the runtime
-        # refresh path relies on. Callback/logout URIs come from the required
-        # COGNITO_CALLBACK_URLS input, never from a hardcoded literal.
-        self.user_pool_client = UserPoolClient(
-            self,
-            "CognitoApiClient",
-            user_pool=self.user_pool,
-            user_pool_client_name=resolved.cognito_client_name,
-            generate_secret=False,
-            auth_flows=AuthFlow(user_password=True),
-            read_attributes=(
-                ClientAttributes().with_standard_attributes(
-                    email=True, email_verified=True, fullname=True
-                )
-            ),
-            write_attributes=(
-                ClientAttributes()
-                .with_standard_attributes(email=True)
-                .with_custom_attributes("g_verified")
-            ),
-            o_auth=OAuthSettings(
-                callback_urls=list(callback_urls),
-                logout_urls=list(callback_urls),
-                scopes=list(COGNITO_OAUTH_SCOPES),
-                flows=OAuthFlows(authorization_code_grant=True),
-            ),
-        )
-
-        # Hosted UI domain: ``<prefix>.auth.<region>.amazoncognito.com``. The
-        # prefix is global-unique, hence the environment suffix.
-        self.user_pool_domain = UserPoolDomain(
-            self,
-            "CognitoDomain",
-            user_pool=self.user_pool,
-            cognito_domain=CognitoDomainOptions(domain_prefix=resolved.cognito_domain_prefix),
-        )
+        self.cognito_trigger_function = None
+        self.user_pool_domain = None
+        configured_cognito_domain = (cognito_domain or "").strip().rstrip("/")
+        if configured_cognito_domain:
+            parsed_cognito_domain = urlsplit(configured_cognito_domain)
+            if (
+                parsed_cognito_domain.scheme != "https"
+                or not parsed_cognito_domain.netloc
+                or parsed_cognito_domain.path
+                or parsed_cognito_domain.query
+                or parsed_cognito_domain.fragment
+                or parsed_cognito_domain.username is not None
+                or parsed_cognito_domain.password is not None
+            ):
+                raise ValueError("FEEDNOW_COGNITO_DOMAIN must be an HTTPS origin")
+            cognito_domain = configured_cognito_domain
+        else:
+            cognito_domain = cdk.Fn.join(
+                "",
+                [
+                    f"https://{resolved.cognito_domain_prefix}.auth.",
+                    self.region,
+                    ".amazoncognito.com",
+                ],
+            )
 
         # Issuer for the runtime ``FEEDNOW_COGNITO_ISSUERS`` wiring (task 6):
         # the pool id is an unresolved token, so the URL is assembled with
@@ -647,32 +604,22 @@ class FeedNowAuthStack(cdk.Stack):
         cdk.CfnOutput(self, "CognitoIssuerUrl", value=self.cognito_issuer_url)
         cdk.CfnOutput(self, "CognitoClientId", value=self.user_pool_client.user_pool_client_id)
 
-        # Phase 07 task 4: the API-key pepper, generated by Secrets Manager
-        # itself (GenerateSecretString) under the JSON field the runtime
-        # pepper source parses. 48 bytes clears the 32-byte floor from
-        # src/app/auth/pepper.py with margin. No plaintext pepper ever
-        # exists in source, .env, stack outputs, or this template; prod
-        # retains the secret because losing it invalidates every stored
-        # credential digest.
-        self.pepper_secret = Secret(
+        # The operator encrypts the pepper with this key and supplies only the
+        # ciphertext to Lambda configuration. Plaintext never enters CDK,
+        # CloudFormation, SSM, or deployment files.
+        self.pepper_kms_key = Key(
             self,
-            "ApiPepperSecret",
-            secret_name=resolved.pepper_secret_name,
-            generate_secret_string=SecretStringGenerator(
-                generate_string_key="pepper",
-                # CDK requires the template alongside the key; the generated
-                # value is merged into it at create time, so the template
-                # itself carries no secret material -- just the field name.
-                secret_string_template=json.dumps({}),
-                # CDK's password_length is the CloudFormation ByteLength.
-                password_length=48,
-                exclude_punctuation=True,
-            ),
+            "PepperKmsKey",
+            alias=resolved.pepper_kms_alias,
+            description=f"KMS key for the {resolved.name} API-key pepper",
+            enable_key_rotation=True,
+            key_spec=KeySpec.SYMMETRIC_DEFAULT,
+            key_usage=KeyUsage.ENCRYPT_DECRYPT,
             removal_policy=removal_policy,
         )
+        cdk.CfnOutput(self, "PepperKmsKeyArn", value=self.pepper_kms_key.key_arn)
 
-        # Phase 07 task 4: the least-privilege execution role the task-6
-        # Lambda runs as. No managed policies at all -- even
+        # The runtime execution role. No managed policies at all -- even
         # AWSLambdaBasicExecutionRole would wildcard the log group -- and
         # no table-admin actions: CloudFormation owns the tables, the
         # runtime only reads/writes items per the matrix.
@@ -689,7 +636,8 @@ class FeedNowAuthStack(cdk.Stack):
         )
         for statement in _runtime_policy_statements(
             tables=self.tables,
-            pepper_secret_arn=self.pepper_secret.secret_arn,
+            pepper_kms_key_arn=self.pepper_kms_key.key_arn,
+            environment=resolved.name,
             log_group_arn=self.format_arn(
                 service="logs",
                 resource="log-group",
@@ -701,14 +649,8 @@ class FeedNowAuthStack(cdk.Stack):
         ):
             self.lambda_role.add_to_policy(statement)
 
-        # Phase 07 task 6: the runtime Lambda. The code asset is produced by
-        # _LocalBundling (no Docker); the handler is the task-5 composition
-        # root; the role is the task-4 least-privilege role verbatim, so no
-        # grant beyond the IAM matrix exists anywhere. The five FEEDNOW_*
-        # values are all stack-derived: the deployment region, the task-2
-        # table prefix, the task-3 issuer/client references, and the task-4
-        # secret *name* (a name, never material; boto3 resolves names
-        # account-internally).
+        # The runtime Lambda receives only the KMS ciphertext; plaintext is
+        # decrypted under its environment-specific context on cold start.
         self.runtime_function = Function(
             self,
             "RuntimeFunction",
@@ -725,15 +667,26 @@ class FeedNowAuthStack(cdk.Stack):
             role=cast(IRole, cast(object, self.lambda_role)),
             environment={
                 LAMBDA_REGION_ENV: self.region,
+                LAMBDA_ENVIRONMENT_ENV: resolved.name,
                 LAMBDA_TABLE_PREFIX_ENV: self.table_prefix,
                 LAMBDA_ISSUERS_ENV: self.cognito_issuer_url,
                 LAMBDA_CLIENT_IDS_ENV: self.user_pool_client.user_pool_client_id,
-                LAMBDA_PEPPER_SECRET_ID_ENV: self.pepper_secret.secret_name,
+                LAMBDA_PEPPER_CIPHERTEXT_ENV: os.getenv(LAMBDA_PEPPER_CIPHERTEXT_ENV, ""),
+                LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV: os.getenv(
+                    LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV, ""
+                ),
+                "FEEDNOW_COGNITO_AUTHORIZE_URL": f"{cognito_domain}/oauth2/authorize",
+                "FEEDNOW_COGNITO_TOKEN_ENDPOINT": f"{cognito_domain}/oauth2/token",
+                "FEEDNOW_COGNITO_USERINFO_URL": f"{cognito_domain}/oauth2/userInfo",
+                "FEEDNOW_OAUTH_REDIRECT_URL": callback_urls[0],
+                "FEEDNOW_ALLOWED_RETURN_ORIGINS": origin,
+                "FEEDNOW_SESSION_TTL_SECONDS": "1800",
+                "FEEDNOW_COOKIE_SECURE": "true",
+                **({"FEEDNOW_VISPECTOR_URL": service_url} if service_url else {}),
             },
         )
 
-        # Phase 07 task 6: the public HTTP API (v2) on the $default stage --
-        # the same stage the task-5 handler documents via API_STAGE. Both
+        # The public HTTP API (v2) on the $default stage. Both
         # routes proxy to the function with payload format 2.0 (what Mangum
         # reads); HttpLambdaIntegration attaches the API-to-Lambda invoke
         # permission per route, scoped to the function ARN and this API's
@@ -759,6 +712,7 @@ class FeedNowAuthStack(cdk.Stack):
             methods=[HttpMethod.ANY],
             integration=runtime_integration,
         )
+        cdk.CfnOutput(self, "ApiEndpoint", value=self.http_api.api_endpoint)
 
         # Redaction-safe access logs: only the five tokens in
         # API_ACCESS_LOG_FORMAT are emitted -- no $context.requestHeader.*

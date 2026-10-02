@@ -1,6 +1,6 @@
 """Cognito-shaped token fixtures: RSA keygen, signer, and a counting JWKS server.
 
-Per the Phase 03 test-strategy decision, this module provides exactly the
+Per the identity test-strategy decision, this module provides exactly the
 sanctioned fixtures — no live Cognito pool, ever:
 
 - :func:`generate_test_key` — throwaway RSA-2048 keypair bound to a ``kid``.
@@ -15,7 +15,8 @@ sanctioned fixtures — no live Cognito pool, ever:
 Issuer URLs are ``http://127.0.0.1:{port}/{segment}`` so the source-derived
 JWKS URL ``{iss}/.well-known/jwks.json`` maps onto
 ``/{segment}/.well-known/jwks.json`` on this server.
-"""
+
+Current behavior and invariants: ``docs/cognito.md``."""
 
 from __future__ import annotations
 

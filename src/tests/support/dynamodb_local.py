@@ -1,6 +1,6 @@
 """DynamoDB Local test harness: env gating, endpoint probe, and table lifecycle.
 
-Per the Phase 06 harness decision (breakdown decision 8), DynamoDB Local tests
+Per the DynamoDB harness decision (design notes design choice 8), DynamoDB Local tests
 are **opt-in**: they carry the ``dynamodb_local`` marker and skip with an
 explicit reason unless ``FEEDNOW_DYNAMODB_LOCAL_ENDPOINT`` is set and the
 endpoint is reachable, so the default ``uv run pytest`` stays green on
@@ -13,12 +13,13 @@ adapter with all tables empty, per test"): each test creates the nine
 adapter tables under a fresh random prefix and deletes them on teardown —
 deterministic, no truncation races.
 
-The table spec is the adapter's :data:`app.storage.dynamodb.SCHEMA` — the
-single source of the table names and key schemas (breakdown decision 2),
+The table contract is the adapter's :data:`app.storage.dynamodb.SCHEMA` — the
+single source of the table names and key schemas (design notes design choice 2),
 re-exported here as :data:`TABLE_SPECS` so the harness and the adapter can never
 drift. ``make_dynamodb_storage`` builds an adapter under a fresh prefix through
 the documented factory.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -128,7 +129,7 @@ def make_dynamodb_resource(endpoint_url: str) -> Any:
     """A boto3 DynamoDB resource pointed at Local with dummy credentials.
 
     Returns ``Any`` deliberately: boto3 resources are untyped at the
-    ``resource()`` factory and the adapter's injected-resource seam (task 2)
+    ``resource()`` factory and the adapter's injected-resource seam (implementation)
     accepts the same shape. Construction performs no network I/O.
     """
     return boto3.resource(

@@ -1,6 +1,6 @@
-"""Unit tests for Phase 05 task 1 credential primitives (:mod:`app.auth.credentials`).
+"""Unit tests for API-key credential primitives (:mod:`app.auth.credentials`).
 
-Verify lines covered (per the Phase 05 breakdown, task 1):
+Verify lines covered (per the API-key design notes, implementation):
 
 1. 10k generated key-ids are unique and match the pinned Crockford-26 ULID
    shape (timestamp chars 1-10 with first char ∈ ``01234567``, randomness
@@ -16,7 +16,8 @@ Verify lines covered (per the Phase 05 breakdown, task 1):
 6. ``secret_matches`` is a correct constant-time matcher and
    ``dummy_secret_matches`` performs the same crypto work (call-count proof)
    while never authenticating.
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -116,7 +117,7 @@ def test_key_id_randomness_variates():
 
 
 def test_key_id_fits_the_frozen_keyid_bound():
-    """The §8 segment must fit the Phase 01 ``KeyId`` ≤ 64 bound."""
+    """The credential contract segment must fit the initial ``KeyId`` ≤ 64 bound."""
     assert len(generate_key_id()) <= 64
 
 
@@ -396,7 +397,7 @@ def test_dummy_compare_performs_the_same_crypto_work(monkeypatch):
 
 
 def test_credentials_imports_stay_within_stdlib_and_domain():
-    """Decision 3: everything Phase 05 task 1 ships is stdlib + domain models.
+    """design choice 3: everything API-key ships is stdlib + domain models.
 
     An AST guard over the module body proves no AWS SDK, web framework, or
     configuration import sneaks in (the no-``boto3`` proof stays green).

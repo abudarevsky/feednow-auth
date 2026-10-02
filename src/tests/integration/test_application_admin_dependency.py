@@ -1,10 +1,10 @@
-"""HTTP acceptance proofs for the Phase 13 task-4 global-administrator
+"""HTTP acceptance proofs for the admin implementation global-administrator
 dependency (:func:`app.auth.application_access.build_application_admin_dependency`).
 
 A **throwaway probe router** mounted on a test-only app (the
 ``test_principal_dispatch``/``test_api_key_auth_matrix`` pattern — this
 dependency is mounted on **no** production route; the frozen manifest is
-unchanged) exercises the spec-13 required-behavior-6 matrix over the real
+unchanged) exercises the contract-13 required-behavior-6 matrix over the real
 HTTP seam: signed-JWT humans, live API keys (one created by an ADMIN user),
 and unauthenticated bearers.
 
@@ -18,9 +18,10 @@ Proofs:
 - authentication precedes authorization: a missing header is the 401 class,
   provably before any role decision;
 - the whole matrix mutates nothing and appends zero audit rows (the gate is
-  read-only; denial auditing is not this seam's job — spec 13 pins the
+  read-only; denial auditing is not this seam's job — contract 13 pins the
   reviewed audit to the administration transition).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the
 # ``organization_access`` precedent): the probe handler's
@@ -350,8 +351,7 @@ def test_admin_can_suspend_then_delete_organization_with_confirmation(env: _Gate
         key.status is ApiKeyStatus.REVOKED
         for key in env.storage.list_api_keys(OrganizationId("org_gate"), PageParams(limit=20)).items
     )
-    # Global admin authorization remains usable when this was their final
-    # active membership, so the same admin can complete the removal.
+    # Global administration remains usable until the deletion completes.
     assert env.client.get("/v1/admin/summary", headers=headers).status_code == 200
     deleted = env.client.post(
         "/v1/admin/organizations/org_gate/delete",

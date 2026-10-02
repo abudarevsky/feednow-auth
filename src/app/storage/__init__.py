@@ -6,8 +6,9 @@ imported explicitly: ``from app.storage.sqlite import open_sqlite_storage``.
 
 Keeping the package initializer adapter-free means application code typed
 against :class:`~app.storage.contract.Storage` never loads a driver, and the
-subprocess-isolated import check in the Phase 02 task-1 tests proves it.
-"""
+subprocess-isolated import check in the storage implementation tests proves it.
+
+Current behavior and invariants: ``docs/storage.md``."""
 
 from app.storage.contract import (
     DuplicateEntityError,

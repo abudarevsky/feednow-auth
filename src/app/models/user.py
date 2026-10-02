@@ -1,21 +1,22 @@
-"""``User`` domain entity (spec §4).
+"""``User`` domain entity (domain model contract).
 
-Fields are the §4 list plus the Phase 12 ``application_role`` (spec 12
+Fields are the domain model contract list plus the application-role ``application_role`` (contract 12
 invariant 1) — nothing else. ``id`` is the internal
 FeedNow application identity (``usr_``); email, Cognito username/``sub``, and
-Shopify IDs are **never** user identifiers (AGENTS.md). From Phase 12 on,
+Shopify IDs are **never** user identifiers (AGENTS.md). From application-role on,
 email is **not unique** — distinct verified Cognito subjects may share an
 address and stay separate users — so email is an exact-lookup field only,
 and ``sub``/email never become identifiers through any side door.
 
-Deliberate Phase 01 boundaries:
+Deliberate initial boundaries:
 
 - ``email`` is a constrained string, not a format-validated address type:
-  format rules are owner-phase work (provisioning in Phase 03) and must not
-  be pinned here; the uniqueness assumption was retired in Phase 12.
+  format rules are owner-capability work (provisioning in identity) and must not
+  be pinned here; the uniqueness assumption was retired in application-role.
 - Status transitions and ``updated_at`` maintenance are service rules; the
-  model is a mutable container so Phase 03+ can update it.
-"""
+  model is a mutable container so identity+ can update it.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

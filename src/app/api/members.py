@@ -1,9 +1,9 @@
-"""``/v1/organizations/{organization_id}/members`` routers (Phase 04 task 5).
+"""``/v1/organizations/{organization_id}/members`` routers (organization).
 
-:func:`build_members_router` registers the three frozen §14 member entries
-from the manifest specs themselves (the ``me.py`` pattern): list through the
+:func:`build_members_router` registers the three frozen API contract member entries
+from the manifest contract themselves (the ``me.py`` pattern): list through the
 shared **member** access dependency, add/remove through the **admin** one
-(decision 3: mutations require rank >= admin). All tenancy/role checks and
+(design choice 3: mutations require rank >= admin). All tenancy/role checks and
 their uniform 403 + denial audit happen inside the dependency — this module
 carries only the decision-6 translation table for service/storage errors:
 
@@ -18,7 +18,8 @@ carries only the decision-6 translation table for service/storage errors:
 ``DELETE`` answers 204 with an empty body (manifest-pinned). Response
 projections carry no ``mem_`` record id and no email (frozen
 ``MemberResponse``); the record id appears only inside audit targets.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 # No ``from __future__ import annotations`` here on purpose (the ``me.py``
 # precedent): the handler signatures reference closure locals in
@@ -78,7 +79,7 @@ def build_members_router(
 ) -> APIRouter:
     """Build the member routers bound to ``storage`` and ``verifier``.
 
-    ``profile_source`` (Phase 11 task 4) is forwarded to every access
+    ``profile_source`` (session) is forwarded to every access
     dependency's human auth chain.
     """
     router = APIRouter(tags=["members"])

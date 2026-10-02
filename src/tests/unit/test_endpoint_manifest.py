@@ -1,10 +1,11 @@
-"""Unit tests for the frozen endpoint manifest (Phase 01 task 5).
+"""Unit tests for the frozen endpoint manifest (initial).
 
-Covers the task-5 verify item "manifest covers every §14 endpoint with 204
-on both deletes", plus the mount-contract invariants Phase 04/05 rely on:
+Covers the implementation verify item "manifest covers every API contract endpoint with 204
+on both deletes", plus the mount-contract invariants organization and API-keyrely on:
 versioned prefix, method/path uniqueness, model pairing, pagination usage,
 and application-identity path parameters (record IDs never mount).
-"""
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from app.api.schemas import (
     MeResponse,
     OrganizationCreateRequest,
     OrganizationResponse,
+    OrganizationSlugAvailabilityQuery,
     Page,
     endpoint_for,
 )
@@ -38,6 +40,7 @@ SPEC_14_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/v1/organizations"),
         ("GET", "/v1/organizations/{organization_id}"),
         ("PATCH", "/v1/organizations/{organization_id}"),
+        ("GET", "/v1/organizations/{organization_id}/slug-availability"),
         ("GET", "/v1/organizations/{organization_id}/members"),
         ("POST", "/v1/organizations/{organization_id}/members"),
         ("DELETE", "/v1/organizations/{organization_id}/members/{user_id}"),
@@ -116,7 +119,10 @@ def test_list_endpoints_declare_pagination_and_page_models() -> None:
             assert issubclass(spec.query_model, PageParams), spec
             assert issubclass(spec.response_model, Page), spec
         else:
-            assert spec.query_model is None, spec
+            assert spec.query_model is None or issubclass(spec.query_model, BaseModel), spec
+
+    availability = endpoint_for("check_organization_slug_availability")
+    assert availability.query_model is OrganizationSlugAvailabilityQuery
 
 
 def test_page_parameterizations_match_resource_models() -> None:

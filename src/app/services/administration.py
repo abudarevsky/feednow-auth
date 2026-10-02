@@ -1,14 +1,14 @@
-"""Application administrator bootstrap and revocation (Phase 13 task 3).
+"""Application administrator bootstrap and revocation (admin).
 
 Service layer over the :class:`~app.storage.contract.Storage` protocol only —
-no HTTP, no CLI, no adapter imports (AGENTS.md boundary). It discharges spec
-13 required behaviors 1, 2, 3, and 7 for the grant/revoke half that the task-5
+no HTTP, no CLI, no adapter imports (AGENTS.md boundary). It discharges contract
+13 required behaviors 1, 2, 3, and 7 for the grant/revoke half that the implementation
 CLI will call:
 
 - :func:`resolve_unique_user` turns an operator-supplied exact email into
   exactly one internal :class:`~app.models.user.User` via the contract's
   bounded :meth:`~app.storage.contract.Storage.list_users_by_email` lookup.
-  Phase 12 made email non-unique, so zero/one/many is the caller's explicit
+  application-role made email non-unique, so zero/one/many is the caller's explicit
   problem: zero → :class:`AdministratorNotFoundError`, many →
   :class:`AmbiguousAdministratorEmailError` (message carries the count and the
   ``usr_`` ids only — never provider material), and neither path writes.
@@ -17,7 +17,7 @@ CLI will call:
   form the audit event, and hand **one** caller-formed
   :class:`~app.models.audit_event.AuditEvent` to the single atomic
   :meth:`~app.storage.contract.Storage.transition_application_role` operation
-  (spec 13 required behavior 3: the last-ACTIVE-admin guard and the CAS are
+  (contract 13 required behavior 3: the last-ACTIVE-admin guard and the CAS are
   the adapter's concurrency-safe job — this service never composes a
   check-then-write and never provisions users).
 - The adapter outcome maps 1:1: ``TRANSITIONED`` means the role write and the
@@ -26,9 +26,9 @@ CLI will call:
   re-appends, so repeated grants/revokes create no duplicate audits (required
   behavior 7). :class:`~app.storage.contract.LastActiveAdministratorError`
   propagates untranslated: the refusal is a storage-domain outcome, and CLI
-  exit-code mapping is task 5's caller-side concern.
+  exit-code mapping is implementation's caller-side concern.
 
-Audit formation (required behavior 7, pinned by the breakdown):
+Audit formation (required behavior 7, pinned by the design notes):
 
 - ``action`` is exactly ``user.application_role.granted`` /
   ``user.application_role.revoked``; ``target_type="user"``; ``target_id`` is
@@ -53,7 +53,8 @@ provisioning :class:`~app.services.identity.ProvisioningIds` bag — this
 service mints exactly one ``aud_`` id and no entity ids). The same timestamp
 stamps ``updated_at`` and the audit's ``created_at``, mirroring the identity
 service's single-clock discipline. Storage mints nothing.
-"""
+
+Current behavior and invariants: ``docs/administration.md``."""
 
 from __future__ import annotations
 
@@ -79,7 +80,7 @@ REVOKE_ACTION = "user.application_role.revoked"
 
 
 class AdministratorNotFoundError(Exception):
-    """No user carries the requested email address (spec 13 behavior 1).
+    """No user carries the requested email address (contract 13 behavior 1).
 
     The message is fixed and carries no email or provider material; the CLI
     echoes the operator-supplied address itself if it wants to.
@@ -90,11 +91,11 @@ class AdministratorNotFoundError(Exception):
 
 
 class AmbiguousAdministratorEmailError(Exception):
-    """More than one user carries the requested email (Phase 12 made email
-    non-unique, spec 13 behavior 1).
+    """More than one user carries the requested email (application-role made email
+    non-unique, contract 13 behavior 1).
 
     ``user_ids`` keeps the candidate ``usr_`` identities machine-readable for
-    the CLI (task 5 lists them on stderr); the message carries **only** the
+    the CLI (implementation lists them on stderr); the message carries **only** the
     count and the ``usr_`` ids — never provider material, and not even the
     email, which the operator already holds.
     """

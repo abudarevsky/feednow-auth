@@ -1,0 +1,49 @@
+# Opt-in app stack overlay selected by run-dev.sh --dynamodb-local.
+services:
+  app:
+    environment:
+      FEEDNOW_STORAGE_BACKEND: dynamodb
+      FEEDNOW_DYNAMODB_REGION: us-east-1
+      FEEDNOW_TABLE_PREFIX: feednow-auth-local-
+      FEEDNOW_DYNAMODB_ENDPOINT: http://dynamodb-local-app:8000
+      AWS_ACCESS_KEY_ID: AKIATESTTESTTESTTESTTEST
+      AWS_SECRET_ACCESS_KEY: test-secret-key-for-local-testing-only
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
+
+  dynamodb-local-app:
+    image: amazon/dynamodb-local:2.6.0
+    command: ["-jar", "DynamoDBLocal.jar", "-dbPath", "./data", "-sharedDb"]
+    volumes:
+      - dynamodb-data:/home/dynamodblocal/data
+    depends_on:
+      dynamodb-data-init:
+        condition: service_completed_successfully
+
+  dynamodb-data-init:
+    image: busybox:1.36.1
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 1000:1000 /data"]
+    volumes:
+      - dynamodb-data:/data
+
+  dynamodb-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+      target: prod
+    command: ["python", "/app/deploy/docker/dynamodb_local_init.py"]
+    environment:
+      FEEDNOW_DYNAMODB_ENDPOINT: http://dynamodb-local-app:8000
+      FEEDNOW_DYNAMODB_REGION: us-east-1
+      FEEDNOW_TABLE_PREFIX: feednow-auth-local-
+      AWS_ACCESS_KEY_ID: AKIATESTTESTTESTTESTTEST
+      AWS_SECRET_ACCESS_KEY: test-secret-key-for-local-testing-only
+      AWS_DEFAULT_REGION: us-east-1
+    depends_on:
+      - dynamodb-local-app
+
+volumes:
+  dynamodb-data:

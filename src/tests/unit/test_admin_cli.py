@@ -1,11 +1,11 @@
-"""Unit proofs for the Phase 13 task-5 administrator CLI (``feednow_auth.admin``).
+"""Unit proofs for the admin implementation administrator CLI (``feednow_auth.admin``).
 
 The stub suite proves the *CLI contract* without a database: argparse wiring,
 the pinned exit-code table (0/2/3/4/5/1), the stdout wording that
 distinguishes ``granted`` / ``already granted`` / ``revoked`` / ``already
 revoked``, the stderr rules (ambiguous lists the ``usr_`` ids; unexpected
 failures print exactly one fixed safe line with no traceback and no
-exception-text leak), and the import purity required by spec 13 behavior 4
+exception-text leak), and the import purity required by contract 13 behavior 4
 (no I/O, no credential lookup, no environment read at import time).
 
 Storage is injected by monkeypatching the module-level ``create_storage``
@@ -14,7 +14,8 @@ injected environment (``monkeypatch.setenv``), so the env→settings→storage
 pipeline itself is exercised. Real subprocess ``-m`` execution against
 committed SQLite truth is owned by
 ``src/tests/integration/test_admin_cli_sqlite.py``.
-"""
+
+Current behavior and invariants: ``docs/administration.md``."""
 
 from __future__ import annotations
 

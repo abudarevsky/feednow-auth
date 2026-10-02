@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "API Key Management",
+    "output": "docs/diagrams/api-key-management.html",
+    "viewBox": [1050, 1460],
+    "column_fit": "spread",
+    "quality_profile": "showcase"
+  },
+  "participants": [
+    { "id": "owner", "type": "external", "label": "Organization User", "sublabel": "human" },
+    { "id": "client", "type": "external", "label": "Service Client", "sublabel": "machine caller" },
+    { "id": "api", "type": "backend", "label": "FeedNow API", "sublabel": "key routes + auth" },
+    { "id": "keyservice", "type": "backend", "label": "Key Service", "sublabel": "key lifecycle" },
+    { "id": "pepper", "type": "security", "label": "Pepper Source", "sublabel": "backend secret" },
+    { "id": "storage", "type": "database", "label": "Storage", "sublabel": "keys + audit events" }
+  ],
+  "segments": [
+    { "from": 150, "to": 470, "label": "Create" },
+    { "from": 490, "to": 940, "label": "Authenticate a machine request" },
+    { "from": 960, "to": 1320, "label": "Revoke" }
+  ],
+  "messages": [
+    { "from": "owner", "to": "api", "y": 180, "label": "POST /v1/organizations/{id}/api-keys", "variant": "emphasis" },
+    { "from": "api", "to": "keyservice", "y": 224, "label": "authorize human; normalize scopes; mint key id + secret", "variant": "security" },
+    { "from": "keyservice", "to": "pepper", "y": 268, "label": "HMAC secret with backend pepper", "variant": "security" },
+    { "from": "keyservice", "to": "storage", "y": 312, "label": "store key metadata + digest; append creation audit", "variant": "security", "note": "Plaintext secret is not persisted." },
+    { "from": "storage", "to": "keyservice", "y": 356, "label": "stored key record", "variant": "return" },
+    { "from": "keyservice", "to": "api", "y": 400, "label": "new key literal + masked metadata", "variant": "return" },
+    { "from": "api", "to": "owner", "y": 444, "label": "201 Created; show full key once", "variant": "security" },
+    { "from": "client", "to": "api", "y": 534, "label": "request with Authorization: Bearer fn_live_…", "variant": "emphasis" },
+    { "from": "api", "to": "keyservice", "y": 578, "label": "parse literal; extract environment + key id", "variant": "security" },
+    { "from": "keyservice", "to": "storage", "y": 622, "label": "lookup by key id", "variant": "default" },
+    { "from": "storage", "to": "keyservice", "y": 666, "label": "stored digest + status + scope metadata", "variant": "return" },
+    { "from": "keyservice", "to": "pepper", "y": 710, "label": "compute HMAC and constant-time compare", "variant": "security" },
+    { "from": "keyservice", "to": "api", "y": 754, "label": "active, unexpired API-key principal", "variant": "return", "note": "Context carries organization + scopes and roles=[]; all credential failures share one 401." },
+    { "from": "api", "to": "client", "y": 798, "label": "authorize organization + required scope; return response", "variant": "return" },
+    { "from": "owner", "to": "api", "y": 978, "label": "DELETE /v1/organizations/{id}/api-keys/{key_id}", "variant": "emphasis" },
+    { "from": "api", "to": "keyservice", "y": 1022, "label": "authorize human revocation", "variant": "security" },
+    { "from": "keyservice", "to": "storage", "y": 1066, "label": "conditional first-write-wins revoke", "variant": "security" },
+    { "from": "storage", "to": "keyservice", "y": 1110, "label": "revoked record; repeated revoke is idempotent", "variant": "return" },
+    { "from": "keyservice", "to": "storage", "y": 1154, "label": "append revocation audit", "variant": "security", "note": "Audit append follows the revocation commit." },
+    { "from": "api", "to": "owner", "y": 1198, "label": "204 No Content", "variant": "return" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Secret handling", "items": ["The full credential is returned only by successful creation", "Storage keeps a peppered HMAC digest and a masked prefix"] },
+    { "dot": "violet", "title": "Machine identity", "items": ["API-key principals carry no human roles", "Organization status and exact scopes are checked separately"] },
+    { "dot": "rose", "title": "Revocation", "items": ["Compare-and-swap preserves the first revocation timestamp", "Expired keys are rejected using expires_at; expiry is not a stored status"] }
+  ]
+}

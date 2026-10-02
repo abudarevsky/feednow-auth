@@ -1,12 +1,12 @@
-"""OAuth login flow: ``GET /oauth/login`` and ``GET /oauth/callback`` (Phase 11).
+"""OAuth login flow: ``GET /oauth/login`` and ``GET /oauth/callback`` (session).
 
 :func:`build_oauth_router` is the authorization-code + PKCE session boundary
-(breakdown tasks 11 and 12). Both routes are registered with
+(design notes tasks 11 and 12). Both routes are registered with
 ``include_in_schema=False`` and deliberately **outside** the frozen ``/v1``
 ENDPOINTS manifest — WIP 11 scope 5 is the authorizing revision, and the
-operational ``/health`` route is the mounting precedent (Phase 01 contract).
+operational ``/health`` route is the mounting precedent (initial contract).
 
-Login initiation (task 11):
+Login initiation (implementation):
 
 1. ``next`` (default: the configured landing URL) is validated against an
    exact-origin allowlist plus same-origin relative paths. Credentials-in-URL,
@@ -22,7 +22,7 @@ Login initiation (task 11):
    ``code_challenge_method=S256``, and the ``code_challenge``. The verifier
    itself never leaves the server.
 
-Callback (task 12) - the mapping table below **is** the contract:
+Callback (implementation) - the mapping table below **is** the contract:
 
 === ============================================= ===== =====================
 Step failure                                      HTTP    code
@@ -52,8 +52,9 @@ code, login state, PKCE verifier, access token, and email appear in no log
 record, error envelope, or redirect target — every failure message is a
 fixed, safe constant or a producer-pinned fixed reason. All URLs and the
 client id are approved configuration taken at construction; there are no
-import-time environment reads (Phase 01 boot contract).
-"""
+import-time environment reads (initial boot contract).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 
@@ -129,7 +130,7 @@ def _has_forbidden_characters(candidate: str) -> bool:
     """Reject control characters and backslashes anywhere in a return URL.
 
     CR/LF/TAB and friends could split or forge a ``Location`` header value,
-    and browsers normalize backslashes to slashes in paths — a ``/\\host``
+    and browsers normalize backslashes to slashes in paths — a ``/\host``
     "relative" path resolves to another origin. Spaces are legal inside
     query components, so they are not rejected here.
     """
@@ -253,8 +254,8 @@ def build_oauth_router(
     Every dependency is injected and every URL is approved configuration
     validated at construction (fail-fast :class:`ValueError`), so a
     misconfigured session boundary never serves a request and no import-time
-    environment read happens (Phase 01 boot contract). ``cookie_secure``
-    mirrors the deployment transport (task 13's ``FEEDNOW_COOKIE_SECURE``);
+    environment read happens (initial boot contract). ``cookie_secure``
+    mirrors the deployment transport (implementation's ``FEEDNOW_COOKIE_SECURE``);
     the fixed ``HttpOnly; SameSite=Lax; Path=/`` policy lives with the
     session module, not here.
     """
@@ -312,9 +313,9 @@ def build_oauth_router(
     async def oauth_callback(request: Request) -> RedirectResponse:
         """Complete the code exchange and mint the application session.
 
-        The step order (a)—(g) and the status mapping are the task-12
+        The step order (a)—(g) and the status mapping are the implementation
         contract; every failure raises a fixed-message
-        :class:`~fastapi.HTTPException` that the frozen Phase 01 envelope
+        :class:`~fastapi.HTTPException` that the frozen initial envelope
         renders (400 ``validation_error``, 401 ``unauthenticated``,
         403 ``forbidden``, 409 ``conflict``, 503 ``internal_error``).
         """

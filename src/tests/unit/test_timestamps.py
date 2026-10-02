@@ -1,4 +1,6 @@
-"""Unit tests for UTC timestamp conventions (Phase 01 task 2)."""
+"""Unit tests for UTC timestamp conventions (initial).
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

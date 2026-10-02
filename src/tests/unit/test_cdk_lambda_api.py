@@ -1,9 +1,9 @@
-"""Unit proofs for the Phase 07 task-6 Lambda + HTTP API wiring.
+"""Unit proofs for the AWS implementation Lambda + HTTP API wiring.
 
 The stack must synthesize exactly one runtime ``AWS::Lambda::Function``
 (python3.13, x86_64, 512 MB, 30 s, handler ``handler.handler``) that runs
-as the task-4 least-privilege role and carries exactly the five
-``FEEDNOW_*`` keys of the task-5 boot contract, with values that reference
+as the implementation least-privilege role and carries exactly the five
+``FEEDNOW_*`` keys of the implementation boot contract, with values that reference
 the pool/client/secret/table resources (never literals that could drift,
 never secret material). The ``AWS::ApiGatewayV2`` side must carry the
 ``ANY /`` and ``ANY /{proxy+}`` Lambda-proxy routes on the ``$default``
@@ -19,13 +19,13 @@ bundle layout without installing anything or requiring Docker. The real
 bundle runs during ``Template.from_stack`` synth (cached per environment
 via ``functools.cache``), which is what the task's Docker-free synth
 evidence exercises.
-"""
+
+Current behavior and invariants: ``docs/operations.md``."""
 
 from __future__ import annotations
 
 import functools
 import importlib.util
-import json
 import re
 import subprocess
 import sys
@@ -60,11 +60,11 @@ def _load_module(name: str, path: Path) -> ModuleType:
 
 
 # Loaded under unique names: the other CDK test modules cache the same file
-# and pytest may run any of them first. ``secrets_pepper`` is registered
+# and pytest may run any of them first. ``kms_encrypted_pepper`` is registered
 # under its own name first so ``handler``'s top-level import resolves
 # (the pattern test_runtime_handler.py establishes).
 stack_module = _load_module("feednow_cdk_lambda_api_stack", CDK_DIR / "feednow_auth_stack.py")
-_load_module("secrets_pepper", RUNTIME_DIR / "secrets_pepper.py")
+_load_module("kms_encrypted_pepper", RUNTIME_DIR / "kms_encrypted_pepper.py")
 runtime_handler = _load_module("feednow_cdk_lambda_api_runtime_handler", RUNTIME_DIR / "handler.py")
 
 FeedNowAuthStack = stack_module.FeedNowAuthStack
@@ -93,6 +93,9 @@ def _stack(env_name: str) -> FeedNowAuthStack:
         f"FeedNowAuth-{env_name}",
         feednow_env=env_name,
         cognito_callback_urls=CALLBACK_URLS,
+        account_origin="https://account.example.invalid",
+        existing_user_pool_id=f"eu-north-1_{env_name}",
+        existing_client_id=f"{env_name}client",
         env=cdk.Environment(account=ACCOUNT, region=REGION),
     )
 
@@ -159,21 +162,30 @@ def test_function_runs_as_the_task4_role(env_name: str) -> None:
     assert _function_properties(env_name)["Role"] == {"Fn::GetAtt": [role_id, "Arn"]}
 
 
-# --- The five FEEDNOW_* env vars reference the stack resources -------------------
+# --- Runtime and session settings reference the stack resources ------------------
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_function_environment_is_exactly_the_five_runtime_keys(env_name: str) -> None:
+def test_function_environment_has_runtime_and_session_keys(env_name: str) -> None:
     variables = _environment_variables(env_name)
-    assert set(variables) == set(CONFIG_KEYS)
+    assert set(variables) == set(CONFIG_KEYS) | set(runtime_handler.SESSION_ENV_KEYS)
     # The stack-level constants are the same names the handler reads.
     assert {
         stack_module.LAMBDA_REGION_ENV,
         stack_module.LAMBDA_TABLE_PREFIX_ENV,
         stack_module.LAMBDA_ISSUERS_ENV,
         stack_module.LAMBDA_CLIENT_IDS_ENV,
-        stack_module.LAMBDA_PEPPER_SECRET_ID_ENV,
+        stack_module.LAMBDA_ENVIRONMENT_ENV,
+        stack_module.LAMBDA_PEPPER_CIPHERTEXT_ENV,
     } == set(CONFIG_KEYS)
+    assert variables["FEEDNOW_OAUTH_REDIRECT_URL"] == CALLBACK_URLS[0]
+    assert variables["FEEDNOW_ALLOWED_RETURN_ORIGINS"] == "https://account.example.invalid"
+    assert variables["FEEDNOW_COOKIE_SECURE"] == "true"
+
+
+def test_stack_outputs_the_http_api_endpoint() -> None:
+    outputs = _template("dev").to_json()["Outputs"]
+    assert "ApiEndpoint" in outputs
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
@@ -192,34 +204,23 @@ def test_region_and_table_prefix_env_vars(env_name: str) -> None:
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
 def test_cognito_env_vars_reference_the_pool_and_client(env_name: str) -> None:
-    pool_id, _pool = _single(env_name, "AWS::Cognito::UserPool")
-    client_id, _client = _single(env_name, "AWS::Cognito::UserPoolClient")
     variables = _environment_variables(env_name)
-    # The issuer URL is Fn::Sub over the pool id (unresolved at synth time).
+    # Cognito is imported by ID; the stack creates no Cognito resources.
     issuer = variables["FEEDNOW_COGNITO_ISSUERS"]
     template, substitutions = issuer["Fn::Sub"]
     assert template == "https://cognito-idp.${region}.amazonaws.com/${pool_id}"
-    assert substitutions["pool_id"] == {"Ref": pool_id}
-    # CloudFormation Refs on a UserPoolClient resolve to its client id.
-    assert variables["FEEDNOW_COGNITO_CLIENT_IDS"] == {"Ref": client_id}
+    assert substitutions["pool_id"] == f"eu-north-1_{env_name}"
+    assert variables["FEEDNOW_COGNITO_CLIENT_IDS"] == f"{env_name}client"
 
 
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
-def test_pepper_env_var_is_the_task4_secret_name_not_material(env_name: str) -> None:
-    secret_id, secret = _single(env_name, "AWS::SecretsManager::Secret")
+def test_pepper_is_supplied_as_ciphertext_and_key_output_is_present(env_name: str) -> None:
     variables = _environment_variables(env_name)
-    # A name, never secret material: CDK derives the name from the secret's
-    # own ARN (Ref) via Split/Select rejoin, so the env var references the
-    # task-4 secret resource and the literal name is only the resource's
-    # Name property -- no ARN literal and no generated value anywhere.
-    assert secret["Properties"]["Name"] == f"feednow-auth/{env_name}/api-pepper"
-    value = variables["FEEDNOW_PEPPER_SECRET_ID"]
-    raw = json.dumps(value)
-    assert f'"Ref": "{secret_id}"' in raw
-    assert value["Fn::Join"][0] == "-"  # name rejoin, not an "arn:" string
-    assert "arn:" not in raw
-    assert "GenerateSecretString" not in raw
-
+    assert variables["FEEDNOW_ENV"] == env_name
+    assert variables["FEEDNOW_PEPPER_CIPHERTEXT_B64"] == ""
+    assert not _template(env_name).find_resources("AWS::SecretsManager::Secret")
+    assert len(_template(env_name).find_resources("AWS::KMS::Key")) == 1
+    assert _template(env_name).to_json()["Outputs"]["PepperKmsKeyArn"]
 
 # --- The HTTP API: stage, routes, integration, permissions -----------------------
 
@@ -352,7 +353,8 @@ def test_bundling_copies_runtime_modules_app_and_installs_manylinux_wheels(
     assert captured == [[*EXPECTED_UV_COMMAND, str(tmp_path)]]
     # Handler modules land at the bundle root (handler.handler must resolve) ...
     assert (tmp_path / "handler.py").is_file()
-    assert (tmp_path / "secrets_pepper.py").is_file()
+    assert (tmp_path / "kms_encrypted_pepper.py").is_file()
+    assert not (tmp_path / "secrets_pepper.py").exists()
     assert (tmp_path / "cognito_trigger_lambda.py").is_file()
     assert not list(tmp_path.rglob("__pycache__"))
     # ... and src/app is copied as app/ (the handler's `from app...` imports).

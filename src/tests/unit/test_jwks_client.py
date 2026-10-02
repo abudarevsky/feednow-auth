@@ -1,4 +1,4 @@
-"""Unit tests for the Phase 03 task-2 JWKS source and token test support.
+"""Unit tests for the identity implementation JWKS source and token test support.
 
 Every case runs against the loopback :class:`~support.cognito.JwksTestServer`
 (acceptance: signed fixtures or a JWKS test server, never a live Cognito pool)
@@ -19,7 +19,8 @@ Plus the allowlist boundary (disallowed issuer is rejected without any fetch),
 constructor validation, protocol conformance, and the support-module fixtures
 themselves. No verifier logic is exercised: the raw ``jwt.decode`` calls prove
 a resolved key is usable, not app verification behavior (none exists yet).
-"""
+
+Current behavior and invariants: ``docs/cognito.md``."""
 
 from __future__ import annotations
 

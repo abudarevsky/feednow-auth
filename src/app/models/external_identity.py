@@ -1,21 +1,22 @@
-"""``ExternalIdentity`` domain entity (spec §4).
+"""``ExternalIdentity`` domain entity (domain model contract).
 
 Links one provider-side identity to an internal :class:`~app.models.user.User`.
 The provider subject (Cognito ``sub``, Shopify ID, ...) is a plain constrained
 string (:data:`~app.models.ids.ProviderSubject`) and is never coerced into, or
 confused with, the ``usr_`` application identity.
 
-Uniqueness note (spec §4): the tuple ``(provider, provider_subject,
-provider_tenant)`` is unique. **Enforcement is Phase 02 storage work** (a
-unique index / conditional write), not a Phase 01 model constraint — this
+Uniqueness note (domain model contract): the tuple ``(provider, provider_subject,
+provider_tenant)`` is unique. **Enforcement is storage storage work** (a
+unique index / conditional write), not a initial model constraint — this
 model deliberately performs no cross-row validation.
 
 ``provider_tenant`` is optional: providers without a tenant dimension (e.g.
 ``cognito``) carry ``None``; Shopify will carry the shop domain. How ``None``
 participates in the unique index (NULL vs. normalized empty string) is a
-Phase 02 storage-contract decision and is carried into the task-7 handoff as
-a spec-revision item.
-"""
+storage storage-contract decision and is carried into the implementation handoff as
+a contract-revision item.
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 

@@ -1,12 +1,13 @@
 """Unit tests for credential, audit, and authorization entities: ApiKey,
-Scope, AuditEvent, AuthorizationContext (Phase 01 task 4).
+Scope, AuditEvent, AuthorizationContext (initial).
 
-Covers the task-4 verify list: §4/§10 field-list equality, ``secret``
+Covers the implementation verify list: domain model contract/authorization-context contract field-list equality, ``secret``
 rejected via ``extra="forbid"`` with secret-name introspection (only
-``secret_hash`` may match), Scope acceptance of every §9 example and
+``secret_hash`` may match), Scope acceptance of every authorization contract example and
 rejection of 2-/4-segment, uppercase, and empty-segment shapes, and
-``actor_id``/``organization_id`` typed as the task-2 ID value objects.
-"""
+``actor_id``/``organization_id`` typed as the implementation ID value objects.
+
+Current behavior and invariants: ``docs/architecture.md``."""
 
 from __future__ import annotations
 

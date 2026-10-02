@@ -1,28 +1,29 @@
-"""DynamoDB Local proofs for the users + external-identity operations (task 3).
+"""DynamoDB Local proofs for the users + external-identity operations (implementation).
 
 Marker-gated (``dynamodb_local``): every test here skips with an explicit reason
 unless ``FEEDNOW_DYNAMODB_LOCAL_ENDPOINT`` is set and reachable, so the default
 suite stays green without Docker (``docs/operations.md`` carries the run
 command).
 
-These are **direct adapter calls**, not the conformance suite (task 8 runs the
+These are **direct adapter calls**, not the conformance suite (implementation runs the
 shared 73 cases unchanged): the point here is to pin the DynamoDB translation of
 the 12 users/identity behaviors on the real transactional path — the
 ``TransactWriteItems`` atomicity, the positional conflict classification
-(decision 3), the key-only constraint lookups (decision 2), the tenant
-normalization inside the constraint key (decision 6), and — from Phase 12 — the
+(design choice 3), the key-only constraint lookups (design choice 2), the tenant
+normalization inside the constraint key (design choice 6), and — from application-role — the
 ``application_role``/``g_email`` attributes on the stored item, the coexistence
 of two users sharing an address, and the ``by-email`` ``list_users_by_email``
-read. From Phase 13 the file also pins the ``g_role`` write and the
+read. From admin the file also pins the ``g_role`` write and the
 ``transition_application_role`` DynamoDB replication — SQLite parity on every
-task-1 suite scenario plus a threaded concurrent double-revocation race
+implementation suite scenario plus a threaded concurrent double-revocation race
 proving exactly one succeeds. Domain inputs come from the suite's own
 deterministic builders so the
 fixtures match the conformance cases
 exactly. Every failure path asserts the domain error *class*, the conflict *kind*,
 an echo-free message, and — by scanning the tables directly — that the rejected
 batch left no residue.
-"""
+
+Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 

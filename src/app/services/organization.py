@@ -1,17 +1,17 @@
-"""Organization creation and listing rules (Phase 04 task 4).
+"""Organization creation and listing rules (organization).
 
 Mutation rules for ``POST /v1/organizations`` and the pass-through list for
-``GET /v1/organizations`` (breakdown decisions 3/6/7), following the Phase 03
+``GET /v1/organizations`` (design notes decisions 3/6/7), following the identity
 ``identity.py`` pattern: plain functions with injected ``storage`` and
 injectable ``now``/``ids`` — the class-based scaffold from the abandoned
-prior session was replaced wholesale (decision 0). HTTP translation of the
+prior session was replaced wholesale (design choice 0). HTTP translation of the
 domain errors raised here happens in :mod:`app.api.organizations`.
 
-Creation is exactly one ``provision_organization`` batch (decision 2): the
+Creation is exactly one ``provision_organization`` batch (design choice 2): the
 new **active** organization, the creator's **owner** ``active`` membership,
 and the two creation audits ``organization.created`` / ``membership.created``
 share one clock read and one ID set (``{"type": ...}`` / ``{"role": "owner"}``
-metadata per decision 7). There is deliberately no sequential
+metadata per design choice 7). There is deliberately no sequential
 create-then-grant path: a crash between those writes would burn the slug
 forever with no repair route.
 
@@ -19,12 +19,15 @@ Slug conflicts are plain 409-level conflicts, never converges (unlike
 ``provision_user``'s race): :class:`OrganizationSlugConflictError` translates
 the adapter's ``kind="organization_slug"`` and the batch is already fully
 rolled back by storage, so the failed attempt consumes nothing.
-"""
+
+Current behavior and invariants: ``docs/authorization.md``."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
+import unicodedata
 
 from app.models.audit_event import AuditEvent
 from app.models.enums import (
@@ -46,6 +49,15 @@ from app.services.authorization import (
 )
 from app.services.idgen import new_audit_event_id, new_membership_id, new_organization_id
 from app.storage.contract import DuplicateEntityError, DuplicateEntityKind, Storage
+
+
+def organization_slug_from_name(name: str) -> str:
+    """Build the stable URL slug used by organization onboarding."""
+    normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized).strip("-")[:255].rstrip("-")
+    if not slug:
+        raise ValueError("organization name must contain letters or numbers")
+    return slug
 
 
 @dataclass(frozen=True)
@@ -97,9 +109,9 @@ def build_organization_batch(
 ) -> OrganizationBatch:
     """Build the atomic creation batch — **pure** (no clock, no entropy).
 
-    The creator always receives the ``owner`` role (decision 3: the only
+    The creator always receives the ``owner`` role (design choice 3: the only
     way to become an owner is to create the organization); the audits share
-    the single injected ``now`` and are ordered by spec §6 creation order
+    the single injected ``now`` and are ordered by identity contract creation order
     (organization, then membership).
     """
     organization = Organization(
@@ -155,7 +167,7 @@ def create_organization(
 ) -> Organization:
     """Create one organization with its owner membership, atomically.
 
-    Order (decision 6): the type guard runs **before** any storage touch, so
+    Order (design choice 6): the type guard runs **before** any storage touch, so
     a non-selectable type provably writes zero rows. Exactly one clock read
     and one ID mint per request (both injectable for deterministic tests).
 
@@ -194,7 +206,7 @@ def list_organizations(storage: Storage, user_id: UserId, page: PageParams) -> P
     only organizations where the user holds an **active** membership, ordered
     by ``(created_at, id)``); this function adds no filter and invents no
     policy — the router projects the domain page onto the frozen response
-    schema verbatim (decision 8).
+    schema verbatim (design choice 8).
     """
     return storage.list_user_organizations(user_id, page)
 
