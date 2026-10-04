@@ -168,7 +168,14 @@ def test_function_runs_as_the_task4_role(env_name: str) -> None:
 @pytest.mark.parametrize("env_name", ENVIRONMENTS)
 def test_function_environment_has_runtime_and_session_keys(env_name: str) -> None:
     variables = _environment_variables(env_name)
-    assert set(variables) == set(CONFIG_KEYS) | set(runtime_handler.SESSION_ENV_KEYS)
+    assert set(variables) == (
+        set(CONFIG_KEYS)
+        | set(runtime_handler.SESSION_ENV_KEYS)
+        | {
+            runtime_handler.COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV,
+            runtime_handler.SERVICE_CREDENTIAL_CIPHERTEXT_ENV,
+        }
+    )
     # The stack-level constants are the same names the handler reads.
     assert {
         stack_module.LAMBDA_REGION_ENV,
@@ -221,6 +228,7 @@ def test_pepper_is_supplied_as_ciphertext_and_key_output_is_present(env_name: st
     assert not _template(env_name).find_resources("AWS::SecretsManager::Secret")
     assert len(_template(env_name).find_resources("AWS::KMS::Key")) == 1
     assert _template(env_name).to_json()["Outputs"]["PepperKmsKeyArn"]
+
 
 # --- The HTTP API: stage, routes, integration, permissions -----------------------
 

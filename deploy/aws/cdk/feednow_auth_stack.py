@@ -675,6 +675,9 @@ class FeedNowAuthStack(cdk.Stack):
                 LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV: os.getenv(
                     LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV, ""
                 ),
+                "FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64": os.getenv(
+                    "FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64", ""
+                ),
                 "FEEDNOW_COGNITO_AUTHORIZE_URL": f"{cognito_domain}/oauth2/authorize",
                 "FEEDNOW_COGNITO_TOKEN_ENDPOINT": f"{cognito_domain}/oauth2/token",
                 "FEEDNOW_COGNITO_USERINFO_URL": f"{cognito_domain}/oauth2/userInfo",

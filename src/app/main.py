@@ -1,4 +1,6 @@
-"""Application entrypoint for the ASGI service. ``create_app`` mounts health and the explicitly supplied routers; importing the module performs no storage or cloud I/O.
+"""ASGI service entrypoint mounting health and explicitly supplied routers.
+
+Importing the module performs no storage or cloud I/O.
 
 Current behavior and invariants: ``docs/architecture.md``."""
 
@@ -16,7 +18,11 @@ from app.api.health import router as health_router
 APP_VERSION = "0.1.0"
 
 
-def create_app(routers: Sequence[APIRouter] | None = None) -> FastAPI:
+def create_app(
+    routers: Sequence[APIRouter] | None = None,
+    *,
+    docs_enabled: bool = True,
+) -> FastAPI:
     """Build the feednow-auth ASGI application.
 
     Args:
@@ -33,6 +39,9 @@ def create_app(routers: Sequence[APIRouter] | None = None) -> FastAPI:
         title="feednow-auth",
         version=APP_VERSION,
         description="FeedNow application identity, tenancy, credentials, and audit service.",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
     register_exception_handlers(application)
     application.include_router(health_router)

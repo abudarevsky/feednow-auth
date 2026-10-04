@@ -15,8 +15,8 @@ segment inside ``fn_live_<key-id>_<secret>`` (``app.models.api_key.KeyId``),
 which never appears in any path or response.
 
 Derived-payload register (initial contract additions, flagged for contract
-revision — API contract/key-creation contract define no body for these; key-creation contract's key-creation request and
-response below are copied verbatim and are NOT derived):
+revision — API contract/key-creation contract define no body for these; the
+key-creation request and response below are copied verbatim, not derived):
 
 - ``GET /v1/me`` → ``MeResponse``: ``id``, ``display_name``, ``email``,
   ``status``, ``application_role``, ``created_at``, ``updated_at`` (mirrors
@@ -38,9 +38,10 @@ response below are copied verbatim and are NOT derived):
   convention — the contract pins only "deletes = 204"); both DELETEs are 204
   with no request or response body.
 
-Secret rule (AGENTS.md; acceptance criterion): across every model reachable
-from this manifest, the only field that may carry credential material is
-``ApiKeyCreatedResponse.key``, returned exactly once at creation.
+Secret rule: a request may carry a submitted API-key literal only for
+server-side validation. Responses never echo submitted credentials; the only
+response field that may expose a credential is ``ApiKeyCreatedResponse.key``,
+returned exactly once at creation.
 
 Current behavior and invariants: ``docs/architecture.md``."""
 
@@ -72,6 +73,7 @@ from app.api.schemas.organizations import (
     OrganizationSlugAvailabilityQuery,
     OrganizationSlugAvailabilityResponse,
 )
+from app.api.schemas.service_auth import ApiKeyValidationRequest, ApiKeyValidationResponse
 from app.models.ids import ApiKeyId, OrganizationId, UserId
 from app.models.pagination import Page, PageParams
 
@@ -265,6 +267,14 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/api-keys/{{key_id}}",
         success_status=204,
         path_params=_KEY_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="validate_service_api_key",
+        method="POST",
+        path=f"{API_V1_PREFIX}/service-auth/api-keys/validate",
+        success_status=200,
+        request_model=ApiKeyValidationRequest,
+        response_model=ApiKeyValidationResponse,
     ),
     EndpointSpec(
         operation_id="get_admin_summary",

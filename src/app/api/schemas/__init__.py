@@ -45,6 +45,7 @@ from app.api.schemas.organizations import (
     OrganizationSlugAvailabilityQuery,
     OrganizationSlugAvailabilityResponse,
 )
+from app.api.schemas.service_auth import ApiKeyValidationRequest, ApiKeyValidationResponse
 
 __all__ = [
     "API_V1_PREFIX",
@@ -57,6 +58,8 @@ __all__ = [
     "ApiKeyCreateRequest",
     "ApiKeyCreatedResponse",
     "ApiKeySummary",
+    "ApiKeyValidationRequest",
+    "ApiKeyValidationResponse",
     "ApiSchema",
     "EndpointSpec",
     "FullApiKey",

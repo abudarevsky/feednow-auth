@@ -110,6 +110,7 @@ def install_session_csrf_middleware(
         if (
             unsafe
             and request.url.path.startswith("/v1/")
+            and not request.url.path.startswith("/v1/service-auth/")
             and session_id
             and session_manager.verify(session_id)
         ):

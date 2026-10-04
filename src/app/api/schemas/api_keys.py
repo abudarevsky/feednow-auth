@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import StringConstraints
+from pydantic import ConfigDict, StringConstraints
 
 from app.api.schemas.common import ApiSchema
 from app.models.api_key import ApiKeyName, KeyPrefix, Scope
@@ -41,7 +41,22 @@ FullApiKey = Annotated[str, StringConstraints(min_length=1, max_length=512)]
 
 
 class ApiKeyCreateRequest(ApiSchema):
-    """Body for ``POST /v1/organizations/{organization_id}/api-keys`` (key-creation contract, verbatim)."""
+    """Body for ``POST /v1/organizations/{organization_id}/api-keys``.
+
+    The request shape follows the key-creation contract verbatim.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "name": "Vispector inspection key",
+                    "environment": "test",
+                    "scopes": ["vispector:inspection:run"],
+                }
+            ]
+        }
+    )
 
     name: ApiKeyName
     environment: ApiKeyEnvironment

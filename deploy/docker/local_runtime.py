@@ -19,6 +19,7 @@ from app.api.me import build_me_router
 from app.api.members import build_members_router
 from app.api.oauth import build_oauth_router
 from app.api.organizations import build_organizations_router
+from app.api.service_auth import build_service_auth_router
 from app.api.session_support import build_session_support_router, install_session_csrf_middleware
 from app.auth.api_key_auth import ApiKeyAuthenticationError, verify_api_key
 from app.auth.cognito import CognitoAccessTokenVerifier, CognitoUserInfoClient, ProfileSource
@@ -140,6 +141,11 @@ def build_app() -> FastAPI:
             profile_source=profile_source,
             session_manager=session_manager,
         ),
+        build_service_auth_router(
+            storage,
+            pepper,
+            service_credential=os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", ""),
+        ),
         build_oauth_router(
             storage,
             verifier,
@@ -183,7 +189,8 @@ def build_app() -> FastAPI:
         ),
     )
 
-    application = create_app(routers=routers)
+    environment = os.getenv("FEEDNOW_ENV", "local").strip().lower()
+    application = create_app(routers=routers, docs_enabled=environment != "prod")
 
     install_session_csrf_middleware(application, pepper, session_manager)
     return application

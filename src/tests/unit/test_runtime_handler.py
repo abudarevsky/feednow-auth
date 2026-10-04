@@ -35,6 +35,7 @@ Current behavior and invariants: ``docs/architecture.md``."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
 import os
 import sys
@@ -117,12 +118,17 @@ def _load_module(name: str, path: Path) -> ModuleType:
     return module
 
 
-kms_encrypted_pepper = _load_module(
-    "kms_encrypted_pepper", RUNTIME_DIR / "kms_encrypted_pepper.py"
+kms_encrypted_pepper = _load_module("kms_encrypted_pepper", RUNTIME_DIR / "kms_encrypted_pepper.py")
+kms_encrypted_cognito_client_secret = _load_module(
+    "kms_encrypted_cognito_client_secret", RUNTIME_DIR / "kms_encrypted_cognito_client_secret.py"
+)
+kms_encrypted_service_credential = _load_module(
+    "kms_encrypted_service_credential", RUNTIME_DIR / "kms_encrypted_service_credential.py"
 )
 runtime_handler = _load_module("feednow_runtime_handler", RUNTIME_DIR / "handler.py")
 
 KmsEncryptedPepper = kms_encrypted_pepper.KmsEncryptedPepper
+KmsEncryptedServiceCredential = kms_encrypted_service_credential.KmsEncryptedServiceCredential
 RuntimeConfig = runtime_handler.RuntimeConfig
 
 #: The Phase 11 task-13 session-gate keys (all-or-nothing), pinned to the
@@ -451,6 +457,23 @@ def test_build_app_wires_the_resolved_config_into_every_factory() -> None:
     assert isinstance(app, FastAPI)
 
 
+@pytest.mark.parametrize("environment", ["dev", "staging"])
+def test_build_app_keeps_api_docs_enabled_outside_production(environment: str) -> None:
+    config = RuntimeConfig.from_environ({**FAKE_ENV, "FEEDNOW_ENV": environment})
+    app = _build_with_fakes(config=config)
+    assert app.docs_url == "/docs"
+    assert app.redoc_url == "/redoc"
+    assert app.openapi_url == "/openapi.json"
+
+
+def test_build_app_disables_api_docs_in_production() -> None:
+    config = RuntimeConfig.from_environ({**FAKE_ENV, "FEEDNOW_ENV": "prod"})
+    app = _build_with_fakes(config=config)
+    assert app.docs_url is None
+    assert app.redoc_url is None
+    assert app.openapi_url is None
+
+
 def test_build_app_reads_the_pepper_once_at_cold_start() -> None:
     pepper = _CountingPepper()
     _build_with_fakes(pepper_factory=lambda _config: pepper)
@@ -699,3 +722,28 @@ def test_repr_and_str_are_redacted_after_fetch() -> None:
     assert MARKED_PEPPER not in source.__dict__.values()
     assert MARKED_PEPPER.decode() not in repr(source.__dict__)
     assert repr(source.__dict__["_static"]) == "StaticPepper(<redacted>)"
+
+
+def test_service_credential_decrypts_only_with_environment_context_and_redacts() -> None:
+    client = _FakeKmsClient(b"service-secret-marked-for-redaction")
+    ciphertext = base64.b64encode(b"service-ciphertext").decode("ascii")
+    source = KmsEncryptedServiceCredential(ciphertext, "staging", client=client)
+    assert source.current() == "service-secret-marked-for-redaction"
+    assert client.calls == [
+        {
+            "CiphertextBlob": b"service-ciphertext",
+            "EncryptionContext": {"environment": "staging"},
+        }
+    ]
+    assert repr(source) == "KmsEncryptedServiceCredential(<redacted>)"
+    assert "service-secret-marked-for-redaction" not in repr(source.__dict__)
+
+
+def test_service_credential_kms_errors_do_not_include_cause_details() -> None:
+    client = _FakeKmsClient(error=RuntimeError("secret=value"))
+    ciphertext = base64.b64encode(b"ciphertext").decode("ascii")
+    source = KmsEncryptedServiceCredential(ciphertext, "dev", client=client)
+    with pytest.raises(ValueError, match="could not be decrypted") as excinfo:
+        source.current()
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None

@@ -8,6 +8,13 @@ docker compose --profile cognito up --build
 ./cognito-login.sh --provider Google
 ```
 
+The `run-dev.sh` wrapper reuses existing images by default. Add `--build` to
+rebuild images and force-recreate selected containers:
+
+```bash
+./deploy/docker/run-dev.sh --dynamodb-local --build
+```
+
 The composition performs a short local-only volume initialization before the
 non-root app starts. It preserves the SQLite database while repairing the
 volume ownership needed for first-login provisioning.

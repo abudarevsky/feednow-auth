@@ -20,9 +20,10 @@ routes.
 
 ## HTTP surface
 
-The versioned manifest currently contains 19 endpoints: two current-user
+The versioned manifest currently contains 21 endpoints: two current-user
 operations; organization and member operations; API-key management; and local
-application-administration operations. The generic `create_app()` factory
+application-administration operations, plus service-side API-key validation.
+The generic `create_app()` factory
 mounts health plus explicitly supplied routers. AWS and local Docker
 compositions select their own router sets. OAuth, health, CSRF, and the local
 Vispector proof route are outside the versioned manifest.

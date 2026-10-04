@@ -110,7 +110,11 @@ def test_no_schema_model_exposes_secret_material_by_name() -> None:
 
 
 def test_full_key_field_exists_only_on_creation_response() -> None:
-    with_key = [model.__name__ for model in _schema_models() if "key" in model.model_fields]
+    with_key = [
+        model.__name__
+        for model in _schema_models()
+        if "key" in model.model_fields and model.__name__.endswith("Response")
+    ]
     assert with_key == ["ApiKeyCreatedResponse"]
 
 
@@ -122,6 +126,17 @@ def test_create_request_accepts_section_15_payload_verbatim() -> None:
     assert parsed.environment == "live"
     assert parsed.scopes == SECTION_15_REQUEST["scopes"]
     assert parsed.model_dump(mode="json") == SECTION_15_REQUEST
+
+
+def test_create_request_openapi_example_uses_vispector_inspection_scope() -> None:
+    schema = ApiKeyCreateRequest.model_json_schema()
+    assert schema["examples"] == [
+        {
+            "name": "Vispector inspection key",
+            "environment": "test",
+            "scopes": ["vispector:inspection:run"],
+        }
+    ]
 
 
 def test_created_response_accepts_section_15_payload_verbatim() -> None:

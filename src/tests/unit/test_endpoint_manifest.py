@@ -18,6 +18,7 @@ from app.api.schemas import (
     ApiKeyCreatedResponse,
     ApiKeyCreateRequest,
     ApiKeySummary,
+    ApiKeyValidationResponse,
     MemberCreateRequest,
     MemberResponse,
     MeResponse,
@@ -47,6 +48,7 @@ SPEC_14_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/v1/organizations/{organization_id}/api-keys"),
         ("POST", "/v1/organizations/{organization_id}/api-keys"),
         ("DELETE", "/v1/organizations/{organization_id}/api-keys/{key_id}"),
+        ("POST", "/v1/service-auth/api-keys/validate"),
         ("PATCH", "/v1/organizations/{organization_id}"),
         ("GET", "/v1/admin/summary"),
         ("GET", "/v1/admin/organizations"),
@@ -79,6 +81,7 @@ def test_operation_ids_are_unique_and_lookup_works() -> None:
     ids = [spec.operation_id for spec in ENDPOINTS]
     assert len(ids) == len(set(ids))
     assert endpoint_for("revoke_api_key").method == "DELETE"
+    assert endpoint_for("validate_service_api_key").path == "/v1/service-auth/api-keys/validate"
     with pytest.raises(KeyError):
         endpoint_for("rotate_api_key")  # rotation explicitly not in Phase 01
 
@@ -101,7 +104,7 @@ def test_gets_are_200_and_creates_are_201() -> None:
             assert spec.success_status == 200, spec
             assert spec.request_model is None, spec
         elif spec.method == "POST":
-            assert spec.success_status in {201, 204}, spec
+            assert spec.success_status in {200, 201, 204}, spec
             assert spec.request_model is not None, spec
 
 
@@ -167,7 +170,8 @@ def test_creation_response_is_only_manifest_model_with_full_key() -> None:
         if spec.item_model is not None:
             models.append(spec.item_model)
     with_key = [model.__name__ for model in models if "key" in model.model_fields]
-    assert with_key == ["ApiKeyCreatedResponse"]
+    assert with_key == ["ApiKeyCreatedResponse", "ApiKeyValidationRequest"]
+    assert "key" not in ApiKeyValidationResponse.model_fields
 
 
 # --- manifest self-validation (frozen contract guards) --------------------------

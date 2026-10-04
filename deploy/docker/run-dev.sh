@@ -7,6 +7,7 @@
 #   ./run-dev.sh --ui               # Alias for --cognito --ui
 #   ./run-dev.sh --dynamodb-local   # Start app against persistent DynamoDB Local
 #   ./run-dev.sh --dynamodb-local --ui # Also start the account UI
+#   ./run-dev.sh --dynamodb-local --build # Rebuild and recreate selected containers
 #   ./run-dev.sh --stop       # Stop and remove containers
 #   ./run-dev.sh --logs       # Follow logs
 #   ./run-dev.sh --reset      # Stop, remove volumes, and restart fresh
@@ -42,6 +43,7 @@ Options:
   --ui           Also build and start the account UI in Docker on port 3000
   --dynamodb-local
                 Use DynamoDB Local for app storage instead of SQLite
+  --build       Rebuild images and force-recreate selected containers
   --stop        Stop and remove containers
   --logs        Follow container logs
   --reset       Stop, remove volumes, and restart fresh
@@ -107,6 +109,7 @@ start_dev() {
     local with_cognito="${1:-false}"
     local with_ui="${2:-false}"
     local with_dynamodb_local="${3:-false}"
+    local with_build="${4:-false}"
 
     check_env_file
 
@@ -116,7 +119,7 @@ start_dev() {
     fi
     enable_cognito
 
-    log_info "Building and starting containers..."
+    log_info "Starting containers..."
     local compose_args=(-f "${COMPOSE_FILE}")
     if [[ "${with_dynamodb_local}" == "true" ]]; then
         compose_args+=(-f "${SCRIPT_DIR}/docker-compose.dynamodb-local.yml")
@@ -125,7 +128,12 @@ start_dev() {
     if [[ "${with_ui}" == "true" ]]; then
         compose_args+=(--profile ui)
     fi
-    docker compose "${compose_args[@]}" up --build -d
+    local up_args=(up -d)
+    if [[ "${with_build}" == "true" ]]; then
+        up_args+=(--build --force-recreate)
+        log_info "Rebuilding images and recreating selected containers..."
+    fi
+    docker compose "${compose_args[@]}" "${up_args[@]}"
 
     log_info "Waiting for health check..."
     local retries=30
@@ -255,22 +263,24 @@ ensure_google_trigger() {
 
 main() {
     case "${1:-}" in
-        --cognito)
-            if [[ "${2:-}" == "--ui" ]]; then
-                start_dev true true
-            else
-                start_dev true false
-            fi
-            ;;
-        --ui)
-            start_dev true true
-            ;;
-        --dynamodb-local)
-            if [[ "${2:-}" == "--ui" ]]; then
-                start_dev true true true
-            else
-                start_dev true false true
-            fi
+        --cognito|--ui|--dynamodb-local)
+            local with_ui=false
+            local with_dynamodb_local=false
+            local with_build=false
+            for option in "$@"; do
+                case "${option}" in
+                    --cognito) ;;
+                    --ui) with_ui=true ;;
+                    --dynamodb-local) with_dynamodb_local=true ;;
+                    --build) with_build=true ;;
+                    *)
+                        log_error "Unknown option: ${option}"
+                        usage
+                        exit 1
+                        ;;
+                esac
+            done
+            start_dev true "${with_ui}" "${with_dynamodb_local}" "${with_build}"
             ;;
         --stop)
             stop_dev

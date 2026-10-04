@@ -30,6 +30,10 @@ from kms_encrypted_pepper import (
     PEPPER_CIPHERTEXT_ENV,
     KmsEncryptedPepper,
 )
+from kms_encrypted_service_credential import (
+    SERVICE_CREDENTIAL_CIPHERTEXT_ENV,
+    KmsEncryptedServiceCredential,
+)
 from mangum import Mangum
 
 from app.api.admin import build_admin_router
@@ -38,6 +42,7 @@ from app.api.me import build_me_router
 from app.api.members import build_members_router
 from app.api.oauth import build_oauth_router
 from app.api.organizations import build_organizations_router
+from app.api.service_auth import build_service_auth_router
 from app.api.session_support import build_session_support_router, install_session_csrf_middleware
 from app.auth.cognito import (
     AccessTokenVerifier,
@@ -314,6 +319,18 @@ def build_app(
             session_manager=session_manager,
         ),
     ]
+    service_credential = ""
+    # Preserve the injected-config composition seam: only read this optional
+    # setting when configuration is sourced from the runtime environment.
+    if (config is None or environ is not None) and (
+        env.get(SERVICE_CREDENTIAL_CIPHERTEXT_ENV) or ""
+    ).strip():
+        service_credential = KmsEncryptedServiceCredential(
+            environment=resolved.environment, environ=env
+        ).current()
+    routers.append(
+        build_service_auth_router(storage, pepper_source, service_credential=service_credential)
+    )
     if session is not None and userinfo_client is not None:
         # The session boundary rides on the single configured app client
         # (the deployed pool registers one Hosted UI client; task 15 pins
@@ -367,7 +384,7 @@ def build_app(
                 pepper_source=pepper_source,
             )
         )
-    application = create_app(routers=routers)
+    application = create_app(routers=routers, docs_enabled=resolved.environment != "prod")
     if session is not None and session_manager is not None:
         install_session_csrf_middleware(application, pepper_source, session_manager)
     return application

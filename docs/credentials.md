@@ -70,6 +70,26 @@ cannot inherit a human member or administrator role. Newly issued keys use the
 `vispector` service binding; service-aware enforcement is used by the local
 Vispector proof route documented in [local-account.md](local-account.md).
 
+## Service validation
+
+`POST /v1/service-auth/api-keys/validate` is the server-to-server validation
+endpoint for Vispector. It requires an `Authorization: Bearer <service
+credential>` header and a JSON body containing the API-key literal. The
+service credential is compared in constant time and is configured separately
+from user API keys. The endpoint returns API-key actor identity, key creator,
+organization, service, mapped permissions, and expiry only. A wrong or invalid key is a 401;
+a key assigned to another service or a disabled organization is a 403. Human
+membership roles are never returned or inferred for an API key.
+In Swagger, use the endpoint's **Authorize** control to set the service
+credential; the generated request adds the `Bearer` scheme automatically.
+
+Vispector API keys must have exactly one scope:
+`vispector:inspection:run`, which maps to `inspect`. Keys with no scope, a
+different scope, or additional scopes are denied. This key permission applies
+only to inspection execution. Project and taxonomy operations through
+`workspace-api` require an authenticated user session and do not accept API-key
+authorization.
+
 ## Revocation (CAS)
 
 API key revocation follows a first-write-wins Compare-And-Swap (CAS) mechanism:
@@ -113,6 +133,7 @@ The system follows strict practices to prevent credential exposure:
 - No rotation capabilities (single pepper version)
 - No scope wildcards or hierarchical matching
 - No self-service key rotation or service reassignment
+- No browser handoff authorization-code flow or configurable service registry yet
 - Audit records appended after commit, with potential window for loss
 
 ## Security Properties

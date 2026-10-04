@@ -16,6 +16,10 @@ uv run ruff format --check .
 The default `app.main:app` exposes `/health`. Deployment and local Docker
 compositions explicitly supply their routers and settings.
 
+Swagger UI (`/docs`), ReDoc (`/redoc`), and the OpenAPI schema
+(`/openapi.json`) are available in local, development, and staging
+environments. All three are disabled when `FEEDNOW_ENV=prod`.
+
 ## Local Docker and Cognito
 
 Copy `deploy/docker/.env.example` to the local environment file and provide
@@ -40,6 +44,13 @@ To run the same local Cognito app with DynamoDB Local instead of SQLite, use:
 ./deploy/docker/run-dev.sh --dynamodb-local --ui
 ```
 
+The Docker wrapper reuses existing images by default. Add `--build` to rebuild
+images and force-recreate selected containers after source or Compose changes:
+
+```bash
+./deploy/docker/run-dev.sh --dynamodb-local --build
+```
+
 This starts a separate DynamoDB Local container, creates the FeedNow tables,
 and points the app at it over the Compose network. DynamoDB Local data persists
 in the `feednow-auth_dynamodb-data` named volume; `--stop` preserves it. Remove
@@ -51,6 +62,43 @@ does not take the API's host port 8000.
 After stopping the stack, erase its local DynamoDB data with
 `docker volume rm feednow-auth_dynamodb-data`.
 
+To exercise service API-key validation in this composition, set a random
+`FEEDNOW_VISPECTOR_SERVICE_SECRET` in `deploy/docker/.env` before starting it.
+Create a Vispector key for an active organization through the authenticated
+API-key endpoint with exactly the `vispector:inspection:run` scope, then call
+the local service endpoint with both the service credential and key. The
+current account UI creates empty-scope keys, which this endpoint correctly
+rejects:
+
+```bash
+set -a
+source deploy/docker/.env
+set +a
+
+curl -sS http://localhost:8000/v1/service-auth/api-keys/validate \
+  -H "Authorization: Bearer $FEEDNOW_VISPECTOR_SERVICE_SECRET" \
+  -H 'Content-Type: application/json' \
+  --data '{"key":"<full-key-shown-once-at-creation>"}'
+```
+
+The response should contain the user and organization IDs, `service`, mapped
+`permissions`, and `expires_at`, without returning the API-key literal. Run the
+focused route checks and the DynamoDB Local storage-contract suite with:
+
+```bash
+uv run pytest src/tests/unit/test_service_auth.py -q
+FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
+  PYTHONPATH=.:deploy/aws/runtime:src uv run pytest \
+  src/tests/integration/test_service_auth_dynamodb_local.py -q
+```
+
+For AWS, provide only
+`FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64` in the CDK environment
+file. Encrypt the credential with the stack's pepper KMS key and encryption
+context `environment=<dev|staging|prod>`; Lambda decrypts it in memory, and the
+runtime role's existing scoped KMS decrypt grant applies. Never put the
+plaintext credential in the CDK file or source control.
+
 ## DynamoDB Local
 
 The shared adapter-conformance suite can run against DynamoDB Local:
@@ -61,7 +109,7 @@ docker run --rm -d --name feednow-dynamodb-local -p 8000:8000 \
   -jar DynamoDBLocal.jar -inMemory -sharedDb
 
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
-  uv run pytest -m dynamodb_local
+  PYTHONPATH=.:deploy/aws/runtime:src uv run pytest -m dynamodb_local
 
 docker stop feednow-dynamodb-local
 ```

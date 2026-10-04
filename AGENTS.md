@@ -23,6 +23,11 @@ readers to explanatory material, link the corresponding topic chapter in
 `docs/`. Keep phase ordering, acceptance criteria, and transformation steps in
 `specs/` only.
 
+Use the workspace-shared specification tree at `../specs/` for cross-project
+work. A project-local `specs/` entry supersedes the shared specification for
+that project when one is available; otherwise the shared specification is the
+source of truth. For current behavior, consult the project-root `docs/` first.
+
 ## Architecture boundaries
 
 - Keep HTTP handling in `src/app/api`, credential and JWT logic in `src/app/auth`, domain types in `src/app/models`, business rules in `src/app/services`, and persistence details in `src/app/storage`.
