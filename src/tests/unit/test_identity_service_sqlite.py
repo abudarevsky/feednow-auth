@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ from app.services.identity import (
     DisabledUserError,
     resolve_or_provision,
 )
+from app.services.organization_onboarding import dispatch_organization_onboarding
 from app.storage.contract import Storage
 from app.storage.sqlite import TABLE_NAMES, open_sqlite_storage
 
@@ -103,6 +105,7 @@ def _counts(path: Path) -> dict[str, int]:
         return {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in TABLE_NAMES
+            if table not in {"service_authorization_codes", "organization_onboarding_requests"}
         }
     finally:
         conn.close()
@@ -187,6 +190,19 @@ def test_repeated_calls_resolve_same_identity_without_duplicates(db_path: Path) 
         )
         # The second call is a hit: it needs no provider at all (task 5).
         second = resolve_or_provision(storage, _claims(), now=_NOW)
+        outbox = storage.get_organization_onboarding_request(first.context.organization_id)
+        assert outbox is not None
+        assert outbox.status == "pending"
+        assert outbox.bootstrap_version == "starter-v1"
+        assert (
+            outbox.request_id
+            == "onb_"
+            + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"feednow-vispector-onboarding:{first.context.organization_id}",
+            ).hex
+        )
+        assert storage.get_organization_onboarding_request(second.context.organization_id) == outbox
     finally:
         storage.close()
 
@@ -202,6 +218,116 @@ def test_repeated_calls_resolve_same_identity_without_duplicates(db_path: Path) 
         "oauth_login_states": 0,
         "app_sessions": 0,
     }
+
+
+def test_onboarding_dispatch_retries_pending_request_and_never_persists_credential(
+    db_path: Path,
+) -> None:
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        identity = resolve_or_provision(
+            storage, _claims(), now=_NOW, profile_provider=lambda: _profile()
+        )
+        captured = {}
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def opener(request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+        assert dispatch_organization_onboarding(
+            storage,
+            identity.context.organization_id,
+            base_url="https://vispector.example",
+            service_credential="sensitive-service-secret",
+            opener=opener,
+        )
+        sent = captured["request"]
+        assert sent.full_url == "https://vispector.example/internal/onboarding/organizations"
+        assert sent.get_header("Authorization") == "Bearer sensitive-service-secret"
+        assert json.loads(sent.data) == {
+            "org_id": str(identity.context.organization_id),
+            "request_id": storage.get_organization_onboarding_request(
+                identity.context.organization_id
+            ).request_id,
+            "bootstrap_version": "starter-v1",
+        }
+        outbox = storage.get_organization_onboarding_request(identity.context.organization_id)
+        assert outbox.status == "succeeded"
+        assert outbox.attempts == 1
+        assert "sensitive-service-secret" not in outbox.model_dump_json()
+        assert dispatch_organization_onboarding(
+            storage,
+            identity.context.organization_id,
+            base_url="https://vispector.example",
+            service_credential="sensitive-service-secret",
+            opener=lambda *_args, **_kwargs: pytest.fail("successful request must not resend"),
+        )
+    finally:
+        storage.close()
+
+
+def test_failed_onboarding_dispatch_is_observable_and_retryable(db_path: Path) -> None:
+    from urllib.error import URLError
+
+    storage: Storage = open_sqlite_storage(db_path)
+    try:
+        identity = resolve_or_provision(
+            storage,
+            _claims(sub="retryable-onboarding-user"),
+            now=_NOW,
+            profile_provider=lambda: _profile(sub="retryable-onboarding-user"),
+        )
+        outcomes = iter((URLError("private network detail"), None))
+
+        class Response:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def opener(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if outcome is not None:
+                raise outcome
+            return Response()
+
+        assert not dispatch_organization_onboarding(
+            storage,
+            identity.context.organization_id,
+            base_url="https://vispector.example",
+            service_credential="server-only-secret",
+            opener=opener,
+        )
+        failed = storage.get_organization_onboarding_request(identity.context.organization_id)
+        assert failed.status == "failed"
+        assert failed.attempts == 1
+        assert failed.last_error == "dispatch_unavailable"
+        assert "private network detail" not in failed.model_dump_json()
+        assert dispatch_organization_onboarding(
+            storage,
+            identity.context.organization_id,
+            base_url="https://vispector.example",
+            service_credential="server-only-secret",
+            opener=opener,
+        )
+        succeeded = storage.get_organization_onboarding_request(identity.context.organization_id)
+        assert succeeded.status == "succeeded"
+        assert succeeded.attempts == 2
+    finally:
+        storage.close()
 
 
 # ---------------------------------------------------------------------------

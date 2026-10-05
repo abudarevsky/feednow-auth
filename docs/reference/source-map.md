@@ -12,6 +12,7 @@ docstrings should point to these chapters for durable behavior and invariants.
 | `src/app/api/oauth.py`, `src/app/auth/session.py`, local CSRF middleware | [Sessions](../sessions.md) |
 | `src/app/services/authorization.py`, organization/member routers | [Authorization](../authorization.md) |
 | Service role-permission mapping and handoff routes | [Authorization](../authorization.md) |
+| Organization onboarding outbox and dispatcher | [Authentication](../authentication.md), [Storage](../storage.md), [Operations](../operations.md) |
 | API-key primitives, verifier, key routes, and service authorization | [Credentials](../credentials.md) |
 | `src/app/storage/` | [Storage](../storage.md) |
 | `src/feednow_auth/`, application-admin service and dependency | [Administration](../administration.md) |

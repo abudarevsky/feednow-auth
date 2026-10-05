@@ -67,6 +67,7 @@ Current behavior and invariants: ``docs/authentication.md``."""
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -95,6 +96,7 @@ from app.models.ids import (
 )
 from app.models.membership import Membership
 from app.models.organization import Organization
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.pagination import PageParams
 from app.models.timestamps import utc_now
 from app.models.user import User
@@ -200,6 +202,7 @@ class ProvisioningBatch:
     organization: Organization
     membership: Membership
     audit_events: tuple[AuditEvent, ...]
+    onboarding_request: OrganizationOnboardingRequest
 
 
 @dataclass(frozen=True)
@@ -350,12 +353,24 @@ def build_provisioning_batch(
             created_at=now,
         ),
     )
+    onboarding_request_id = (
+        "onb_"
+        + uuid.uuid5(uuid.NAMESPACE_URL, f"feednow-vispector-onboarding:{ids.organization_id}").hex
+    )
+    onboarding_request = OrganizationOnboardingRequest(
+        request_id=onboarding_request_id,
+        organization_id=ids.organization_id,
+        bootstrap_version="starter-v1",
+        created_at=now,
+        updated_at=now,
+    )
     return ProvisioningBatch(
         user=user,
         identity=identity,
         organization=organization,
         membership=membership,
         audit_events=audit_events,
+        onboarding_request=onboarding_request,
     )
 
 
@@ -464,6 +479,7 @@ def _provision_or_converge(
             organization=batch.organization,
             membership=batch.membership,
             audit_events=batch.audit_events,
+            onboarding_request=batch.onboarding_request,
         )
         return stored.user
     except DuplicateExternalIdentityError as error:

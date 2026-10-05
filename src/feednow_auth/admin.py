@@ -57,12 +57,14 @@ import os
 import sys
 from collections.abc import Sequence
 
+from app.models.ids import OrganizationId
 from app.services.administration import (
     AdministratorNotFoundError,
     AmbiguousAdministratorEmailError,
     grant_administrator,
     revoke_administrator,
 )
+from app.services.organization_onboarding import dispatch_organization_onboarding
 from app.storage.contract import (
     LastActiveAdministratorError,
     RoleTransitionOutcome,
@@ -77,6 +79,7 @@ EXIT_USAGE = 2
 EXIT_NO_USER = 3
 EXIT_AMBIGUOUS_EMAIL = 4
 EXIT_LAST_ACTIVE_ADMIN = 5
+EXIT_NO_ONBOARDING_REQUEST = 6
 
 #: Fixed, safe line for every unexpected failure: no traceback, no exception
 #: text (adapter messages stay inside the process).
@@ -85,6 +88,8 @@ _UNEXPECTED_FAILURE = "error: administrator command failed"
 _GRANT = "grant"
 _REVOKE = "revoke"
 _LIST = "list"
+_ONBOARDING_STATUS = "onboarding-status"
+_ONBOARDING_RETRY = "onboarding-retry"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -98,7 +103,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Manage FeedNow application administrator roles.",
     )
     subparsers = parser.add_subparsers(
-        dest="command", required=True, metavar="{grant,revoke,list}"
+        dest="command",
+        required=True,
+        metavar="{grant,revoke,list,onboarding-status,onboarding-retry}",
     )
     grant = subparsers.add_parser(_GRANT, help="promote the user for --email to admin")
     revoke = subparsers.add_parser(_REVOKE, help="demote the user for --email to user")
@@ -112,7 +119,53 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         _LIST, help="list users, roles, registration date, and login availability"
     )
+    for command in (_ONBOARDING_STATUS, _ONBOARDING_RETRY):
+        subparsers.add_parser(command).add_argument(
+            "--organization-id", required=True, metavar="<org_id>"
+        )
     return parser
+
+
+def _run_onboarding(storage: Storage, *, command: str, organization_id: str) -> int:
+    """Inspect or retry one secret-free durable organization onboarding record."""
+    try:
+        org_id = OrganizationId(organization_id)
+        request = storage.get_organization_onboarding_request(org_id)
+        if request is None:
+            print("error: no onboarding request exists for organization", file=sys.stderr)
+            return EXIT_NO_ONBOARDING_REQUEST
+        if command == _ONBOARDING_RETRY:
+            base_url = os.environ.get("FEEDNOW_VISPECTOR_URL", "").strip()
+            credential = os.environ.get("FEEDNOW_VISPECTOR_SERVICE_SECRET", "")
+            if not base_url or not credential:
+                print("error: onboarding retry configuration is missing", file=sys.stderr)
+                return EXIT_USAGE
+            dispatch_organization_onboarding(
+                storage,
+                org_id,
+                base_url=base_url,
+                service_credential=credential,
+            )
+            request = storage.get_organization_onboarding_request(org_id)
+            if request is None:
+                raise RuntimeError("onboarding record disappeared")
+        print(
+            f"organization_id\t{request.organization_id}\n"
+            f"request_id\t{request.request_id}\n"
+            f"bootstrap_version\t{request.bootstrap_version}\n"
+            f"status\t{request.status}\n"
+            f"attempts\t{request.attempts}\n"
+            f"updated_at\t{request.updated_at.isoformat()}\n"
+            f"last_error\t{request.last_error or 'none'}"
+        )
+        return (
+            EXIT_SUCCESS
+            if request.status == "succeeded" or command == _ONBOARDING_STATUS
+            else EXIT_UNEXPECTED
+        )
+    except Exception:
+        print(_UNEXPECTED_FAILURE, file=sys.stderr)
+        return EXIT_UNEXPECTED
 
 
 def _system_exit_code(exc: SystemExit) -> int:
@@ -221,6 +274,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_UNEXPECTED
         if args.command == _LIST:
             return _run_list(storage)
+        if args.command in {_ONBOARDING_STATUS, _ONBOARDING_RETRY}:
+            return _run_onboarding(
+                storage, command=args.command, organization_id=args.organization_id
+            )
         return _run_command(storage, command=args.command, email=args.email)
     finally:
         _close_quietly(storage)

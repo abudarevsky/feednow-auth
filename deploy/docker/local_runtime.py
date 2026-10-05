@@ -30,6 +30,7 @@ from app.auth.session import SessionManager
 from app.auth.token_exchange import CognitoTokenEndpoint
 from app.main import create_app
 from app.models.service_authorization import ServiceRegistration
+from app.services.organization_onboarding import dispatch_organization_onboarding
 from app.storage.factory import create_storage, storage_settings_from_env
 
 
@@ -108,6 +109,11 @@ def build_app() -> FastAPI:
             missing.append("FEEDNOW_COGNITO_USERINFO_URL (or FEEDNOW_COGNITO_DOMAIN)")
         raise RuntimeError("Missing local Cognito configuration: " + ", ".join(missing))
     service_url = os.getenv("FEEDNOW_VISPECTOR_URL", "").strip()
+    # The registered origin is the browser-facing Vite URL, while this API
+    # runs in Docker and must reach the host-published Vispector API directly.
+    onboarding_dispatch_url = os.getenv(
+        "FEEDNOW_VISPECTOR_DISPATCH_URL", "http://host.docker.internal:8080"
+    ).strip()
     service_registration = None
     if service_url:
         parsed_service_url = urlsplit(service_url)
@@ -197,6 +203,18 @@ def build_app() -> FastAPI:
             landing_url=f"{frontend_url}/account",
             allowed_return_origins=(frontend_url,),
             cookie_secure=False,
+            onboarding_dispatch=(
+                lambda organization_id: dispatch_organization_onboarding(
+                    storage,
+                    organization_id,
+                    base_url=onboarding_dispatch_url,
+                    service_credential=os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", ""),
+                )
+            )
+            if service_registration is not None
+            and service_registration.enabled
+            and os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", "")
+            else None,
         ),
         build_oauth_cli_callback_router(),
         session_router,

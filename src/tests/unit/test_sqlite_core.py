@@ -396,7 +396,7 @@ def test_schema_creates_nine_tables_and_four_unique_indexes(storage: SQLiteStora
     assert ("index", "users_email_lookup") in names
     assert ("index", "users_email_unique") not in names
     assert ("index", "users_application_role_lookup") in names
-    assert len(sqlite_adapter.TABLE_NAMES) == 9
+    assert len(sqlite_adapter.TABLE_NAMES) == 10
 
 
 def test_phase_11_session_tables_are_added_to_a_pre_phase_11_database(
@@ -1056,7 +1056,7 @@ def test_contract_surface_has_no_remaining_stubs() -> None:
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 31, members
+    assert len(members) == 34, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

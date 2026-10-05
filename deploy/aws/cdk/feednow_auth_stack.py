@@ -162,6 +162,7 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
     _TableSpec(
         name="service_authorization_codes", partition_key="pk", ttl_attribute="expires_at_epoch"
     ),
+    _TableSpec(name="organization_onboarding_requests", partition_key="pk"),
 )
 
 #: The actions the DynamoDB adapter performs *only* inside
@@ -211,6 +212,7 @@ _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
     "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
     "service_authorization_codes": frozenset({"PutItem", "UpdateItem"}),
+    "organization_onboarding_requests": frozenset({"GetItem", "PutItem", "UpdateItem"}),
 }
 
 

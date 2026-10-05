@@ -33,6 +33,7 @@ import feednow_auth.admin as admin
 from app.models.enums import ApplicationRole, OrganizationStatus, OrganizationType
 from app.models.ids import OrganizationId, UserId
 from app.models.organization import Organization
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.pagination import Page, PageParams
 from app.models.user import User
 from app.services.administration import AdministratorAuditAnchorMissingError
@@ -99,6 +100,19 @@ class StubStorage:
         self.error = error
         self.transition_calls = 0
         self.closed = 0
+        self.onboarding_request: OrganizationOnboardingRequest | None = None
+
+    def get_organization_onboarding_request(self, organization_id: OrganizationId):
+        if self.onboarding_request is None:
+            return None
+        if self.onboarding_request.organization_id != organization_id:
+            return None
+        return self.onboarding_request
+
+    def update_organization_onboarding_request(
+        self, request: OrganizationOnboardingRequest
+    ) -> None:
+        self.onboarding_request = request
 
     def list_users_by_email(self, email: str) -> list[User]:
         return [user for user in self.users if user.email == email]
@@ -265,6 +279,63 @@ def test_usage_missing_email_exits_two(sqlite_env: str, capsys: pytest.CaptureFi
 def test_help_exits_zero(sqlite_env: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert admin.main(["--help"]) == admin.EXIT_SUCCESS
     assert "usage" in capsys.readouterr().out
+
+
+def test_onboarding_status_reports_only_safe_record_fields(
+    monkeypatch: pytest.MonkeyPatch, sqlite_env: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    storage = StubStorage([])
+    storage.onboarding_request = OrganizationOnboardingRequest(
+        request_id="onb_0123456789abcdef0123456789abcdef",
+        organization_id="org_anchor",
+        bootstrap_version="starter-v1",
+        status="failed",
+        attempts=3,
+        created_at=_NOW,
+        updated_at=_NOW,
+        last_error="dispatch_unavailable",
+    )
+    _install(monkeypatch, storage)
+    assert admin.main(["onboarding-status", "--organization-id", "org_anchor"]) == 0
+    out = capsys.readouterr().out
+    assert "status\tfailed" in out
+    assert "attempts\t3" in out
+    assert "secret" not in out
+
+
+def test_onboarding_retry_uses_ephemeral_credential_and_updates_status(
+    monkeypatch: pytest.MonkeyPatch, sqlite_env: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    storage = StubStorage([])
+    storage.onboarding_request = OrganizationOnboardingRequest(
+        request_id="onb_0123456789abcdef0123456789abcdef",
+        organization_id="org_anchor",
+        bootstrap_version="starter-v1",
+        status="failed",
+        attempts=2,
+        created_at=_NOW,
+        updated_at=_NOW,
+        last_error="dispatch_unavailable",
+    )
+    _install(monkeypatch, storage)
+    monkeypatch.setenv("FEEDNOW_VISPECTOR_URL", "https://vispector.example")
+    monkeypatch.setenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", "temporary-secret")
+
+    def dispatch(target, organization_id, *, base_url, service_credential):
+        assert base_url == "https://vispector.example"
+        assert service_credential == "temporary-secret"
+        target.update_organization_onboarding_request(
+            target.onboarding_request.model_copy(
+                update={"status": "succeeded", "attempts": 3, "last_error": None}
+            )
+        )
+        return True
+
+    monkeypatch.setattr(admin, "dispatch_organization_onboarding", dispatch)
+    assert admin.main(["onboarding-retry", "--organization-id", "org_anchor"]) == 0
+    out = capsys.readouterr().out
+    assert "status\tsucceeded" in out
+    assert "temporary-secret" not in out
 
 
 def test_missing_backend_configuration_exits_two(

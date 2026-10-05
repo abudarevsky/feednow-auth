@@ -20,6 +20,8 @@ from app.api.schemas.service_auth import (
     ApiKeyValidationResponse,
     ServiceAuthorizationContextResponse,
     ServiceCodeExchangeRequest,
+    ServiceContextValidationRequest,
+    ServiceContextValidationResponse,
     ServiceHandoffRequest,
 )
 from app.auth.api_key_auth import ApiKeyAuthenticationError, verify_api_key
@@ -27,6 +29,7 @@ from app.auth.pepper import PepperSource
 from app.auth.session import SessionManager, read_session_cookie
 from app.models.enums import MembershipStatus, OrganizationStatus, UserStatus
 from app.models.ids import OrganizationId
+from app.models.pagination import PageParams
 from app.models.service_authorization import ServiceAuthorizationCode, ServiceRegistration
 from app.models.timestamps import utc_now
 from app.services.service_authorization import (
@@ -102,6 +105,66 @@ def build_service_auth_router(
 
     handoff_spec = endpoint_for("handoff_to_registered_service")
     exchange_spec = endpoint_for("exchange_service_authorization_code")
+    context_spec = endpoint_for("validate_service_context")
+
+    def resolve_active_context(user_id: str, organization_id: OrganizationId | None):
+        try:
+            user = storage.get_user(user_id)
+            if organization_id is None:
+                organizations = storage.list_user_organizations(user_id, PageParams(limit=2)).items
+                if len(organizations) != 1:
+                    raise HTTPException(status_code=403, detail="service access denied")
+                organization = organizations[0]
+                organization_id = OrganizationId(organization.id)
+            else:
+                organization = storage.get_organization(organization_id)
+            membership = storage.get_membership(organization_id=organization_id, user_id=user_id)
+        except EntityNotFoundError as exc:
+            raise HTTPException(status_code=403, detail="service access denied") from exc
+        if (
+            user.status is not UserStatus.ACTIVE
+            or organization.status is not OrganizationStatus.ACTIVE
+            or membership.status is not MembershipStatus.ACTIVE
+        ):
+            raise HTTPException(status_code=403, detail="service access denied")
+        return user, organization, membership
+
+    @router.post(context_spec.path, response_model=ServiceContextValidationResponse)
+    def validate_service_context(
+        body: ServiceContextValidationRequest,
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Security(_SERVICE_BEARER)],
+    ) -> ServiceContextValidationResponse:
+        """Revalidate a Vispector local session against FeedNow's current grant."""
+        if (
+            not service_credential
+            or credentials is None
+            or not hmac.compare_digest(
+                credentials.credentials.encode(), service_credential.encode()
+            )
+        ):
+            raise HTTPException(status_code=401, detail="invalid service credentials")
+        if (
+            body.service_id != "vispector"
+            or service_registration is None
+            or not service_registration.enabled
+            or service_registration.service_id != body.service_id
+        ):
+            raise HTTPException(status_code=403, detail="service access denied")
+        user, organization, membership = resolve_active_context(body.user_id, body.organization_id)
+        permissions = service_permissions_for_role(
+            membership.role, service_registration.allowed_permissions
+        )
+        if not permissions:
+            raise HTTPException(status_code=403, detail="service access denied")
+        return ServiceContextValidationResponse(
+            user_id=user.id,
+            organization_id=organization.id,
+            service=body.service_id,
+            permissions=list(permissions),
+            permission_version=membership_permission_version(
+                membership.role, membership.created_at
+            ),
+        )
 
     @router.post(handoff_spec.path, status_code=handoff_spec.success_status)
     async def handoff_to_service(request: Request) -> RedirectResponse:
@@ -118,9 +181,7 @@ def build_service_auth_router(
         except (ValidationError, ValueError):
             raise HTTPException(status_code=422, detail="invalid service handoff request") from None
         origin = request.headers.get("origin")
-        if request.headers.get("content-type", "").startswith(
-            "application/x-www-form-urlencoded"
-        ):
+        if request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
             if origin is None or origin.rstrip("/") not in service_registration.allowed_origins:
                 raise HTTPException(status_code=403, detail="service access denied")
         elif origin and origin.rstrip("/") not in service_registration.allowed_origins:
@@ -133,10 +194,16 @@ def build_service_auth_router(
             raise HTTPException(status_code=403, detail="service access denied")
         try:
             user = storage.get_user(user_id)
-            organization = storage.get_organization(body.organization_id)
-            membership = storage.get_membership(
-                organization_id=body.organization_id, user_id=user_id
-            )
+            if body.organization_id is None:
+                organizations = storage.list_user_organizations(user_id, PageParams(limit=2)).items
+                if len(organizations) != 1:
+                    raise HTTPException(status_code=403, detail="service access denied")
+                organization = organizations[0]
+                organization_id = OrganizationId(organization.id)
+            else:
+                organization_id = body.organization_id
+                organization = storage.get_organization(organization_id)
+            membership = storage.get_membership(organization_id=organization_id, user_id=user_id)
         except EntityNotFoundError as exc:
             raise HTTPException(status_code=403, detail="service access denied") from exc
         if (
@@ -230,6 +297,7 @@ def build_service_auth_router(
             organization_id=organization.id,
             service=service_registration.service_id,
             permissions=list(permissions),
+            permission_version=current_version,
         )
 
     return router

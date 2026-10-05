@@ -61,7 +61,8 @@ The org-side denial reasons are `no_membership`, `inactive_membership`,
 
 ## Registered-service permissions
 
-The browser handoff and service-code exchange use a FeedNow-owned permission
+The browser handoff, service-code exchange, and context-revalidation endpoint
+use a FeedNow-owned permission
 mapping, separate from API-key scopes and the global application-admin role:
 
 | Active organization role | Available service permissions |
@@ -70,8 +71,9 @@ mapping, separate from API-key scopes and the global application-admin role:
 | `member` | `projects:read`, `inspect` |
 | `viewer` | `projects:read` |
 
-The issued context is the sorted intersection of this role mapping and the
-registered service's allowed permissions. Handoff requires an active user,
+The issued or revalidated context is the sorted intersection of this role
+mapping and the registered service's allowed permissions. Handoff and
+revalidation require an active user,
 organization, and membership. Exchange consumes the code first, then re-reads
 those records and confirms that the membership permission snapshot still
 matches. A disabled or removed grant cannot exchange successfully. The global

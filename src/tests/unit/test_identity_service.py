@@ -236,6 +236,7 @@ class StubStorage:
         organization: Organization,
         membership: Membership,
         audit_events: Sequence[AuditEvent],
+        onboarding_request,
     ) -> ProvisionedUser:
         self.provision_calls.append(
             {
@@ -244,6 +245,7 @@ class StubStorage:
                 "organization": organization,
                 "membership": membership,
                 "audit_events": tuple(audit_events),
+                "onboarding_request": onboarding_request,
             }
         )
         if self.provision_error is not None:

@@ -50,6 +50,7 @@ SPEC_14_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/v1/organizations/{organization_id}/api-keys"),
         ("DELETE", "/v1/organizations/{organization_id}/api-keys/{key_id}"),
         ("POST", "/v1/service-auth/api-keys/validate"),
+        ("POST", "/v1/service-auth/contexts/validate"),
         ("POST", "/v1/oauth/service-handoff"),
         ("POST", "/v1/service-auth/authorization-codes/exchange"),
         ("PATCH", "/v1/organizations/{organization_id}"),

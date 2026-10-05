@@ -59,6 +59,14 @@ identity-tuple re-read after `DuplicateExternalIdentityError`;
 convergence signal, and a re-read miss is a `ProvisioningConflictError` with
 no partial rows.
 
+The same first-provisioning transaction stores one idempotent Vispector
+onboarding request with the committed organization ID and stable request ID.
+It carries only bootstrap version `starter-v1`; the service credential is
+resolved from runtime configuration for dispatch and never stored. OAuth
+attempts dispatch pending or failed requests and record success or a sanitized
+failure so a later login can retry. Race convergence and subsequent login hits
+do not create additional requests.
+
 ### The provider-swap seam
 
 `User` is a mutable container that later profile updates may extend; provider

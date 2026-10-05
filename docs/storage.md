@@ -6,10 +6,11 @@ domain models only; SQLite and DynamoDB details stay in their adapters.
 
 ## Contract and adapters
 
-The core protocol has 31 operations covering users and external identities,
+The core protocol has 34 operations covering users and external identities,
 organizations and memberships, API keys, audit append, atomic user and
 organization provisioning, application-role transitions, OAuth state and
-application sessions, and single-use service authorization codes. Its
+application sessions, single-use service authorization codes, and the
+organization-onboarding outbox. Its
 signatures use domain values and typed results;
 adapters do not mint identifiers or timestamps.
 
@@ -19,13 +20,13 @@ provides the AWS adapter. The DynamoDB schema and deployment table definitions
 are maintained together. Both adapters implement the same core contract and
 the shared storage-conformance suite.
 
-SQLite creates the digest-only service-code table idempotently on open; this
-additive table does not change the existing SQLite schema version.
+SQLite creates service-code and onboarding-request tables idempotently on
+open; these additive tables do not change the existing SQLite schema version.
 
-The DynamoDB deployment uses ten environment-prefixed tables: `users`,
+The DynamoDB deployment uses eleven environment-prefixed tables: `users`,
 `external_identities`, `organizations`, `memberships`, `api_keys`,
 `audit_events`, `unique_constraints`, `oauth_login_states`, `app_sessions`,
-and `service_authorization_codes`.
+`service_authorization_codes`, and `organization_onboarding_requests`.
 Secondary indexes support user lookup by email and application role,
 organization membership lookup in both directions, and API-key lookup by
 organization. External identities use a composite partition key; uniqueness
@@ -38,6 +39,13 @@ table/index matrix is defined in the CDK stack and mirrored by its IAM
 assertions. The runtime role can update user records for profile changes, with
 `UpdateItem` scoped to the environment's users table.
 
+`provision_user` may include a secret-free onboarding request in its atomic
+transaction. The request is keyed by committed organization ID and contains a
+stable request ID, bootstrap version, status, attempt count, timestamps, and a
+sanitized last error. The service credential is never included. The OAuth
+runtime retries pending or failed requests after a later successful identity
+resolution; a succeeded request is terminal.
+
 An optional `LocalAdminStorage` extension adds organization search, summary,
 suspension, reactivation, and deletion for the local administration API. Both
 SQLite and DynamoDB adapters implement it, keeping route behavior storage
@@ -49,7 +57,8 @@ storage failure interrupts it.
 ## Atomicity and errors
 
 - `provision_user` writes the user, identity, personal organization, owner
-  membership, and creation audits as one atomic operation.
+  membership, creation audits, and optional onboarding outbox request as one
+  atomic operation.
 - `provision_organization` writes the organization, owner membership, and
   creation audits atomically.
 - `transition_application_role` applies the application-role change and audit

@@ -97,7 +97,6 @@ def test_handoff_redirects_only_to_registered_callback_and_exchange_is_single_us
             headers=csrf_headers,
             json={
                 "service_id": "vispector",
-                "organization_id": str(ORG_ID),
                 "state": "browser-state-123456",
             },
         )
@@ -124,6 +123,7 @@ def test_handoff_redirects_only_to_registered_callback_and_exchange_is_single_us
             "organization_id": str(ORG_ID),
             "service": "vispector",
             "permissions": ["inspect", "projects:read"],
+            "permission_version": "member:2026-10-04T12:00:00Z",
         }
         replay = client.post(
             "/v1/service-auth/authorization-codes/exchange", json=exchange, headers=headers

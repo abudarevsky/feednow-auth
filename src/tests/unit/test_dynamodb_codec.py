@@ -38,6 +38,7 @@ from pydantic import ValidationError
 import app.storage.contract as contract
 from app.models.enums import ApplicationRole, IdentityProvider, UserStatus
 from app.models.ids import UserId
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.models.user import User
@@ -62,6 +63,8 @@ from app.storage.dynamodb import (
     oauth_login_state_from_item,
     oauth_login_state_item,
     open_dynamodb_storage,
+    organization_onboarding_request_from_item,
+    organization_onboarding_request_item,
     service_authorization_code_from_item,
     service_authorization_code_item,
     ttl_epoch_seconds,
@@ -327,7 +330,7 @@ def test_present_but_invalid_stored_role_fails_validation() -> None:
 # -- schema (single source) ---------------------------------------------------
 
 
-def test_schema_is_the_ten_table_single_source() -> None:
+def test_schema_is_the_eleven_table_single_source() -> None:
     assert [spec.name for spec in SCHEMA] == [
         "users",
         "organizations",
@@ -339,6 +342,7 @@ def test_schema_is_the_ten_table_single_source() -> None:
         "oauth_login_states",
         "app_sessions",
         "service_authorization_codes",
+        "organization_onboarding_requests",
     ]
     # The harness re-exports the very same tuple object (no drift).
     from tests.support import dynamodb_local as local
@@ -441,6 +445,21 @@ def test_service_authorization_code_item_round_trips_without_plaintext() -> None
     assert item["expires_at_epoch"] == ttl_epoch_seconds(_LIVE)
     assert "raw_code" not in item
     assert service_authorization_code_from_item(item) == code
+
+
+def test_organization_onboarding_item_is_secret_free_and_round_trips() -> None:
+    request = OrganizationOnboardingRequest(
+        request_id="onb_0123456789abcdef0123456789abcdef",
+        organization_id="org_test_0001",
+        bootstrap_version="starter-v1",
+        created_at=_T0,
+        updated_at=_T0,
+    )
+    item = organization_onboarding_request_item(request)
+    assert item["pk"] == str(request.organization_id)
+    assert item["request_id"] == request.request_id
+    assert "credential" not in item
+    assert organization_onboarding_request_from_item(item) == request
 
 
 # -- factory + adapter shell (injected fake, no network) ----------------------

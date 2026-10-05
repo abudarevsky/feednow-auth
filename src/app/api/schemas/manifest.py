@@ -78,6 +78,8 @@ from app.api.schemas.service_auth import (
     ApiKeyValidationResponse,
     ServiceAuthorizationContextResponse,
     ServiceCodeExchangeRequest,
+    ServiceContextValidationRequest,
+    ServiceContextValidationResponse,
     ServiceHandoffRequest,
 )
 from app.models.ids import ApiKeyId, OrganizationId, UserId
@@ -290,6 +292,14 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         success_status=200,
         request_model=ApiKeyValidationRequest,
         response_model=ApiKeyValidationResponse,
+    ),
+    EndpointSpec(
+        operation_id="validate_service_context",
+        method="POST",
+        path=f"{API_V1_PREFIX}/service-auth/contexts/validate",
+        success_status=200,
+        request_model=ServiceContextValidationRequest,
+        response_model=ServiceContextValidationResponse,
     ),
     EndpointSpec(
         operation_id="handoff_to_registered_service",

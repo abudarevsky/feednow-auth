@@ -26,6 +26,18 @@ last active administrator. `list` reports persisted account status, role, and
 registration date; last login is shown as `not recorded` because it is not
 stored.
 
+## Vispector onboarding outbox
+
+`onboarding-status --organization-id <org_id>` prints the durable request ID,
+bootstrap version, state, attempt count, update time, and sanitized last error.
+`onboarding-retry --organization-id <org_id>` immediately retries that request
+without requiring another user login. It uses `FEEDNOW_VISPECTOR_URL` and the
+call-time `FEEDNOW_VISPECTOR_SERVICE_SECRET`; the credential is never printed
+or persisted. Supply the credential through the operator's approved secret
+manager when invoking the command, not through shell history. A missing outbox
+record exits with code 6; failed dispatch exits with code 1 and leaves a
+retryable failure state.
+
 ## Organization lifecycle
 
 The admin API supports organization summary/search/detail/member reads,

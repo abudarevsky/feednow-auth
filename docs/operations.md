@@ -64,12 +64,44 @@ After stopping the stack, erase its local DynamoDB data with
 
 To enable the local Vispector registration and handoff, set
 `FEEDNOW_VISPECTOR_URL` to `http://localhost:5173`,
+`FEEDNOW_VISPECTOR_DISPATCH_URL` to `http://host.docker.internal:8080`,
 `FEEDNOW_VISPECTOR_CALLBACK_PATH` to its fixed callback path, and a random
 `FEEDNOW_VISPECTOR_SERVICE_SECRET` in `deploy/docker/.env` before starting it.
+The browser-facing URL is used for the authorization handoff; the dispatch URL
+lets the FeedNow container call the host-published Vispector API directly.
 The local service secret is for Docker development only. Production receives
 only the KMS ciphertext input described below. Role grants are intersected
 with `FEEDNOW_VISPECTOR_PERMISSIONS`; the local default is
 `projects:read,projects:write,inspect`.
+
+Inspect or retry a durable organization onboarding request as an operator:
+
+```sh
+uv run feednow-admin onboarding-status --organization-id org_<id>
+read -r -s -p "Service credential: " FEEDNOW_VISPECTOR_SERVICE_SECRET
+export FEEDNOW_VISPECTOR_SERVICE_SECRET
+uv run feednow-admin onboarding-retry --organization-id org_<id>
+unset FEEDNOW_VISPECTOR_SERVICE_SECRET
+```
+
+The retry sends only `org_id`, stable `request_id`, and `bootstrap_version` to
+`/internal/onboarding/organizations`; the service credential stays in process
+memory. The command records the attempt and safe result, so it can be repeated
+until the status is `succeeded`.
+
+When FeedNow is running in the local Docker composition, run these commands
+inside its `app` container so the CLI uses the container's SQLite volume. A
+manual retry must target the host-published Vispector API; the browser-facing
+`FEEDNOW_VISPECTOR_URL` is a different origin:
+
+```sh
+cd deploy/docker
+docker compose --profile cognito --profile ui exec app feednow-admin onboarding-status \
+  --organization-id org_<id>
+docker compose --profile cognito --profile ui exec \
+  -e FEEDNOW_VISPECTOR_URL=http://host.docker.internal:8080 \
+  app feednow-admin onboarding-retry --organization-id org_<id>
+```
 
 To exercise service API-key validation in this composition, create a Vispector
 key for an active organization through the authenticated API-key endpoint with

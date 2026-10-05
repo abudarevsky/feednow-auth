@@ -623,6 +623,7 @@ def test_build_app_gate_on_wires_userinfo_token_endpoint_and_session_manager(
         "landing_url": "https://app.feednow.test",
         "allowed_return_origins": ("https://app.feednow.test", "https://admin.feednow.test"),
         "cookie_secure": True,
+        "onboarding_dispatch": None,
     }
 
 

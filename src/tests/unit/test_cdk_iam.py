@@ -90,6 +90,7 @@ TABLE_MATRIX: Mapping[str, frozenset[str]] = {
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
     "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
     "service_authorization_codes": frozenset({"PutItem", "UpdateItem"}),
+    "organization_onboarding_requests": frozenset({"GetItem", "PutItem", "UpdateItem"}),
 }
 
 #: Phase 11: the session tables are written by *standalone* conditional
@@ -220,14 +221,14 @@ def _role_logical_id(env_name: str) -> str:
 
 
 def _table_logical_ids(env_name: str) -> Mapping[str, str]:
-    """logical id -> unsuffixed table name, for the ten schema tables."""
+    """logical id -> unsuffixed table name, for the eleven schema tables."""
     prefix = f"feednow-auth-{env_name}-"
     mapping = {}
     for logical_id, resource in _template(env_name).find_resources("AWS::DynamoDB::Table").items():
         name = resource["Properties"]["TableName"]
         assert name.startswith(prefix)
         mapping[logical_id] = name.removeprefix(prefix)
-    assert len(mapping) == 10
+    assert len(mapping) == 11
     return mapping
 
 

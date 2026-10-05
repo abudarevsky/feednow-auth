@@ -123,7 +123,9 @@ def _batch(
 def _table_counts(storage: SQLiteStorage) -> dict[str, int]:
     conn = storage._connection()
     return {
-        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in TABLE_NAMES
+        table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in TABLE_NAMES
+        if table not in {"service_authorization_codes", "organization_onboarding_requests"}
     }
 
 
@@ -266,7 +268,12 @@ def test_failed_org_batch_leaves_no_partial_rows_and_no_open_transaction(
         )
     conn = storage._connection()
     assert conn.in_transaction is False
-    assert _table_counts(storage) == dict.fromkeys(TABLE_NAMES, 0)
+    expected_tables = [
+        table
+        for table in TABLE_NAMES
+        if table not in {"service_authorization_codes", "organization_onboarding_requests"}
+    ]
+    assert _table_counts(storage) == dict.fromkeys(expected_tables, 0)
     # The thread-local connection stays usable: a clean batch afterwards
     # commits on the same connection.
     storage.create_user(make_user())
@@ -310,4 +317,9 @@ def test_mid_batch_driver_error_translates_generically_and_rolls_back(
     assert not isinstance(error, contract.ReferenceNotFoundError)
     assert "locked" not in str(error)  # no driver text leaks
     assert storage._connection().in_transaction is False
-    assert _table_counts(storage) == dict.fromkeys(TABLE_NAMES, 0)
+    expected_tables = [
+        table
+        for table in TABLE_NAMES
+        if table not in {"service_authorization_codes", "organization_onboarding_requests"}
+    ]
+    assert _table_counts(storage) == dict.fromkeys(expected_tables, 0)

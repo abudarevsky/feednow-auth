@@ -32,7 +32,7 @@ class ServiceHandoffRequest(ApiSchema):
     """Authenticated user selection for a registered service handoff."""
 
     service_id: ServiceId
-    organization_id: OrganizationId
+    organization_id: OrganizationId | None = None
     state: str = Field(min_length=16, max_length=256, pattern=r"^[A-Za-z0-9_-]+$")
 
 
@@ -50,3 +50,22 @@ class ServiceAuthorizationContextResponse(ApiSchema):
     organization_id: OrganizationId
     service: ServiceId
     permissions: list[str]
+    permission_version: str
+
+
+class ServiceContextValidationRequest(ApiSchema):
+    """Current FeedNow identity and organization context held by a service session."""
+
+    service_id: ServiceId
+    user_id: UserId
+    organization_id: OrganizationId | None = None
+
+
+class ServiceContextValidationResponse(ApiSchema):
+    """Fresh, safe authorization context for a registered service."""
+
+    user_id: UserId
+    organization_id: OrganizationId
+    service: ServiceId
+    permissions: list[str]
+    permission_version: str

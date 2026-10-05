@@ -122,6 +122,7 @@ from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.pagination import Page, PageParams, clamp_limit
 from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
@@ -330,6 +331,18 @@ _SESSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         consumed_at        TEXT
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS organization_onboarding_requests (
+        organization_id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        bootstrap_version TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_error TEXT
+    )
+    """,
 )
 
 #: Tables the schema owns (documentation and conformance-facing inventory).
@@ -343,6 +356,7 @@ TABLE_NAMES: Final[tuple[str, ...]] = (
     "oauth_login_states",
     "app_sessions",
     "service_authorization_codes",
+    "organization_onboarding_requests",
 )
 
 #: Unique index inventory (four: three domain-uniqueness constraints plus the
@@ -1926,6 +1940,7 @@ class SQLiteStorage:
         organization: Organization,
         membership: Membership,
         audit_events: Sequence[AuditEvent],
+        onboarding_request: OrganizationOnboardingRequest | None = None,
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
         audit events in one transaction (identity contract/storage contract).
@@ -1960,6 +1975,8 @@ class SQLiteStorage:
         the caller-supplied objects unchanged (caller-echo contract: storage
         mints nothing and does not re-read what it wrote).
         """
+        if onboarding_request is not None and onboarding_request.organization_id != organization.id:
+            raise StorageError("onboarding request organization does not match provisioning")
         conn = self._connection()
         # Materialize once: the insert loop and the caller-echo tuple below
         # must share one iteration (a one-shot argument would otherwise
@@ -1973,6 +1990,22 @@ class SQLiteStorage:
             self._insert_membership_row(conn, membership)
             for audit_event in events:
                 self._insert_audit_event_row(conn, audit_event)
+            if onboarding_request is not None:
+                conn.execute(
+                    "INSERT INTO organization_onboarding_requests "
+                    "(organization_id, request_id, bootstrap_version, status, attempts, "
+                    "created_at, updated_at, last_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        str(onboarding_request.organization_id),
+                        onboarding_request.request_id,
+                        onboarding_request.bootstrap_version,
+                        onboarding_request.status,
+                        onboarding_request.attempts,
+                        encode_timestamp(onboarding_request.created_at),
+                        encode_timestamp(onboarding_request.updated_at),
+                        onboarding_request.last_error,
+                    ),
+                )
         except sqlite3.Error as exc:
             # Roll back first: the race-resolution reads below must run in
             # autocommit so they see the *concurrent winner's* committed
@@ -1998,6 +2031,48 @@ class SQLiteStorage:
             membership=membership,
             audit_events=events,
         )
+
+    def get_organization_onboarding_request(
+        self, organization_id: OrganizationId
+    ) -> OrganizationOnboardingRequest | None:
+        row = (
+            self._connection()
+            .execute(
+                "SELECT * FROM organization_onboarding_requests WHERE organization_id = ?",
+                (str(organization_id),),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return OrganizationOnboardingRequest(
+            request_id=row["request_id"],
+            organization_id=row["organization_id"],
+            bootstrap_version=row["bootstrap_version"],
+            status=row["status"],
+            attempts=row["attempts"],
+            created_at=decode_timestamp(row["created_at"]),
+            updated_at=decode_timestamp(row["updated_at"]),
+            last_error=row["last_error"],
+        )
+
+    def update_organization_onboarding_request(
+        self, request: OrganizationOnboardingRequest
+    ) -> None:
+        cursor = self._connection().execute(
+            "UPDATE organization_onboarding_requests SET status = ?, attempts = ?, "
+            "updated_at = ?, last_error = ? WHERE organization_id = ? AND request_id = ?",
+            (
+                request.status,
+                request.attempts,
+                encode_timestamp(request.updated_at),
+                request.last_error,
+                str(request.organization_id),
+                request.request_id,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise EntityNotFoundError("organization onboarding request not found")
 
     def provision_organization(
         self,

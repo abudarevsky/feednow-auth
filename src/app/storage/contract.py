@@ -18,6 +18,7 @@ from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization, OrganizationSlug
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.pagination import Page, PageParams
 from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
@@ -643,6 +644,7 @@ class Storage(Protocol):
         organization: Organization,
         membership: Membership,
         audit_events: Sequence[AuditEvent],
+        onboarding_request: OrganizationOnboardingRequest | None = None,
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
         audit events in one transaction (identity contract/storage contract).
@@ -675,6 +677,18 @@ class Storage(Protocol):
             ReferenceNotFoundError: when a cross-check reveals a parent the
                 batch does not itself create.
         """
+        ...
+
+    def get_organization_onboarding_request(
+        self, organization_id: OrganizationId
+    ) -> OrganizationOnboardingRequest | None:
+        """Read the durable onboarding outbox record for an organization."""
+        ...
+
+    def update_organization_onboarding_request(
+        self, request: OrganizationOnboardingRequest
+    ) -> None:
+        """Persist a dispatcher attempt/result without storing credentials."""
         ...
 
     def provision_organization(

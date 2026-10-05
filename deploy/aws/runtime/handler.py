@@ -57,6 +57,7 @@ from app.auth.session import SessionManager
 from app.auth.token_exchange import CognitoTokenEndpoint
 from app.main import create_app
 from app.models.service_authorization import ServiceRegistration
+from app.services.organization_onboarding import dispatch_organization_onboarding
 from app.storage.contract import Storage
 from app.storage.dynamodb import DynamoDbStorage, open_dynamodb_storage
 from app.storage.local_admin import LocalAdminStorage
@@ -413,6 +414,18 @@ def build_app(
                 landing_url=session.allowed_return_origins[0],
                 allowed_return_origins=session.allowed_return_origins,
                 cookie_secure=session.cookie_secure,
+                onboarding_dispatch=(
+                    lambda organization_id: dispatch_organization_onboarding(
+                        storage,
+                        organization_id,
+                        base_url=(env.get(VISPECTOR_URL_ENV) or "").strip(),
+                        service_credential=service_credential,
+                    )
+                )
+                if service_credential
+                and resolved.service_registration is not None
+                and resolved.service_registration.enabled
+                else None,
             )
         )
         domain = session.authorize_url.removesuffix("/oauth2/authorize")

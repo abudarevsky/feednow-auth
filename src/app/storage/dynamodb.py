@@ -30,6 +30,7 @@ from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
+from app.models.organization_onboarding import OrganizationOnboardingRequest
 from app.models.pagination import Page, PageParams, clamp_limit
 from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
@@ -164,6 +165,7 @@ SCHEMA: Final[tuple[TableSpec, ...]] = (
     TableSpec(name="oauth_login_states", partition_key="pk"),
     TableSpec(name="app_sessions", partition_key="pk"),
     TableSpec(name="service_authorization_codes", partition_key="pk"),
+    TableSpec(name="organization_onboarding_requests", partition_key="pk"),
 )
 
 #: The :data:`SCHEMA` table names as a set — the adapter's own guard that an
@@ -671,6 +673,38 @@ def service_authorization_code_item(code: ServiceAuthorizationCode) -> dict[str,
     if code.consumed_at is not None:
         item["consumed_at"] = encode_timestamp(code.consumed_at)
     return item
+
+
+def organization_onboarding_request_item(
+    request: OrganizationOnboardingRequest,
+) -> dict[str, Any]:
+    """Encode a secret-free organization onboarding outbox item."""
+    return {
+        "pk": str(request.organization_id),
+        "request_id": request.request_id,
+        "bootstrap_version": request.bootstrap_version,
+        "status": request.status,
+        "attempts": request.attempts,
+        "created_at": encode_timestamp(request.created_at),
+        "updated_at": encode_timestamp(request.updated_at),
+        "last_error": request.last_error or "",
+    }
+
+
+def organization_onboarding_request_from_item(
+    item: Mapping[str, Any],
+) -> OrganizationOnboardingRequest:
+    """Decode a persisted outbox record."""
+    return OrganizationOnboardingRequest(
+        request_id=item["request_id"],
+        organization_id=item["pk"],
+        bootstrap_version=item["bootstrap_version"],
+        status=item["status"],
+        attempts=int(item["attempts"]),
+        created_at=decode_timestamp(item["created_at"]),
+        updated_at=decode_timestamp(item["updated_at"]),
+        last_error=item.get("last_error") or None,
+    )
 
 
 def service_authorization_code_from_item(
@@ -2606,6 +2640,7 @@ class DynamoDbStorage:
         organization: Organization,
         membership: Membership,
         audit_events: Sequence[AuditEvent],
+        onboarding_request: OrganizationOnboardingRequest | None = None,
     ) -> ProvisionedUser:
         """Atomically provision user + identity + organization + membership +
         audit events in one ``TransactWriteItems`` (identity contract/storage contract, design choice 3).
@@ -2708,6 +2743,17 @@ class DynamoDbStorage:
         for event in events:
             items.append(self._put("audit_events", audit_event_item(event), ("pk",)))
             descriptors.append(DuplicateConflict(DuplicateEntityKind.ENTITY_ID))
+        if onboarding_request is not None:
+            if onboarding_request.organization_id != organization.id:
+                raise StorageError("onboarding request organization does not match provisioning")
+            items.append(
+                self._put(
+                    "organization_onboarding_requests",
+                    organization_onboarding_request_item(onboarding_request),
+                    ("pk",),
+                )
+            )
+            descriptors.append(DuplicateConflict(DuplicateEntityKind.ENTITY_ID))
         # Race winner resolution (decision 3): the constraint PK is fully known
         # from the failed write's own inputs, and the positional rule that
         # decided the error identifies which race item failed. The identity
@@ -2767,6 +2813,35 @@ class DynamoDbStorage:
             membership=membership,
             audit_events=events,
         )
+
+    def get_organization_onboarding_request(
+        self, organization_id: OrganizationId
+    ) -> OrganizationOnboardingRequest | None:
+        item = self._get("organization_onboarding_requests", {"pk": str(organization_id)})
+        return None if item is None else organization_onboarding_request_from_item(item)
+
+    def update_organization_onboarding_request(
+        self, request: OrganizationOnboardingRequest
+    ) -> None:
+        try:
+            self._table("organization_onboarding_requests").update_item(
+                Key={"pk": str(request.organization_id)},
+                UpdateExpression="SET #status = :status, attempts = :attempts, "
+                "updated_at = :updated_at, last_error = :last_error",
+                ConditionExpression="request_id = :request_id",
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={
+                    ":request_id": request.request_id,
+                    ":status": request.status,
+                    ":attempts": request.attempts,
+                    ":updated_at": encode_timestamp(request.updated_at),
+                    ":last_error": request.last_error or "",
+                },
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("organization onboarding request not found") from exc
+            raise StorageError("storage operation failed") from None
 
     def provision_organization(
         self,

@@ -61,7 +61,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from contextlib import suppress
 from datetime import timedelta
 from typing import Final
 from urllib.parse import SplitResult, urlencode, urlsplit
@@ -76,6 +77,7 @@ from app.auth.cognito import (
 from app.auth.errors import TokenProviderUnavailableError, TokenValidationError
 from app.auth.session import SessionManager, build_session_cookie
 from app.auth.token_exchange import CognitoTokenEndpoint
+from app.models.ids import OrganizationId
 from app.models.session import OAuthLoginState
 from app.models.timestamps import utc_now
 from app.services.identity import (
@@ -127,7 +129,7 @@ def _origin(scheme: str, netloc: str) -> str:
 
 
 def _has_forbidden_characters(candidate: str) -> bool:
-    """Reject control characters and backslashes anywhere in a return URL.
+    r"""Reject control characters and backslashes anywhere in a return URL.
 
     CR/LF/TAB and friends could split or forge a ``Location`` header value,
     and browsers normalize backslashes to slashes in paths — a ``/\host``
@@ -248,6 +250,7 @@ def build_oauth_router(
     landing_url: str,
     allowed_return_origins: Iterable[str],
     cookie_secure: bool = False,
+    onboarding_dispatch: Callable[[OrganizationId], object] | None = None,
 ) -> APIRouter:
     """Build the ``/oauth/login`` + ``/oauth/callback`` router (tasks 11 and 12).
 
@@ -358,6 +361,9 @@ def build_oauth_router(
                 claims,
                 profile_provider=lambda: profile_source.fetch(access_token, claims.sub),
             )
+            if onboarding_dispatch is not None:
+                with suppress(Exception):
+                    onboarding_dispatch(identity.context.organization_id)
         except DisabledUserError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except NoActiveOrganizationError as exc:

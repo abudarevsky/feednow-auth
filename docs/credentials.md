@@ -83,11 +83,21 @@ membership roles are never returned or inferred for an API key.
 In Swagger, use the endpoint's **Authorize** control to set the service
 credential; the generated request adds the `Bearer` scheme automatically.
 
+`POST /v1/service-auth/contexts/validate` uses the same server credential to
+revalidate a Vispector-local user session. Its body contains `service_id`,
+`user_id`, and an optional `organization_id`. When the organization is omitted,
+FeedNow resolves it only if the user has exactly one active organization
+membership. The response returns the current user and organization IDs,
+service, sorted permission set, and `permission_version`. Missing, disabled,
+or ambiguous context is denied uniformly with 403.
+
 ## Browser handoff to a registered service
 
 `POST /v1/oauth/service-handoff` requires the active FeedNow session and the
-session-bound CSRF token. Its request selects a registered `service_id` and an
-organization the current user actively belongs to; it accepts no destination
+session-bound CSRF token. Its request selects a registered `service_id` and
+optionally an organization the current user actively belongs to. If omitted,
+FeedNow resolves the organization only when exactly one active membership
+exists. It accepts no destination
 URL. The service supplies an opaque `state` value that FeedNow echoes to the
 callback so the service can bind the callback to the browser flow it started.
 FeedNow constructs the redirect from the configured service origin and
@@ -99,8 +109,9 @@ The service sends the code to
 `POST /v1/service-auth/authorization-codes/exchange` with its server-only
 Bearer credential. FeedNow authenticates the service before consuming the
 code, then rechecks that the user, organization, and membership are active and
-that the permission snapshot still matches. Only the user ID, organization
-ID, service ID, and allowed permissions are returned. Invalid, expired,
+that the permission snapshot still matches. The user ID, organization ID,
+service ID, allowed permissions, and permission version are returned. Invalid,
+expired,
 wrong-service, and replayed codes share one 401 response. API keys remain a
 separate machine credential and grant only the `inspect` permission.
 
