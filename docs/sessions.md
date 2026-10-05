@@ -33,10 +33,11 @@ The browser composition provides `GET /v1/csrf`. It sets a readable
 `feednow_csrf` cookie bound to the opaque session ID. Unsafe `/v1` requests
 authenticated by the session cookie must also send the matching
 `X-CSRF-Token`; comparisons are constant-time. Bearer-token requests do not
-use this cookie check. The `/v1/service-auth/` routes are exempt from the
-session CSRF check because they authenticate with their own server-only
-service credential; requests without a valid service credential are rejected
-by the route itself.
+use this cookie check. The browser handoff at `/v1/oauth/service-handoff`
+uses the session and CSRF checks. The `/v1/service-auth/` routes are exempt
+from session CSRF because they authenticate with the server-only service
+credential; requests without a valid service credential are rejected by the
+route itself.
 
 ## Limits and operations
 

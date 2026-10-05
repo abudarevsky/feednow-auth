@@ -83,6 +83,27 @@ membership roles are never returned or inferred for an API key.
 In Swagger, use the endpoint's **Authorize** control to set the service
 credential; the generated request adds the `Bearer` scheme automatically.
 
+## Browser handoff to a registered service
+
+`POST /v1/oauth/service-handoff` requires the active FeedNow session and the
+session-bound CSRF token. Its request selects a registered `service_id` and an
+organization the current user actively belongs to; it accepts no destination
+URL. The service supplies an opaque `state` value that FeedNow echoes to the
+callback so the service can bind the callback to the browser flow it started.
+FeedNow constructs the redirect from the configured service origin and
+callback path, and returns a two-minute, one-time authorization code. The
+stored record contains only the SHA-256 digest, service binding, user and
+organization IDs, permission snapshot, expiry, and consumption timestamp.
+
+The service sends the code to
+`POST /v1/service-auth/authorization-codes/exchange` with its server-only
+Bearer credential. FeedNow authenticates the service before consuming the
+code, then rechecks that the user, organization, and membership are active and
+that the permission snapshot still matches. Only the user ID, organization
+ID, service ID, and allowed permissions are returned. Invalid, expired,
+wrong-service, and replayed codes share one 401 response. API keys remain a
+separate machine credential and grant only the `inspect` permission.
+
 Vispector API keys must have exactly one scope:
 `vispector:inspection:run`, which maps to `inspect`. Keys with no scope, a
 different scope, or additional scopes are denied. This key permission applies

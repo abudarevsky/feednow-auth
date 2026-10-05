@@ -13,23 +13,25 @@ routes.
 - External provider subjects remain provider-scoped values and are never
   substituted for FeedNow IDs.
 - Persisted and serialized timestamps are timezone-aware UTC values.
-- Request schemas reject unknown fields. API responses never expose password,
-  token, pepper, or secret-hash material; only key creation returns the full
-  API-key literal, once.
+- Request schemas reject unknown fields. API responses never expose passwords,
+  provider tokens, peppers, or secret hashes. Key creation returns its API-key
+  literal once; the registered-service handoff returns a short-lived code in
+  a no-store redirect and never includes profile data.
 - `Page[T]` uses opaque keyset cursors. Clients pass cursors back unchanged.
 
 ## HTTP surface
 
-The versioned manifest currently contains 21 endpoints: two current-user
+The versioned manifest currently contains 24 endpoints: two current-user
 operations; organization and member operations; API-key management; and local
-application-administration operations, plus service-side API-key validation.
+application-administration operations, plus service-side API-key validation,
+registered-service handoff, and authorization-code exchange.
 The generic `create_app()` factory
 mounts health plus explicitly supplied routers. AWS and local Docker
 compositions select their own router sets. OAuth, health, CSRF, and the local
 Vispector proof route are outside the versioned manifest.
 
-Successful reads and updates use 200; creates use 201; deletion and lifecycle
-actions with no response body use 204. Error responses use the shared safe
+Successful reads and updates use 200; creates use 201; service handoff uses
+303; deletion and lifecycle actions with no response body use 204. Error responses use the shared safe
 error envelope. Backend, AWS, Cognito, token, and credential contents are not
 echoed in error messages.
 

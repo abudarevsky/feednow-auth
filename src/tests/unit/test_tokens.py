@@ -181,14 +181,14 @@ def test_membership_roles_claim_is_deduplicated_in_declaration_order() -> None:
 
 
 def test_exact_membership_role_strings_are_accepted_like_build_literal() -> None:
-    claims = _decode(_issuer().issue(_user(), membership_roles=["admin"]))
-    assert claims[ROLES_CLAIM] == ["admin"]
+    claims = _decode(_issuer().issue(_user(), membership_roles=["org_admin"]))
+    assert claims[ROLES_CLAIM] == ["org_admin"]
 
 
 @pytest.mark.parametrize("foreign", [ApplicationRole.ADMIN, ApplicationRole.USER, "superadmin"])
 def test_membership_roles_reject_foreign_values_with_fixed_message(foreign: object) -> None:
     # ApplicationRole members are str subclasses whose values collide with
-    # MembershipRole ("admin") — they must never coerce across the boundary
+    # MembershipRole ("org_admin") — they must never coerce across the boundary
     # (spec 12 invariant 1); unknown strings fail the same way.
     with pytest.raises(ValueError) as excinfo:
         _issuer().issue(_user(), membership_roles=[foreign])  # type: ignore[list-item]

@@ -27,18 +27,19 @@ uniform denial is audited first, then returned.
 - **Atomic creation.** `create_organization`
   (`src/app/services/organization.py`) emits exactly one
   `provision_organization` batch — organization + owner membership + creation
-  audits — the only atomic unit, because the owner invariant has no repair path.
+  audits. Ownership transfer is also a dedicated atomic unit.
   Unlike first-login provisioning it has **no** race convergence: a taken slug
   is a plain `DuplicateEntityError(kind=organization_slug)`, taken record ids are
   `entity_id`, an unknown membership user is `ReferenceNotFoundError`, and every
   rejected batch is fully rolled back. See [contracts.md](contracts.md).
-- **Role policy.** `ROLE_RANK` fixes `viewer < member < admin < owner`. Reads
+- **Role policy.** `ROLE_RANK` fixes `viewer < member < org_admin < owner`. Reads
   (any org-scoped GET) require an **active** membership at rank ≥ `viewer`;
-  mutations (member add/remove, org rename) require rank ≥ `admin`. Creation
+  mutations (member add/remove, ownership transfer, org rename) require rank ≥
+  `org_admin`. Creation
   requires only authentication — the creator becomes `owner` through the batch.
-  The `owner` role is **not grantable, not removable, not changeable** through
-  the API: enforced by the policy plus the deliberate absence of any storage
-  update method.
+  `org_admin` can be assigned or removed like other non-owner memberships.
+  Ownership transfer is atomic: the selected active member becomes `owner`,
+  the former owner becomes `org_admin`, and the action is audited.
 - **Precedence.** `classify_access` checks in fixed order — organization status,
   then membership presence, then membership status, then role rank — so the
   denial `reason` is deterministic when several conditions hold, even though the
@@ -58,6 +59,30 @@ The org-side denial reasons are `no_membership`, `inactive_membership`,
 `inactive_organization`, and `insufficient_role`; all are members of the one
 `AccessOutcome` vocabulary.
 
+## Registered-service permissions
+
+The browser handoff and service-code exchange use a FeedNow-owned permission
+mapping, separate from API-key scopes and the global application-admin role:
+
+| Active organization role | Available service permissions |
+| --- | --- |
+| `owner`, `org_admin` | `projects:read`, `projects:write`, `inspect` |
+| `member` | `projects:read`, `inspect` |
+| `viewer` | `projects:read` |
+
+The issued context is the sorted intersection of this role mapping and the
+registered service's allowed permissions. Handoff requires an active user,
+organization, and membership. Exchange consumes the code first, then re-reads
+those records and confirms that the membership permission snapshot still
+matches. A disabled or removed grant cannot exchange successfully. The global
+`ApplicationRole.ADMIN` does not add service permissions, and commercial
+policy does not appear in this vocabulary.
+
+An organization `org_admin` can transfer ownership with
+`POST /v1/organizations/{organization_id}/owner`, naming an active member.
+The transfer commits both role changes and an audit event together: the target
+becomes `owner` and the former owner becomes `org_admin`.
+
 ## Organization names and slugs
 
 First-login provisioning creates a placeholder organization. An authorized
@@ -74,8 +99,8 @@ alongside the organization update.
 ## Two separate, non-inheriting vocabularies
 
 Organization-membership roles (this doc — `MembershipRole`, `ROLE_RANK`) and the
-global `ApplicationRole` are **separate and never inherit** into each other; the
-string `admin` appearing in both is a naming coincidence, not a relationship.
+global `ApplicationRole` are **separate and never inherit** into each other.
+Organization `org_admin` is distinct from FeedNow-wide `admin`.
 `ApplicationRole` is a closed two-value vocabulary (`user` / `admin`), granted
 out of band by the operator, and is enforced by a distinct global-administrator
 seam (`build_application_admin_dependency`, `src/app/auth/application_access.py`).

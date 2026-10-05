@@ -4,7 +4,7 @@ Covers the task's verify lines against stub storage (zero-write proofs) and
 pure-function assertions:
 
 1. The decision-4 classification matrix over (absent/disabled/active
-   membership) x (active/disabled org) x (four roles) x (viewer/admin
+   membership) x (active/disabled org) x (four roles) x (viewer/org_admin
    minimums), **including the precedence cells** (e.g. disabled org + absent
    membership => ``inactive_organization``).
 2. The denial audit shape: metadata exactly ``{"reason", "operation"}`` with
@@ -118,12 +118,12 @@ def _membership(
 # ---------------------------------------------------------------------------
 
 
-def test_role_rank_orders_viewer_below_member_below_admin_below_owner() -> None:
+def test_role_rank_orders_viewer_below_member_below_org_admin_below_owner() -> None:
     assert set(ROLE_RANK) == set(MembershipRole)
     assert (
         ROLE_RANK[MembershipRole.VIEWER]
         < ROLE_RANK[MembershipRole.MEMBER]
-        < ROLE_RANK[MembershipRole.ADMIN]
+        < ROLE_RANK[MembershipRole.ORG_ADMIN]
         < ROLE_RANK[MembershipRole.OWNER]
     )
 
@@ -152,7 +152,7 @@ _MEMBERSHIP_CASES: list[tuple[str, Membership | None]] = [
         (f"active-{role.value}", _membership(role))
         for role in (
             MembershipRole.OWNER,
-            MembershipRole.ADMIN,
+            MembershipRole.ORG_ADMIN,
             MembershipRole.MEMBER,
             MembershipRole.VIEWER,
         )
@@ -161,7 +161,7 @@ _MEMBERSHIP_CASES: list[tuple[str, Membership | None]] = [
         (f"disabled-{role.value}", _membership(role, MembershipStatus.DISABLED))
         for role in (
             MembershipRole.OWNER,
-            MembershipRole.ADMIN,
+            MembershipRole.ORG_ADMIN,
             MembershipRole.MEMBER,
             MembershipRole.VIEWER,
         )
@@ -175,7 +175,7 @@ _MEMBERSHIP_CASES: list[tuple[str, Membership | None]] = [
     [case_membership for _, case_membership in _MEMBERSHIP_CASES],
     ids=[label for label, _ in _MEMBERSHIP_CASES],
 )
-@pytest.mark.parametrize("min_role", [MembershipRole.VIEWER, MembershipRole.ADMIN])
+@pytest.mark.parametrize("min_role", [MembershipRole.VIEWER, MembershipRole.ORG_ADMIN])
 def test_classify_access_matches_the_pinned_precedence_matrix(
     org_status: OrganizationStatus,
     membership: Membership | None,
@@ -189,12 +189,12 @@ def test_classify_access_matches_the_pinned_precedence_matrix(
 def test_precedence_disabled_org_wins_over_absent_membership() -> None:
     # The decision-4 cell the matrix must pin for audit forensics: several
     # conditions hold at once, the reason is the *first* check.
-    decision = classify_access(_org(OrganizationStatus.DISABLED), None, MembershipRole.ADMIN)
+    decision = classify_access(_org(OrganizationStatus.DISABLED), None, MembershipRole.ORG_ADMIN)
     assert decision.outcome is AccessOutcome.INACTIVE_ORGANIZATION
 
 
 def test_precedence_absent_membership_wins_over_role_rank() -> None:
-    decision = classify_access(_org(), None, MembershipRole.ADMIN)
+    decision = classify_access(_org(), None, MembershipRole.ORG_ADMIN)
     assert decision.outcome is AccessOutcome.NO_MEMBERSHIP
 
 
@@ -202,7 +202,7 @@ def test_precedence_disabled_membership_wins_over_insufficient_role() -> None:
     decision = classify_access(
         _org(),
         _membership(MembershipRole.VIEWER, MembershipStatus.DISABLED),
-        MembershipRole.ADMIN,
+        MembershipRole.ORG_ADMIN,
     )
     assert decision.outcome is AccessOutcome.INACTIVE_MEMBERSHIP
 
@@ -373,7 +373,7 @@ def test_builders_are_pure_in_injected_now_and_ids() -> None:
         organization_id=_ORG_ID,
         actor_user_id=_ACTOR,
         membership_id=_MEMBERSHIP_ID,
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         now=_NOW,
     )
     second = build_membership_created_audit(
@@ -381,7 +381,7 @@ def test_builders_are_pure_in_injected_now_and_ids() -> None:
         organization_id=_ORG_ID,
         actor_user_id=_ACTOR,
         membership_id=_MEMBERSHIP_ID,
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         now=_NOW,
     )
     assert first == second  # deterministic
@@ -391,7 +391,7 @@ def test_builders_are_pure_in_injected_now_and_ids() -> None:
         organization_id=_ORG_ID,
         actor_user_id=_ACTOR,
         membership_id=_MEMBERSHIP_ID,
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         now=_NOW.replace(microsecond=654321),
     )
     assert later.created_at != first.created_at
@@ -416,7 +416,7 @@ def test_non_customer_types_are_refused(blocked: OrganizationType) -> None:
 
 @pytest.mark.parametrize(
     "allowed",
-    [MembershipRole.VIEWER, MembershipRole.MEMBER, MembershipRole.ADMIN],
+    [MembershipRole.VIEWER, MembershipRole.MEMBER, MembershipRole.ORG_ADMIN],
 )
 def test_non_owner_roles_are_assignable(allowed: MembershipRole) -> None:
     require_assignable_member_role(allowed)  # must not raise
@@ -425,7 +425,9 @@ def test_non_owner_roles_are_assignable(allowed: MembershipRole) -> None:
 def test_owner_role_is_not_assignable() -> None:
     with pytest.raises(OwnerRoleNotAssignableError) as excinfo:
         require_assignable_member_role(MembershipRole.OWNER)
-    assert str(excinfo.value) == "the owner role cannot be granted through the membership API"
+    assert str(excinfo.value) == (
+        "the owner role is assigned only through organization creation or ownership transfer"
+    )
 
 
 @pytest.mark.parametrize(

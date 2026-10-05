@@ -60,6 +60,7 @@ from app.models.ids import (
     UserId,
 )
 from app.models.pagination import MAX_PAGE_LIMIT, MIN_PAGE_LIMIT, Page, PageParams
+from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.storage.contract import (
     DuplicateEntityError,
@@ -263,6 +264,23 @@ def make_app_session(
     return AppSession(
         session_id=session_id,
         user_id=UserId(user_id),
+        expires_at=expires_at,
+    )
+
+
+def make_service_authorization_code(
+    *,
+    code_digest: str = "a" * 64,
+    expires_at: datetime = LIVE_AT,
+) -> ServiceAuthorizationCode:
+    """Build a deterministic digest-only registered-service code."""
+    return ServiceAuthorizationCode(
+        code_digest=code_digest,
+        service_id="vispector",
+        user_id=UserId("usr_test_0001"),
+        organization_id=OrganizationId("org_test_0001"),
+        permissions=("projects:read", "inspect"),
+        permission_version="membership-v1",
         expires_at=expires_at,
     )
 
@@ -1978,6 +1996,60 @@ def test_duplicate_app_session_create_raises_entity_id_conflict(
     assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
     # The rejected write left no trace: the original still reads back.
     assert storage.get_app_session(session.session_id) == session
+
+
+def test_service_authorization_code_is_digest_only_and_single_use(storage: Storage) -> None:
+    code = make_service_authorization_code()
+    assert storage.save_service_authorization_code(code) is None
+    consumed = storage.consume_service_authorization_code(code.code_digest)
+    assert consumed is not None
+    assert consumed.model_copy(update={"consumed_at": None}) == code
+    assert consumed.consumed_at is not None
+    assert storage.consume_service_authorization_code(code.code_digest) is None
+
+
+def test_unknown_and_expired_service_authorization_codes_return_none(storage: Storage) -> None:
+    assert storage.consume_service_authorization_code("b" * 64) is None
+    expired = make_service_authorization_code(code_digest="c" * 64, expires_at=EXPIRED_AT)
+    storage.save_service_authorization_code(expired)
+    assert storage.consume_service_authorization_code(expired.code_digest) is None
+
+
+def test_duplicate_service_authorization_code_digest_is_entity_conflict(storage: Storage) -> None:
+    code = make_service_authorization_code()
+    storage.save_service_authorization_code(code)
+    with pytest.raises(DuplicateEntityError) as excinfo:
+        storage.save_service_authorization_code(code)
+    assert excinfo.value.kind is DuplicateEntityKind.ENTITY_ID
+    consumed = storage.consume_service_authorization_code(code.code_digest)
+    assert consumed is not None
+    assert consumed.model_copy(update={"consumed_at": None}) == code
+
+
+def test_concurrent_service_authorization_code_consume_has_one_winner(storage: Storage) -> None:
+    code = make_service_authorization_code()
+    storage.save_service_authorization_code(code)
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, ServiceAuthorizationCode | None] = {}
+    failures: dict[str, BaseException] = {}
+
+    def attempt(token: str) -> None:
+        try:
+            barrier.wait()
+            outcomes[token] = storage.consume_service_authorization_code(code.code_digest)
+        except Exception as exc:
+            failures[token] = exc
+
+    threads = [threading.Thread(target=attempt, args=(token,)) for token in ("early", "late")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == {}
+    delivered = [value for value in outcomes.values() if value is not None]
+    assert len(delivered) == 1
+    assert delivered[0] is not None
+    assert delivered[0].model_copy(update={"consumed_at": None}) == code
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,7 @@ from app.models.enums import (
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.membership import Membership
 from app.models.organization import Organization, OrganizationName, OrganizationSlug
+from app.models.service_authorization import ServiceAuthorizationCode, ServiceRegistration
 from app.models.session import (
     AppSession,
     CodeVerifier,
@@ -87,6 +88,8 @@ __all__ = [
     "ReturnUrl",
     "Scope",
     "SecretHash",
+    "ServiceAuthorizationCode",
+    "ServiceRegistration",
     "SessionId",
     "StateId",
     "User",

@@ -47,23 +47,15 @@ pytestmark = pytest.mark.dynamodb_local
 
 SUITE_PATH: Path = Path(__file__).resolve().parent / "suite.py"
 
-#: sha256 of ``suite.py``'s exact bytes at the Phase 13 task-1 baseline
-#: (the atomic ``transition_application_role`` cases were appended; the
-#: Phase 12 task-2 baseline was ``14b1e04b...`` before that edit, the Phase
-#: 11 task-6/7 one ``f32efc6e...`` before it, and the Phase 06 one
-#: ``025c879c...`` before that). Phase 13 task 1 lands the contract + SQLite
-#: half only, so the gated DynamoDB Local run is **documented-red** until the
-#: Phase 13 DynamoDB transition task lands the adapter half (same Phase 12
-#: pattern); the default ``uv run pytest`` stays green because every
-#: fixture-taking case skips without a reachable DynamoDB Local. AC 2: any
-#: drift here means the shared suite was edited to fit DynamoDB instead of the
-#: adapter changing — this pin fails loudly first.
-SUITE_SHA256_AT_BASELINE = "9b37b815be86976062af9a2bfd792044fd27820dd0ec6f404802161b44f39df3"
+#: Pin the exact shared storage suite so DynamoDB Local exercises the same
+#: conformance cases as SQLite. Update this hash only when the shared suite
+#: changes alongside the adapter implementation.
+SUITE_SHA256_AT_BASELINE = "c868ce5aaba35d6ccf11eaab19a609adb771c07444152c2e747043775572f8ad"
 
 
 @pytest.fixture
 def storage() -> Iterator[Storage]:
-    """Fresh initialized DynamoDB adapter with all seven tables empty (per test).
+    """Fresh initialized DynamoDB adapter with all tables empty (per test).
 
     Harness design choice 8: a new random table prefix per test, created empty and
     deleted on teardown (no truncation races). The adapter gets its **own**

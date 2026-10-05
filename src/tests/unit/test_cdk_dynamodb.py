@@ -130,7 +130,7 @@ def test_cdk_schema_copy_matches_runtime_schema() -> None:
 
 def test_template_declares_exactly_nine_tables() -> None:
     for env_name in ENVIRONMENTS:
-        assert len(_tables(env_name)) == 9, f"{env_name} must declare exactly 9 tables"
+        assert len(_tables(env_name)) == 10, f"{env_name} must declare exactly 10 tables"
 
 
 def test_table_names_carry_the_env_prefix() -> None:
@@ -142,8 +142,8 @@ def test_table_names_carry_the_env_prefix() -> None:
             feednow_env=env_name,
             cognito_callback_urls=CALLBACK_URLS,
             account_origin="https://account.example.invalid",
-        existing_user_pool_id=f"eu-north-1_{env_name}",
-        existing_client_id=f"{env_name}client",
+            existing_user_pool_id=f"eu-north-1_{env_name}",
+            existing_client_id=f"{env_name}client",
         )
         assert stack.table_prefix == prefix
         names = {resource["Properties"]["TableName"] for resource in _tables(env_name).values()}
@@ -232,7 +232,11 @@ def test_users_table_carries_the_phase_13_by_application_role_gsi() -> None:
 
 #: The two additive session tables and the numeric TTL attribute the task-7
 #: adapter writes on every item.
-_SESSION_TTL_TABLES = ("oauth_login_states", "app_sessions")
+_SESSION_TTL_TABLES = (
+    "oauth_login_states",
+    "app_sessions",
+    "service_authorization_codes",
+)
 _TTL_ATTRIBUTE = "expires_at_epoch"
 
 
@@ -254,6 +258,7 @@ def test_cdk_schema_copy_marks_ttl_on_the_session_tables() -> None:
     ttl_by_name = {spec.name: spec.ttl_attribute for spec in stack_module._SCHEMA}
     assert ttl_by_name["oauth_login_states"] == _TTL_ATTRIBUTE
     assert ttl_by_name["app_sessions"] == _TTL_ATTRIBUTE
+    assert ttl_by_name["service_authorization_codes"] == _TTL_ATTRIBUTE
     for spec in SCHEMA:
         if spec.name not in _SESSION_TTL_TABLES:
             assert ttl_by_name[spec.name] is None, spec.name

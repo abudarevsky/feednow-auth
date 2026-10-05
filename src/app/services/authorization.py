@@ -7,12 +7,11 @@ domain errors whose HTTP translation the routers own (design choice 6). This
 module imports **no FastAPI** — the credential wiring lives in
 ``app.auth.organization_access`` (implementation) and the routers (tasks 4/5).
 
-Role policy (design choice 3): rank is ``viewer < member < admin < owner``
+Role policy (design choice 3): rank is ``viewer < member < org_admin < owner``
 (:data:`ROLE_RANK`). Reads require an **active** membership at rank >=
-viewer (any role); mutations require rank >= admin (owner or admin). The
-``owner`` role is not grantable, not removable, and not changeable through
-the membership API — enforced by these guards plus the deliberate absence of
-any update method in the storage contract.
+viewer (any role); mutations require rank >= org_admin (owner or org_admin). The
+``owner`` role is not directly grantable through member creation; ownership changes use the
+explicit atomic transfer operation.
 
 Denial classification (design choice 4): :func:`classify_access` checks in fixed
 precedence — organization status, then membership presence, then membership
@@ -97,11 +96,11 @@ DENIAL_REASONS: Final[frozenset[AccessOutcome]] = frozenset(
     }
 )
 
-#: Role rank (decision 3): ``viewer < member < admin < owner``.
+#: Role rank (decision 3): ``viewer < member < org_admin < owner``.
 ROLE_RANK: Final[dict[MembershipRole, int]] = {
     MembershipRole.VIEWER: 0,
     MembershipRole.MEMBER: 1,
-    MembershipRole.ADMIN: 2,
+    MembershipRole.ORG_ADMIN: 2,
     MembershipRole.OWNER: 3,
 }
 
@@ -163,7 +162,7 @@ class OwnerRoleNotAssignableError(Exception):
 
     def __init__(
         self,
-        message: str = "the owner role cannot be granted through the membership API",
+        message: str = "the owner role is assigned only through organization creation or ownership transfer",
     ) -> None:
         super().__init__(message)
 

@@ -320,7 +320,7 @@ def seeded(env: Env) -> Env:
         env.storage,
         organization_id="org_c",
         user_id="usr_caller",
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         status=MembershipStatus.DISABLED,
         membership_id="mem_c",
     )

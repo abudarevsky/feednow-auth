@@ -1,21 +1,17 @@
-"""Membership add/remove rules (organization).
+"""Membership and ownership-transfer rules (organization).
 
-Mutation rules for ``POST``/``DELETE .../members`` (design notes decisions
-3/6/7), functions-with-injected-storage like :mod:`app.services.organization`
-(the abandoned class scaffold was replaced wholesale, design choice 0). The
-caller's right to mutate (rank >= admin) is enforced by the shared access
-dependency *before* these functions run; what is enforced here is the role
-policy of design choice 3: ``owner`` is not grantable (guard) and not removable
-(immutability check), and the (organization, user) pair stays unique through
-the storage constraint.
+Mutation rules for organization members. The caller's right to mutate
+(rank >= ``org_admin``) is enforced by the shared access dependency before
+these functions run. Owner cannot be granted through member creation or
+removed; ownership changes go through the atomic transfer operation, which
+demotes the former owner to ``org_admin``.
 
-Audit ordering (design choice 7): ``membership.created``/``membership.removed``
+Audit ordering: ``membership.created``/``membership.removed``
 are appended **after** the successful write — a mutation that failed must
 never audit as success. The accepted, documented limitation: a committed
-mutation whose audit append fails returns 500 with the mutation persisted
-(SQLite has no cross-call transaction; the compound batch is the only
-atomic unit, and membership add/remove has no invariant that would need
-one).
+mutation whose audit append fails returns 500 with the mutation persisted.
+Membership add/remove do not have a cross-row invariant; ownership transfer
+commits its two role changes and audit event in one storage transaction.
 
 Error translation (design choice 6): the adapter's ``ReferenceNotFoundError`` on
 an unknown target ``usr_`` becomes :class:`TargetUserNotFoundError` (404 —
@@ -32,6 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+from app.models.audit_event import AuditEvent
 from app.models.enums import MembershipRole, MembershipStatus
 from app.models.ids import AuditEventId, MembershipId, OrganizationId, UserId
 from app.models.membership import Membership
@@ -171,6 +168,60 @@ def remove_member(
     )
 
 
+def transfer_organization_owner(
+    storage: Storage,
+    actor_user_id: UserId,
+    organization_id: OrganizationId,
+    new_owner_user_id: UserId,
+    *,
+    now: datetime | None = None,
+) -> Membership:
+    """Transfer ownership to an active member and return the new owner."""
+    timestamp = now if now is not None else utc_now()
+    cursor: str | None = None
+    current_owner: Membership | None = None
+    target: Membership | None = None
+    while True:
+        page = storage.list_memberships(organization_id, PageParams(limit=100, cursor=cursor))
+        for membership in page.items:
+            if membership.role is MembershipRole.OWNER:
+                current_owner = membership
+            if membership.user_id == new_owner_user_id:
+                target = membership
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+    if current_owner is None or target is None or target.status is not MembershipStatus.ACTIVE:
+        raise MemberNotFoundError()
+    if target.user_id == current_owner.user_id:
+        return target
+    event = AuditEvent(
+        id=new_audit_event_id(),
+        organization_id=organization_id,
+        actor_type="user",
+        actor_id=actor_user_id,
+        action="organization.owner_transferred",
+        target_type="organization",
+        target_id=str(organization_id),
+        metadata={
+            "previous_owner_user_id": str(current_owner.user_id),
+            "new_owner_user_id": str(target.user_id),
+        },
+        created_at=timestamp,
+    )
+    try:
+        storage.transfer_organization_owner(
+            organization_id=organization_id,
+            former_owner_id=current_owner.user_id,
+            new_owner_id=target.user_id,
+            new_owner_role=target.role,
+            audit_event=event,
+        )
+    except EntityNotFoundError as exc:
+        raise MemberNotFoundError() from exc
+    return target.model_copy(update={"role": MembershipRole.OWNER})
+
+
 def list_members(
     storage: Storage, organization_id: OrganizationId, page: PageParams
 ) -> Page[Membership]:
@@ -189,4 +240,5 @@ __all__ = [
     "list_members",
     "new_member_grant_ids",
     "remove_member",
+    "transfer_organization_owner",
 ]

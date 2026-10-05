@@ -35,6 +35,12 @@ class MemberCreateRequest(ApiSchema):
     role: MembershipRole
 
 
+class OwnerTransferRequest(ApiSchema):
+    """Target active member for an organization ownership transfer."""
+
+    new_owner_user_id: UserId
+
+
 class MemberResponse(ApiSchema):
     """A member row in list items and the add-member response (derived)."""
 
@@ -44,4 +50,4 @@ class MemberResponse(ApiSchema):
     created_at: UtcDatetime
 
 
-__all__ = ["MemberCreateRequest", "MemberResponse"]
+__all__ = ["MemberCreateRequest", "MemberResponse", "OwnerTransferRequest"]

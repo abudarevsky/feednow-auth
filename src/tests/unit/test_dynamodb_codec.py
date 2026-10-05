@@ -38,6 +38,7 @@ from pydantic import ValidationError
 import app.storage.contract as contract
 from app.models.enums import ApplicationRole, IdentityProvider, UserStatus
 from app.models.ids import UserId
+from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.models.user import User
 from app.storage.dynamodb import (
@@ -61,6 +62,8 @@ from app.storage.dynamodb import (
     oauth_login_state_from_item,
     oauth_login_state_item,
     open_dynamodb_storage,
+    service_authorization_code_from_item,
+    service_authorization_code_item,
     ttl_epoch_seconds,
     user_from_item,
     user_item,
@@ -324,7 +327,7 @@ def test_present_but_invalid_stored_role_fails_validation() -> None:
 # -- schema (single source) ---------------------------------------------------
 
 
-def test_schema_is_the_nine_table_single_source() -> None:
+def test_schema_is_the_ten_table_single_source() -> None:
     assert [spec.name for spec in SCHEMA] == [
         "users",
         "organizations",
@@ -335,6 +338,7 @@ def test_schema_is_the_nine_table_single_source() -> None:
         "unique_constraints",
         "oauth_login_states",
         "app_sessions",
+        "service_authorization_codes",
     ]
     # The harness re-exports the very same tuple object (no drift).
     from tests.support import dynamodb_local as local
@@ -420,6 +424,23 @@ def test_app_session_item_round_trips_with_ttl_attribute() -> None:
     assert item["expires_at"] == encode_timestamp(_LIVE)
     assert item["expires_at_epoch"] == ttl_epoch_seconds(_LIVE)
     assert app_session_from_item(item) == session
+
+
+def test_service_authorization_code_item_round_trips_without_plaintext() -> None:
+    code = ServiceAuthorizationCode(
+        code_digest="a" * 64,
+        service_id="vispector",
+        user_id="usr_test_0001",
+        organization_id="org_test_0001",
+        permissions=("projects:read", "inspect"),
+        permission_version="membership-v1",
+        expires_at=_LIVE,
+    )
+    item = service_authorization_code_item(code)
+    assert item["pk"] == code.code_digest
+    assert item["expires_at_epoch"] == ttl_epoch_seconds(_LIVE)
+    assert "raw_code" not in item
+    assert service_authorization_code_from_item(item) == code
 
 
 # -- factory + adapter shell (injected fake, no network) ----------------------

@@ -15,7 +15,7 @@ Acceptance mapping (AC 1/2/5 for the three organization routes):
   (including a ``personal-*`` collision) → 409;
 - list shows only the caller's active-membership orgs; limit clamps, cursor
   round-trips, a foreign cursor → 400;
-- the owner/admin/member/viewer matrix gets 200 on GET /{id}, 200 on list,
+- the owner/org_admin/member/viewer matrix gets 200 on GET /{id}, 200 on list,
   and 201 on create (authenticated-only per design choice 3); outsider and
   unknown-organization attempts answer the byte-identical 403, the outsider
   denial audited and the unknown-org denial provably not;
@@ -417,8 +417,8 @@ def test_list_clamps_limit_round_trips_cursor_and_rejects_foreign(env: _Env) -> 
 
 @pytest.fixture
 def matrix(env: _Env) -> _Env:
-    """One organization seeded with owner/admin/member/viewer + an outsider."""
-    roles = ["owner", "admin", "member", "viewer"]
+    """One organization seeded with owner/org_admin/member/viewer + an outsider."""
+    roles = ["owner", "org_admin", "member", "viewer"]
     for role in roles:
         seed_user(
             env.storage,
@@ -447,7 +447,7 @@ def matrix(env: _Env) -> _Env:
     return env
 
 
-@pytest.mark.parametrize("role", ["owner", "admin", "member", "viewer"])
+@pytest.mark.parametrize("role", ["owner", "org_admin", "member", "viewer"])
 def test_get_organization_200_for_every_active_role(matrix: _Env, role: str) -> None:
     headers = matrix.auth(matrix.token(f"{role}-sub", f"{role}@example.test"))
     response = matrix.client.get("/v1/organizations/org_matrix", headers=headers)
@@ -470,7 +470,7 @@ def test_owner_can_rename_organization_and_confirms_name(matrix: _Env) -> None:
     assert body["updated_at"] >= before.updated_at.isoformat().replace("+00:00", "Z")
 
 
-@pytest.mark.parametrize("role", ["owner", "admin", "member", "viewer"])
+@pytest.mark.parametrize("role", ["owner", "org_admin", "member", "viewer"])
 def test_list_200_for_every_role_showing_only_own_orgs(matrix: _Env, role: str) -> None:
     headers = matrix.auth(matrix.token(f"{role}-sub", f"{role}@example.test"))
     response = matrix.client.get("/v1/organizations", headers=headers)
@@ -478,7 +478,7 @@ def test_list_200_for_every_role_showing_only_own_orgs(matrix: _Env, role: str) 
     assert [item["id"] for item in response.json()["items"]] == ["org_matrix"]
 
 
-@pytest.mark.parametrize("role", ["owner", "admin", "member", "viewer"])
+@pytest.mark.parametrize("role", ["owner", "org_admin", "member", "viewer"])
 def test_create_201_for_every_authenticated_role(matrix: _Env, role: str) -> None:
     # Decision 3: creation requires only authentication; the creator becomes
     # owner through the batch regardless of their role elsewhere.
@@ -537,14 +537,14 @@ def test_get_organization_denied_for_disabled_membership(matrix: _Env) -> None:
         matrix.storage,
         organization_id="org_home",
         user_id="usr_suspended",
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         membership_id="mem_home",
     )
     seed_membership(
         matrix.storage,
         organization_id="org_matrix",
         user_id="usr_suspended",
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         membership_id="mem_matrix_susp",
         status=MembershipStatus.DISABLED,
     )

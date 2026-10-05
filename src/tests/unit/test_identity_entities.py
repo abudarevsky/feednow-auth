@@ -96,7 +96,7 @@ VALID_PAYLOADS = {
         "id": "mem_01JXYZ7K",
         "organization_id": "org_01JXYZ7K",
         "user_id": "usr_01JXYZ7K",
-        "role": "admin",
+        "role": "org_admin",
         "status": "active",
         "created_at": CREATED,
     },

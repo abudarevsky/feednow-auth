@@ -204,7 +204,7 @@ def test_region_and_table_prefix_env_vars(env_name: str) -> None:
     # The prefix resolves through every schema table's physical name (seven
     # Phase 06 tables plus the two Phase 11 session tables).
     tables = _template(env_name).find_resources("AWS::DynamoDB::Table")
-    assert len(tables) == 9
+    assert len(tables) == 10
     for resource in tables.values():
         assert resource["Properties"]["TableName"].startswith(prefix)
 

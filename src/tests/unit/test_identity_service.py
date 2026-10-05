@@ -798,7 +798,7 @@ def test_default_branch_picks_earliest_active_organization() -> None:
             organization_id="org_older", role=MembershipRole.VIEWER
         ),
         ("org_newer", "usr_existing"): _membership(
-            organization_id="org_newer", role=MembershipRole.ADMIN
+            organization_id="org_newer", role=MembershipRole.ORG_ADMIN
         ),
     }
 

@@ -6,10 +6,11 @@ domain models only; SQLite and DynamoDB details stay in their adapters.
 
 ## Contract and adapters
 
-The core protocol has 28 operations covering users and external identities,
+The core protocol has 31 operations covering users and external identities,
 organizations and memberships, API keys, audit append, atomic user and
-organization provisioning, application-role transitions, and OAuth state and
-application sessions. Its signatures use domain values and typed results;
+organization provisioning, application-role transitions, OAuth state and
+application sessions, and single-use service authorization codes. Its
+signatures use domain values and typed results;
 adapters do not mint identifiers or timestamps.
 
 `open_sqlite_storage` is used for local persistence. SQLite schema migrations
@@ -18,14 +19,21 @@ provides the AWS adapter. The DynamoDB schema and deployment table definitions
 are maintained together. Both adapters implement the same core contract and
 the shared storage-conformance suite.
 
-The DynamoDB deployment uses nine environment-prefixed tables: `users`,
+SQLite creates the digest-only service-code table idempotently on open; this
+additive table does not change the existing SQLite schema version.
+
+The DynamoDB deployment uses ten environment-prefixed tables: `users`,
 `external_identities`, `organizations`, `memberships`, `api_keys`,
-`audit_events`, `unique_constraints`, `oauth_login_states`, and `app_sessions`.
+`audit_events`, `unique_constraints`, `oauth_login_states`, `app_sessions`,
+and `service_authorization_codes`.
 Secondary indexes support user lookup by email and application role,
 organization membership lookup in both directions, and API-key lookup by
 organization. External identities use a composite partition key; uniqueness
-guards use the `unique_constraints` table. The login-state and session tables
-expire items through DynamoDB TTL. The deployment's least-privilege
+guards use the `unique_constraints` table. Login states, sessions, and service
+authorization codes expire items through DynamoDB TTL. Code consumption is an
+atomic conditional update; the digest, service binding, user and organization
+IDs, permission snapshot, expiry, and `consumed_at` are stored, while the raw
+code is never persisted. The deployment's least-privilege
 table/index matrix is defined in the CDK stack and mirrored by its IAM
 assertions. The runtime role can update user records for profile changes, with
 `UpdateItem` scoped to the environment's users table.
@@ -49,6 +57,9 @@ storage failure interrupts it.
 - API-key revocation uses first-write-wins compare-and-swap semantics.
 - OAuth login state is consumed atomically; only one concurrent caller can
   receive a state record.
+- Service authorization codes are consumed with a conditional update; only
+  one concurrent exchange can mark a live code consumed and receive its
+  permission snapshot.
 - Organization suspension and key revocation are coordinated so an
   organization cannot continue using active keys after suspension.
 - Adapter failures are translated into the storage error vocabulary. Database
@@ -60,7 +71,7 @@ that created them.
 
 The adapters intentionally do not promise arbitrary cross-operation
 transactions. Atomicity is provided only by the named provisioning, role
-transition, state-consumption, and compare-and-swap operations. A DynamoDB
+transition, state-consumption, code-consumption, and compare-and-swap operations. A DynamoDB
 query against the application-role index must treat temporarily missing index
 entries conservatively for the last-administrator guard; the service fails
 closed rather than falling back to a table scan.

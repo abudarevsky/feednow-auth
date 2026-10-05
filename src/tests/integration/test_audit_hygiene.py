@@ -329,7 +329,7 @@ def test_full_battery_audits_stay_in_vocabulary_and_secret_free(env: _HygieneEnv
         env.storage,
         "org_e",
         "usr_admin",
-        MembershipRole.ADMIN,
+        MembershipRole.ORG_ADMIN,
         "mem_e",
         status=MembershipStatus.DISABLED,
     )

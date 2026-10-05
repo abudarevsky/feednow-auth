@@ -301,7 +301,7 @@ def test_concurrent_duplicate_member_grant_writes_exactly_one_membership(
         _seed_user(env.storage, "usr_caller", "race-caller-sub", "race@example.test")
         _seed_user(env.storage, "usr_target", "target-sub", "target@example.test")
         _seed_org(env.storage, "org_team", "team-slug")
-        _seed_membership(env.storage, "org_team", "usr_caller", MembershipRole.ADMIN, "mem_admin")
+        _seed_membership(env.storage, "org_team", "usr_caller", MembershipRole.ORG_ADMIN, "mem_admin")
         assert (
             env.client.get("/v1/organizations/org_team/members", headers=env.headers).status_code
             == 200
@@ -348,7 +348,7 @@ def test_concurrent_removal_of_one_pair_yields_one_204_and_one_404(
         _seed_user(env.storage, "usr_caller", "race-caller-sub", "race@example.test")
         _seed_user(env.storage, "usr_victim", "victim-sub", "victim@example.test")
         _seed_org(env.storage, "org_team", "team-slug")
-        _seed_membership(env.storage, "org_team", "usr_caller", MembershipRole.ADMIN, "mem_admin")
+        _seed_membership(env.storage, "org_team", "usr_caller", MembershipRole.ORG_ADMIN, "mem_admin")
         _seed_membership(env.storage, "org_team", "usr_victim", MembershipRole.MEMBER, "mem_victim")
         assert (
             env.client.get("/v1/organizations/org_team/members", headers=env.headers).status_code

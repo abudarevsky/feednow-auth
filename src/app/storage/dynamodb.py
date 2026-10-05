@@ -22,6 +22,7 @@ from app.models.enums import (
     ApiKeyStatus,
     ApplicationRole,
     IdentityProvider,
+    MembershipRole,
     MembershipStatus,
     UserStatus,
 )
@@ -30,6 +31,7 @@ from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams, clamp_limit
+from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.models.timestamps import UtcDatetime, ensure_utc, utc_now
 from app.models.user import User
@@ -161,6 +163,7 @@ SCHEMA: Final[tuple[TableSpec, ...]] = (
     TableSpec(name="unique_constraints", partition_key="pk"),
     TableSpec(name="oauth_login_states", partition_key="pk"),
     TableSpec(name="app_sessions", partition_key="pk"),
+    TableSpec(name="service_authorization_codes", partition_key="pk"),
 )
 
 #: The :data:`SCHEMA` table names as a set — the adapter's own guard that an
@@ -496,7 +499,7 @@ def membership_from_item(item: Mapping[str, Any]) -> Membership:
             "id": item["id"],
             "organization_id": item["organization_id"],
             "user_id": item["user_id"],
-            "role": item["role"],
+            "role": "org_admin" if item["role"] == "admin" else item["role"],
             "status": item["status"],
             "created_at": decode_timestamp(item["created_at"]),
         }
@@ -651,6 +654,43 @@ def app_session_item(session: AppSession) -> dict[str, Any]:
         "expires_at": encode_timestamp(session.expires_at),
         "expires_at_epoch": ttl_epoch_seconds(session.expires_at),
     }
+
+
+def service_authorization_code_item(code: ServiceAuthorizationCode) -> dict[str, Any]:
+    """Encode the digest-only single-use authorization code item."""
+    item: dict[str, Any] = {
+        "pk": code.code_digest,
+        "service_id": code.service_id,
+        "user_id": str(code.user_id),
+        "organization_id": str(code.organization_id),
+        "permissions": list(code.permissions),
+        "permission_version": code.permission_version,
+        "expires_at": encode_timestamp(code.expires_at),
+        "expires_at_epoch": ttl_epoch_seconds(code.expires_at),
+    }
+    if code.consumed_at is not None:
+        item["consumed_at"] = encode_timestamp(code.consumed_at)
+    return item
+
+
+def service_authorization_code_from_item(
+    item: Mapping[str, Any],
+) -> ServiceAuthorizationCode:
+    """Decode one digest-only authorization code item."""
+    return ServiceAuthorizationCode.model_validate(
+        {
+            "code_digest": item["pk"],
+            "service_id": item["service_id"],
+            "user_id": item["user_id"],
+            "organization_id": item["organization_id"],
+            "permissions": item["permissions"],
+            "permission_version": item["permission_version"],
+            "expires_at": decode_timestamp(item["expires_at"]),
+            "consumed_at": (
+                decode_timestamp(item["consumed_at"]) if "consumed_at" in item else None
+            ),
+        }
+    )
 
 
 def app_session_from_item(item: Mapping[str, Any]) -> AppSession:
@@ -2247,6 +2287,71 @@ class DynamoDbStorage:
         if not execute_conditional_write(submit):
             raise EntityNotFoundError("no membership for that (organization, user) tuple")
 
+    def transfer_organization_owner(
+        self,
+        *,
+        organization_id: OrganizationId,
+        former_owner_id: UserId,
+        new_owner_id: UserId,
+        new_owner_role: MembershipRole,
+        audit_event: AuditEvent,
+    ) -> None:
+        """Atomically change both membership roles and append the audit event."""
+        org_id = str(organization_id)
+        if former_owner_id == new_owner_id or new_owner_role is MembershipRole.OWNER:
+            raise EntityNotFoundError("ownership transfer precondition failed")
+
+        def role_update(
+            user_id: UserId,
+            expected: str,
+            replacement: str,
+            *,
+            active_required: bool,
+            legacy_admin: bool = False,
+        ) -> dict[str, Any]:
+            condition = "#role = :expected"
+            values: dict[str, Any] = {":expected": expected, ":replacement": replacement}
+            if legacy_admin:
+                condition = "(#role = :expected OR #role = :legacy)"
+                values[":legacy"] = "admin"
+            if active_required:
+                condition += " AND #status = :active"
+                values[":active"] = str(MembershipStatus.ACTIVE)
+            names = {"#role": "role"}
+            if active_required:
+                names["#status"] = "status"
+            return {
+                "Update": {
+                    "TableName": self._table_name("memberships"),
+                    "Key": {"organization_id": org_id, "user_id": str(user_id)},
+                    "UpdateExpression": "SET #role = :replacement",
+                    "ConditionExpression": condition,
+                    "ExpressionAttributeNames": names,
+                    "ExpressionAttributeValues": values,
+                }
+            }
+
+        self._transact(
+            [
+                role_update(former_owner_id, "owner", "org_admin", active_required=False),
+                role_update(
+                    new_owner_id,
+                    str(new_owner_role),
+                    "owner",
+                    active_required=True,
+                    legacy_admin=new_owner_role is MembershipRole.ORG_ADMIN,
+                ),
+                self._put("audit_events", audit_event_item(audit_event), ("pk",)),
+                self._check_parent("organizations", {"pk": org_id}),
+            ],
+            [
+                EntityNotFoundConflict(),
+                EntityNotFoundConflict(),
+                DuplicateConflict(DuplicateEntityKind.ENTITY_ID),
+                ReferenceConflict(),
+            ],
+        )
+
     # -- API keys (task 5) -----------------------------------------------------
 
     def create_api_key(self, api_key: ApiKey) -> ApiKey:
@@ -2881,6 +2986,59 @@ class DynamoDbStorage:
         if session.expires_at <= utc_now():
             return None
         return session
+
+    def save_service_authorization_code(self, code: ServiceAuthorizationCode) -> None:
+        """Persist a digest-only code with conditional-create semantics."""
+        table = self._table("service_authorization_codes")
+
+        def submit() -> None:
+            table.put_item(
+                Item=service_authorization_code_item(code),
+                ConditionExpression="attribute_not_exists(#pk)",
+                ExpressionAttributeNames={"#pk": "pk"},
+            )
+
+        if not execute_conditional_write(submit):
+            raise DuplicateEntityError(DuplicateEntityKind.ENTITY_ID)
+
+    def consume_service_authorization_code(
+        self, code_digest: str
+    ) -> ServiceAuthorizationCode | None:
+        """Atomically mark one live code consumed and return its snapshot."""
+        table = self._table("service_authorization_codes")
+        now = utc_now()
+        captured: dict[str, Any] = {}
+
+        def submit() -> None:
+            response = table.update_item(
+                Key={"pk": code_digest},
+                UpdateExpression="SET #consumed = :consumed",
+                ConditionExpression=(
+                    "attribute_exists(#pk) AND attribute_not_exists(#consumed) AND #expires > :now"
+                ),
+                ExpressionAttributeNames={
+                    "#pk": "pk",
+                    "#consumed": "consumed_at",
+                    "#expires": "expires_at",
+                },
+                ExpressionAttributeValues={
+                    ":consumed": encode_timestamp(now),
+                    ":now": encode_timestamp(now),
+                },
+                ReturnValues="ALL_NEW",
+            )
+            captured.clear()
+            captured.update(response)
+
+        if not execute_conditional_write(submit):
+            return None
+        item = captured.get("Attributes")
+        if not isinstance(item, dict):
+            return None
+        code = service_authorization_code_from_item(item)
+        if code.expires_at <= now:
+            return None
+        return code
 
     # -- lifecycle -----------------------------------------------------------
 

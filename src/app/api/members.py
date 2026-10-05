@@ -1,9 +1,9 @@
 """``/v1/organizations/{organization_id}/members`` routers (organization).
 
-:func:`build_members_router` registers the three frozen API contract member entries
+:func:`build_members_router` registers the member and ownership-transfer API entries
 from the manifest contract themselves (the ``me.py`` pattern): list through the
-shared **member** access dependency, add/remove through the **admin** one
-(design choice 3: mutations require rank >= admin). All tenancy/role checks and
+shared **member** access dependency, add/remove/transfer through the **org_admin** one.
+All tenancy/role checks and
 their uniform 403 + denial audit happen inside the dependency — this module
 carries only the decision-6 translation table for service/storage errors:
 
@@ -30,7 +30,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.schemas.manifest import endpoint_for
-from app.api.schemas.members import MemberCreateRequest, MemberResponse
+from app.api.schemas.members import MemberCreateRequest, MemberResponse, OwnerTransferRequest
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.organization_access import (
     OrganizationAccess,
@@ -55,6 +55,7 @@ from app.auth.session import SessionManager
 _LIST_SPEC = endpoint_for("list_members")
 _CREATE_SPEC = endpoint_for("create_member")
 _REMOVE_SPEC = endpoint_for("remove_member")
+_TRANSFER_SPEC = endpoint_for("transfer_organization_ownership")
 
 #: Fixed safe message for a rejected client cursor (decision 6).
 INVALID_CURSOR_MESSAGE = "pagination cursor is invalid"
@@ -93,6 +94,10 @@ def build_members_router(
     )
     remove_access = build_organization_admin_dependency(
         storage, verifier, "remove_member", profile_source=profile_source,
+        session_manager=session_manager,
+    )
+    transfer_access = build_organization_admin_dependency(
+        storage, verifier, "transfer_organization_ownership", profile_source=profile_source,
         session_manager=session_manager,
     )
 
@@ -150,6 +155,23 @@ def build_members_router(
         except (MembershipConflictError, OwnerMembershipImmutableError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def transfer_owner(
+        organization_id: OrganizationId,
+        body: OwnerTransferRequest,
+        access: Annotated[OrganizationAccess, Depends(transfer_access)],
+    ) -> MemberResponse:
+        """Transfer ownership to an active member; the former owner becomes org_admin."""
+        try:
+            membership = member_service.transfer_organization_owner(
+                storage,
+                access.identity.user.id,
+                organization_id,
+                body.new_owner_user_id,
+            )
+        except MemberNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return _to_response(membership)
+
     router.add_api_route(
         _LIST_SPEC.path,
         list_members,
@@ -170,6 +192,13 @@ def build_members_router(
         methods=[_REMOVE_SPEC.method],
         status_code=_REMOVE_SPEC.success_status,
         response_model=_REMOVE_SPEC.response_model,
+    )
+    router.add_api_route(
+        _TRANSFER_SPEC.path,
+        transfer_owner,
+        methods=[_TRANSFER_SPEC.method],
+        status_code=_TRANSFER_SPEC.success_status,
+        response_model=_TRANSFER_SPEC.response_model,
     )
     return router
 

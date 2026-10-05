@@ -55,9 +55,7 @@ LAMBDA_TABLE_PREFIX_ENV: Final = "FEEDNOW_TABLE_PREFIX"
 LAMBDA_ISSUERS_ENV: Final = "FEEDNOW_COGNITO_ISSUERS"
 LAMBDA_CLIENT_IDS_ENV: Final = "FEEDNOW_COGNITO_CLIENT_IDS"
 LAMBDA_PEPPER_CIPHERTEXT_ENV: Final = "FEEDNOW_PEPPER_CIPHERTEXT_B64"
-LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV: Final = (
-    "FEEDNOW_COGNITO_CLIENT_SECRET_CIPHERTEXT_B64"
-)
+LAMBDA_COGNITO_CLIENT_SECRET_CIPHERTEXT_ENV: Final = "FEEDNOW_COGNITO_CLIENT_SECRET_CIPHERTEXT_B64"
 LAMBDA_ENVIRONMENT_ENV: Final = "FEEDNOW_ENV"
 
 #: The HTTP API stage the runtime is mounted on (matches ``handler.API_STAGE``
@@ -161,6 +159,9 @@ _SCHEMA: Final[tuple[_TableSpec, ...]] = (
     # numeric ``expires_at_epoch`` attribute the task-7 adapter writes.
     _TableSpec(name="oauth_login_states", partition_key="pk", ttl_attribute="expires_at_epoch"),
     _TableSpec(name="app_sessions", partition_key="pk", ttl_attribute="expires_at_epoch"),
+    _TableSpec(
+        name="service_authorization_codes", partition_key="pk", ttl_attribute="expires_at_epoch"
+    ),
 )
 
 #: The actions the DynamoDB adapter performs *only* inside
@@ -177,7 +178,9 @@ _TRANSACTIONAL_ACTIONS: Final[frozenset[str]] = frozenset({"PutItem", "Condition
 #: read by ``get_item`` -- never inside ``TransactWriteItems``. Their grants
 #: therefore carry no ``EnclosingOperation`` pin (pinning ``PutItem`` here
 #: would deny the standalone write the adapter actually performs).
-_STANDALONE_WRITE_TABLES: Final[frozenset[str]] = frozenset({"oauth_login_states", "app_sessions"})
+_STANDALONE_WRITE_TABLES: Final[frozenset[str]] = frozenset(
+    {"oauth_login_states", "app_sessions", "service_authorization_codes"}
+)
 
 #: Per-table runtime grant matrix. Global-administrator operations require
 #: Scan and DeleteItem on application tables; these actions are granted only
@@ -207,6 +210,7 @@ _DYNAMODB_GRANTS: Final[Mapping[str, frozenset[str]]] = {
     # Login states need conditional consume; sessions support admin cleanup.
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
     "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
+    "service_authorization_codes": frozenset({"PutItem", "UpdateItem"}),
 }
 
 
@@ -264,9 +268,7 @@ def _runtime_policy_statements(
         PolicyStatement(
             actions=["kms:Decrypt"],
             resources=[pepper_kms_key_arn],
-            conditions={
-                "StringEquals": {"kms:EncryptionContext:environment": environment}
-            },
+            conditions={"StringEquals": {"kms:EncryptionContext:environment": environment}},
         )
     )
     statements.append(
@@ -482,13 +484,16 @@ class FeedNowAuthStack(cdk.Stack):
             f"{origin}/api/oauth/callback",
         )
         if any(
-            (urlsplit(url).scheme != "https" and not (
-                resolved.name == "dev"
-                and existing_user_pool_id is not None
-                and existing_client_id is not None
-                and urlsplit(url).scheme == "http"
-                and urlsplit(url).hostname in {"localhost", "127.0.0.1", "[::1]", "::1"}
-            ))
+            (
+                urlsplit(url).scheme != "https"
+                and not (
+                    resolved.name == "dev"
+                    and existing_user_pool_id is not None
+                    and existing_client_id is not None
+                    and urlsplit(url).scheme == "http"
+                    and urlsplit(url).hostname in {"localhost", "127.0.0.1", "[::1]", "::1"}
+                )
+            )
             or not urlsplit(url).netloc
             for url in callback_urls
         ):
@@ -507,6 +512,9 @@ class FeedNowAuthStack(cdk.Stack):
             if (
                 parsed_service_url.scheme != "https"
                 or not parsed_service_url.netloc
+                or parsed_service_url.path not in {"", "/"}
+                or parsed_service_url.query
+                or parsed_service_url.fragment
                 or parsed_service_url.username is not None
                 or parsed_service_url.password is not None
             ):
@@ -686,6 +694,20 @@ class FeedNowAuthStack(cdk.Stack):
                 "FEEDNOW_SESSION_TTL_SECONDS": "1800",
                 "FEEDNOW_COOKIE_SECURE": "true",
                 **({"FEEDNOW_VISPECTOR_URL": service_url} if service_url else {}),
+                **(
+                    {
+                        "FEEDNOW_VISPECTOR_CALLBACK_PATH": os.getenv(
+                            "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/feednow/callback"
+                        ),
+                        "FEEDNOW_VISPECTOR_ENABLED": os.getenv("FEEDNOW_VISPECTOR_ENABLED", "true"),
+                        "FEEDNOW_VISPECTOR_PERMISSIONS": os.getenv(
+                            "FEEDNOW_VISPECTOR_PERMISSIONS",
+                            "projects:read,projects:write,inspect",
+                        ),
+                    }
+                    if service_url
+                    else {}
+                ),
             },
         )
 

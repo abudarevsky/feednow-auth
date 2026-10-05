@@ -368,7 +368,7 @@ def test_local_admin_counts_search_and_organization_rename(storage: SQLiteStorag
     assert stored.created_at == _T0
 
 
-def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStorage) -> None:
+def test_schema_creates_nine_tables_and_four_unique_indexes(storage: SQLiteStorage) -> None:
     conn = storage._connection()
     objects = conn.execute("SELECT type, name FROM sqlite_master").fetchall()
     names = {(row["type"], row["name"]) for row in objects}
@@ -381,6 +381,7 @@ def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStor
         "audit_events",
         "oauth_login_states",
         "app_sessions",
+        "service_authorization_codes",
     ):
         assert ("table", table) in names, table
     for index in sqlite_adapter.UNIQUE_INDEX_NAMES:
@@ -395,7 +396,7 @@ def test_schema_creates_eight_tables_and_four_unique_indexes(storage: SQLiteStor
     assert ("index", "users_email_lookup") in names
     assert ("index", "users_email_unique") not in names
     assert ("index", "users_application_role_lookup") in names
-    assert len(sqlite_adapter.TABLE_NAMES) == 8
+    assert len(sqlite_adapter.TABLE_NAMES) == 9
 
 
 def test_phase_11_session_tables_are_added_to_a_pre_phase_11_database(
@@ -420,7 +421,7 @@ def test_phase_11_session_tables_are_added_to_a_pre_phase_11_database(
             .execute("SELECT type, name FROM sqlite_master WHERE type = 'table'")
             .fetchall()
         }
-        assert {"oauth_login_states", "app_sessions"} <= tables
+        assert {"oauth_login_states", "app_sessions", "service_authorization_codes"} <= tables
         version = storage._connection().execute("PRAGMA user_version").fetchone()[0]
         assert version == SCHEMA_VERSION
     finally:
@@ -1055,7 +1056,7 @@ def test_contract_surface_has_no_remaining_stubs() -> None:
     # implemented"): every Storage protocol member is implemented on the
     # adapter — no method may still be a stub.
     members = get_protocol_members(contract.Storage)
-    assert len(members) == 28, members
+    assert len(members) == 31, members
     for name in sorted(members):
         method = getattr(SQLiteStorage, name)
         assert "raise NotImplementedError" not in inspect.getsource(method), name

@@ -1,20 +1,20 @@
 """Integration tests for the member endpoints (organization).
 
 Same identity-proven stack as the organization tests (design choice 9): loopback
-JWKS-signed tokens, real SQLite, seeded owner/admin/member/viewer matrix in
+JWKS-signed tokens, real SQLite, seeded owner/org_admin/member/viewer matrix in
 one organization plus an outsider with their own anchor organization. Audit
 and mutation-count assertions read the SQLite file directly.
 
-Acceptance mapping (AC 2/3/4/5 for the three member routes):
+Acceptance mapping (AC 2/3/4/5 for the member and ownership-transfer routes):
 
 - list: any member role 200 (all statuses visible, org-scoped), outsider
   403 + ``authorization.denied``;
-- add: owner & admin 201 with ``membership.created`` audit; member & viewer
+- add: owner & org_admin 201 with ``membership.created`` audit; member & viewer
   403 + ``insufficient_role`` audit; ``role=owner`` → 400; existing pair
   (active **and** disabled) → 409; unknown target ``usr_`` → 404;
-- remove: admin removing member/viewer (and self) → 204 + ``membership.removed``
+- remove: org_admin removing member/viewer (and self) → 204 + ``membership.removed``
   carrying the role at removal; removing the **owner** → 409 whether by
-  admin or the owner self; non-member → 404; member/viewer callers → 403 +
+  org_admin or the owner self; non-member → 404; member/viewer callers → 403 +
   audit;
 - cross-tenant outsider attempts on all three routes answer the identical
   403 body with zero mutation;
@@ -209,7 +209,7 @@ def env(tmp_path: Path, key: TestKey) -> Iterator[_Env]:
 
 @pytest.fixture
 def matrix(env: _Env) -> _Env:
-    """org_team seeded with owner/admin/member/viewer + a suspended member."""
+    """org_team seeded with owner/org_admin/member/viewer + a suspended member."""
     seed_user(env.storage, user_id="usr_owner", sub="owner-sub", email="owner@example.test")
     seed_user(env.storage, user_id="usr_admin", sub="admin-sub", email="admin@example.test")
     seed_user(env.storage, user_id="usr_member", sub="member-sub", email="member@example.test")
@@ -227,7 +227,7 @@ def matrix(env: _Env) -> _Env:
         env.storage,
         organization_id="org_team",
         user_id="usr_admin",
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         membership_id="mem_admin",
     )
     seed_membership(
@@ -272,7 +272,7 @@ def matrix(env: _Env) -> _Env:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("role", ["owner", "admin", "member", "viewer"])
+@pytest.mark.parametrize("role", ["owner", "org_admin", "member", "viewer"])
 def test_list_members_200_for_any_active_role_showing_all_statuses(matrix: _Env, role: str) -> None:
     response = matrix.client.get(
         "/v1/organizations/org_team/members", headers=matrix.headers_for(role)
@@ -310,7 +310,7 @@ def test_list_members_outsider_403_with_denial_audit(matrix: _Env) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("caller", ["owner", "admin"])
+@pytest.mark.parametrize("caller", ["owner", "org_admin"])
 def test_add_member_201_with_created_audit(matrix: _Env, caller: str) -> None:
     response = matrix.client.post(
         "/v1/organizations/org_team/members",
@@ -362,13 +362,13 @@ def test_add_member_by_low_rank_caller_is_403_with_audit_and_zero_write(
 def test_add_member_owner_role_is_400_with_zero_write(matrix: _Env) -> None:
     response = matrix.client.post(
         "/v1/organizations/org_team/members",
-        headers=matrix.headers_for("admin"),
+        headers=matrix.headers_for("org_admin"),
         json={"user_id": "usr_new", "role": "owner"},
     )
     assert response.status_code == 400
     envelope = Error.model_validate(response.json())
     assert envelope.code == "validation_error"
-    assert envelope.message == "the owner role cannot be granted through the membership API"
+    assert envelope.message == "the owner role is assigned only through organization creation or ownership transfer"
     assert [row for row in rows(matrix.db_path, "memberships") if row["user_id"] == "usr_new"] == []
 
 
@@ -381,7 +381,7 @@ def test_add_member_existing_pair_is_409(matrix: _Env, target: str, membership_i
     before = len(rows(matrix.db_path, "memberships"))
     response = matrix.client.post(
         "/v1/organizations/org_team/members",
-        headers=matrix.headers_for("admin"),
+        headers=matrix.headers_for("org_admin"),
         json={"user_id": target, "role": "viewer"},
     )
     assert response.status_code == 409
@@ -397,7 +397,7 @@ def test_add_member_existing_pair_is_409(matrix: _Env, target: str, membership_i
 def test_add_member_unknown_target_is_404_with_zero_write(matrix: _Env) -> None:
     response = matrix.client.post(
         "/v1/organizations/org_team/members",
-        headers=matrix.headers_for("admin"),
+        headers=matrix.headers_for("org_admin"),
         json={"user_id": "usr_ghost", "role": "member"},
     )
     assert response.status_code == 404
@@ -420,9 +420,9 @@ def test_add_member_unknown_target_is_404_with_zero_write(matrix: _Env) -> None:
 @pytest.mark.parametrize(
     ("caller", "target", "role_at_removal"),
     [
-        ("admin", "usr_member", "member"),
-        ("admin", "usr_viewer", "viewer"),
-        ("admin", "usr_admin", "admin"),  # self-removal allowed (decision 3)
+        ("org_admin", "usr_member", "member"),
+        ("org_admin", "usr_viewer", "viewer"),
+        ("org_admin", "usr_admin", "org_admin"),  # self-removal allowed (decision 3)
         ("owner", "usr_viewer", "viewer"),
     ],
 )
@@ -444,7 +444,7 @@ def test_remove_member_204_empty_body_with_removed_audit(
     assert audits[0]["target_id"] == f"mem_{target.removeprefix('usr_')}"
 
 
-@pytest.mark.parametrize("caller", ["admin", "owner"], ids=["by admin", "by owner self"])
+@pytest.mark.parametrize("caller", ["org_admin", "owner"], ids=["by admin", "by owner self"])
 def test_remove_owner_is_409_and_immutable(matrix: _Env, caller: str) -> None:
     response = matrix.client.delete(
         "/v1/organizations/org_team/members/usr_owner", headers=matrix.headers_for(caller)
@@ -461,7 +461,7 @@ def test_remove_owner_is_409_and_immutable(matrix: _Env, caller: str) -> None:
 
 def test_remove_non_member_is_404(matrix: _Env) -> None:
     response = matrix.client.delete(
-        "/v1/organizations/org_team/members/usr_outsider", headers=matrix.headers_for("admin")
+        "/v1/organizations/org_team/members/usr_outsider", headers=matrix.headers_for("org_admin")
     )
     assert response.status_code == 404
     envelope = Error.model_validate(response.json())
@@ -487,11 +487,11 @@ def test_remove_by_low_rank_caller_is_403_with_audit_and_row_intact(
 
 
 # ---------------------------------------------------------------------------
-# Cross-tenant: outsider on all three member routes
+# Cross-tenant: outsider on all member routes
 # ---------------------------------------------------------------------------
 
 
-def test_outsider_denied_on_all_three_member_routes_with_zero_mutation(matrix: _Env) -> None:
+def test_outsider_denied_on_all_member_routes_with_zero_mutation(matrix: _Env) -> None:
     headers = matrix.headers_for("outsider")
     memberships_before = rows(matrix.db_path, "memberships")
 
@@ -500,13 +500,18 @@ def test_outsider_denied_on_all_three_member_routes_with_zero_mutation(matrix: _
         matrix.client.post(
             "/v1/organizations/org_team/members",
             headers=headers,
-            json={"user_id": "usr_new", "role": "admin"},
+            json={"user_id": "usr_new", "role": "org_admin"},
         ),
         matrix.client.delete("/v1/organizations/org_team/members/usr_member", headers=headers),
+        matrix.client.post(
+            "/v1/organizations/org_team/owner",
+            headers=headers,
+            json={"new_owner_user_id": "usr_member"},
+        ),
     ]
-    assert [response.status_code for response in responses] == [403, 403, 403]
+    assert [response.status_code for response in responses] == [403, 403, 403, 403]
     # Byte-identical body on every route (no oracle across operations).
-    assert responses[0].content == responses[1].content == responses[2].content
+    assert len({response.content for response in responses}) == 1
     # Zero mutation: membership table untouched.
     assert rows(matrix.db_path, "memberships") == memberships_before
     audits = denial_rows(matrix.db_path)
@@ -514,6 +519,7 @@ def test_outsider_denied_on_all_three_member_routes_with_zero_mutation(matrix: _
         "list_members",
         "create_member",
         "remove_member",
+        "transfer_organization_ownership",
     ]
     assert all(json.loads(row["metadata"])["reason"] == "no_membership" for row in audits)
     assert all(row["actor_id"] == "usr_outsider" for row in audits)
@@ -529,6 +535,8 @@ def test_router_registers_manifest_entries_exactly(matrix: _Env) -> None:
     assert {p for p in paths if p.startswith("/v1")} == {
         "/v1/organizations/{organization_id}/members",
         "/v1/organizations/{organization_id}/members/{user_id}",
+        "/v1/organizations/{organization_id}/owner",
     }
     assert set(paths["/v1/organizations/{organization_id}/members"]) == {"get", "post"}
     assert set(paths["/v1/organizations/{organization_id}/members/{user_id}"]) == {"delete"}
+    assert set(paths["/v1/organizations/{organization_id}/owner"]) == {"post"}

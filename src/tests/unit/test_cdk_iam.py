@@ -89,6 +89,7 @@ TABLE_MATRIX: Mapping[str, frozenset[str]] = {
     # available to the application administrator operation.
     "oauth_login_states": frozenset({"PutItem", "DeleteItem"}),
     "app_sessions": frozenset({"GetItem", "PutItem", "DeleteItem", "Scan"}),
+    "service_authorization_codes": frozenset({"PutItem", "UpdateItem"}),
 }
 
 #: Phase 11: the session tables are written by *standalone* conditional
@@ -97,7 +98,9 @@ TABLE_MATRIX: Mapping[str, frozenset[str]] = {
 #: tables' is. This is the single deviation from the "transactional actions
 #: are always pinned" rule, and it mirrors the stack's
 #: ``_STANDALONE_WRITE_TABLES``.
-STANDALONE_WRITE_TABLES = frozenset({"oauth_login_states", "app_sessions"})
+STANDALONE_WRITE_TABLES = frozenset(
+    {"oauth_login_states", "app_sessions", "service_authorization_codes"}
+)
 
 #: GSI ARNs get ``Query`` only (the base-table ``Query`` half of a GSI query
 #: is already inside the table row above).
@@ -217,14 +220,14 @@ def _role_logical_id(env_name: str) -> str:
 
 
 def _table_logical_ids(env_name: str) -> Mapping[str, str]:
-    """logical id -> unsuffixed table name, for the nine schema tables."""
+    """logical id -> unsuffixed table name, for the ten schema tables."""
     prefix = f"feednow-auth-{env_name}-"
     mapping = {}
     for logical_id, resource in _template(env_name).find_resources("AWS::DynamoDB::Table").items():
         name = resource["Properties"]["TableName"]
         assert name.startswith(prefix)
         mapping[logical_id] = name.removeprefix(prefix)
-    assert len(mapping) == 9
+    assert len(mapping) == 10
     return mapping
 
 

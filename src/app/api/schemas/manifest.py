@@ -65,7 +65,7 @@ from app.api.schemas.admin import (
 )
 from app.api.schemas.api_keys import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeySummary
 from app.api.schemas.me import MeResponse, ProfileUpdateRequest
-from app.api.schemas.members import MemberCreateRequest, MemberResponse
+from app.api.schemas.members import MemberCreateRequest, MemberResponse, OwnerTransferRequest
 from app.api.schemas.organizations import (
     OrganizationCreateRequest,
     OrganizationRenameRequest,
@@ -73,7 +73,13 @@ from app.api.schemas.organizations import (
     OrganizationSlugAvailabilityQuery,
     OrganizationSlugAvailabilityResponse,
 )
-from app.api.schemas.service_auth import ApiKeyValidationRequest, ApiKeyValidationResponse
+from app.api.schemas.service_auth import (
+    ApiKeyValidationRequest,
+    ApiKeyValidationResponse,
+    ServiceAuthorizationContextResponse,
+    ServiceCodeExchangeRequest,
+    ServiceHandoffRequest,
+)
 from app.models.ids import ApiKeyId, OrganizationId, UserId
 from app.models.pagination import Page, PageParams
 
@@ -243,6 +249,15 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         path_params=_MEMBER_PATH_PARAMS,
     ),
     EndpointSpec(
+        operation_id="transfer_organization_ownership",
+        method="POST",
+        path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/owner",
+        success_status=200,
+        request_model=OwnerTransferRequest,
+        response_model=MemberResponse,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
         operation_id="list_api_keys",
         method="GET",
         path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/api-keys",
@@ -275,6 +290,21 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         success_status=200,
         request_model=ApiKeyValidationRequest,
         response_model=ApiKeyValidationResponse,
+    ),
+    EndpointSpec(
+        operation_id="handoff_to_registered_service",
+        method="POST",
+        path=f"{API_V1_PREFIX}/oauth/service-handoff",
+        success_status=303,
+        request_model=ServiceHandoffRequest,
+    ),
+    EndpointSpec(
+        operation_id="exchange_service_authorization_code",
+        method="POST",
+        path=f"{API_V1_PREFIX}/service-auth/authorization-codes/exchange",
+        success_status=200,
+        request_model=ServiceCodeExchangeRequest,
+        response_model=ServiceAuthorizationContextResponse,
     ),
     EndpointSpec(
         operation_id="get_admin_summary",

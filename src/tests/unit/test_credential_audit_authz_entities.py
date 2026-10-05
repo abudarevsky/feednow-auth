@@ -102,7 +102,7 @@ VALID_PAYLOADS = {
         "actor_type": "user",
         "actor_id": "usr_01JXYZ7K",
         "organization_id": "org_01JXYZ7K",
-        "roles": ["admin"],
+        "roles": ["org_admin"],
         "scopes": [],
     },
 }
@@ -114,7 +114,7 @@ SPEC_10_HUMAN = {
     "actor_type": "user",
     "actor_id": "usr_01JXYZ7K",
     "organization_id": "org_01JXYZ7K",
-    "roles": ["admin"],
+    "roles": ["org_admin"],
     "scopes": [],
 }
 SPEC_10_API_CLIENT = {
@@ -383,7 +383,7 @@ def test_mismatched_actor_type_and_id_rejected(model, actor_type, actor_id):
 def test_spec_10_examples_validate():
     human = AuthorizationContext.model_validate(SPEC_10_HUMAN)
     client = AuthorizationContext.model_validate(SPEC_10_API_CLIENT)
-    assert isinstance(human.actor_id, UserId) and human.roles == ["admin"] and human.scopes == []
+    assert isinstance(human.actor_id, UserId) and human.roles == ["org_admin"] and human.scopes == []
     assert isinstance(client.actor_id, ApiKeyId)
     assert client.roles == [] and client.scopes == ["vispector:inspection:run"]
 

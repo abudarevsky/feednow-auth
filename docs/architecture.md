@@ -52,19 +52,23 @@ Every mounted route matches the manifest in
 | organization + member routes (7) | `build_organizations_router`, `build_members_router` | Tenancy seam on top of identity |
 | api-keys routes (3) | `build_api_keys_router` | Machine-credential seam; `fn_live_`/`fn_test_` dispatch |
 | `POST /v1/service-auth/api-keys/validate` | `build_service_auth_router` | Server-credential protected; returns API-key actor and mapped permission context |
+| `POST /v1/oauth/service-handoff` | `build_service_auth_router` | Session + CSRF protected; redirects only to the registered service callback with a short-lived code |
+| `POST /v1/service-auth/authorization-codes/exchange` | `build_service_auth_router` | Server-credential protected; atomically consumes a code and rechecks current user, organization, and membership access |
 | local admin routes (7) | `build_admin_router` | Application-admin-gated operations through `LocalAdminStorage` |
 | session router | `build_oauth_router` (`src/app/api/oauth.py`) | Mounted **outside** the `/v1` manifest |
 
-`/health`, OAuth, CSRF, and the local Vispector proof route are outside the
-versioned manifest. The service-auth route is mounted in local Docker and
-AWS when its encrypted credential is configured. The local admin router uses manifest entries but is
+`/health`, Cognito OAuth, CSRF, and the local Vispector proof route are outside
+the versioned manifest. The service-auth routes are always mounted; API-key
+validation requires its configured service credential, and handoff/exchange
+return an unavailable response until the service credential and registration
+are configured. The local admin router uses manifest entries but is
 mounted only by the local Docker composition. See
 `authentication.md`, `authorization.md`, `credentials.md`, `sessions.md`, and
 `local-account.md` for surface details.
 
 ## Authorization chain
 
-`ROLE_RANK` (fixed precedence `viewer < member < admin < owner`, pure, no
+`ROLE_RANK` (fixed precedence `viewer < member < org_admin < owner`, pure, no
 FastAPI) classifies every request (full policy in `authorization.md`):
 
 | Step | Module | Result |

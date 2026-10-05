@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from oauth_callback import build_oauth_cli_callback_router
@@ -28,6 +29,7 @@ from app.auth.pepper import StaticPepper
 from app.auth.session import SessionManager
 from app.auth.token_exchange import CognitoTokenEndpoint
 from app.main import create_app
+from app.models.service_authorization import ServiceRegistration
 from app.storage.factory import create_storage, storage_settings_from_env
 
 
@@ -105,6 +107,35 @@ def build_app() -> FastAPI:
         if profile_source is None:
             missing.append("FEEDNOW_COGNITO_USERINFO_URL (or FEEDNOW_COGNITO_DOMAIN)")
         raise RuntimeError("Missing local Cognito configuration: " + ", ".join(missing))
+    service_url = os.getenv("FEEDNOW_VISPECTOR_URL", "").strip()
+    service_registration = None
+    if service_url:
+        parsed_service_url = urlsplit(service_url)
+        if (
+            parsed_service_url.scheme not in {"http", "https"}
+            or not parsed_service_url.netloc
+            or parsed_service_url.path not in {"", "/"}
+            or parsed_service_url.query
+            or parsed_service_url.fragment
+            or parsed_service_url.username is not None
+            or parsed_service_url.password is not None
+        ):
+            raise RuntimeError("FEEDNOW_VISPECTOR_URL must be an absolute origin URL")
+        enabled_raw = os.getenv("FEEDNOW_VISPECTOR_ENABLED", "true").strip().lower()
+        if enabled_raw not in {"true", "false"}:
+            raise RuntimeError("FEEDNOW_VISPECTOR_ENABLED must be true or false")
+        service_registration = ServiceRegistration(
+            service_id="vispector",
+            display_name="Vispector",
+            allowed_origins=(f"{parsed_service_url.scheme}://{parsed_service_url.netloc}",),
+            callback_path=os.getenv(
+                "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/feednow/callback"
+            ).strip(),
+            enabled=enabled_raw == "true",
+            allowed_permissions=_values("FEEDNOW_VISPECTOR_PERMISSIONS")
+            or ("projects:read", "projects:write", "inspect"),
+            credential_reference="local://feednow-vispector-service-secret",
+        )
     session_router = APIRouter(tags=["local-session"])
 
     # Browser paths have one /api prefix stripped by the Vite proxy, matching
@@ -145,6 +176,10 @@ def build_app() -> FastAPI:
             storage,
             pepper,
             service_credential=os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", ""),
+            service_registration=(
+                service_registration if os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", "") else None
+            ),
+            session_manager=session_manager,
         ),
         build_oauth_router(
             storage,

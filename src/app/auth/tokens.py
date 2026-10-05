@@ -31,7 +31,7 @@ Contract:
   the request's organization context (deduplicated, deterministic
   declaration order). The two claims never share a value source, and an
   :class:`~app.models.enums.ApplicationRole` can never be smuggled into the
-  membership list despite the coincident ``"admin"`` string.
+  membership list across the role vocabularies.
 - The issuer accepts a ``User`` only — an API key can never be a JWT subject,
   so key principals stay roleless (contract 12 invariant 7) by construction.
 - Registered claims: ``iss``/``aud`` (constructor config), ``iat``/``exp``
@@ -140,7 +140,7 @@ ROLES_CLAIM_MISSING_MESSAGE: Final = "token is missing the roles claim"
 ROLES_CLAIM_INVALID_MESSAGE: Final = "token roles claim is invalid"
 
 #: Deterministic claim order for membership roles: enum declaration order
-#: (``owner``, ``admin``, ``member``, ``viewer``), never caller order.
+#: (``owner``, ``org_admin``, ``member``, ``viewer``), never caller order.
 _ROLE_ORDER: Final = {role: index for index, role in enumerate(MembershipRole)}
 
 
@@ -179,9 +179,8 @@ def _coerce_membership_roles(membership_roles: Iterable[MembershipRole]) -> list
         if isinstance(role, MembershipRole):
             collected.add(role)
         elif isinstance(role, ApplicationRole):
-            # Explicit pre-check: ApplicationRole is a StrEnum whose values
-            # overlap this vocabulary ("admin"); it must never coerce across
-            # the boundary (spec 12 invariant 1).
+            # Explicit pre-check: reject the application role enum rather than
+            # coercing across the role boundary.
             raise ValueError(MEMBERSHIP_ROLES_MESSAGE)
         elif isinstance(role, str) and role in known:
             collected.add(known[role])
@@ -591,8 +590,7 @@ class JwtTokenVerifier:
         The claim must be present and a JSON list of exact membership-role
         strings (duplicates are preserved as issued; the issuer
         canonicalizes). An application-only value such as ``"user"`` inside
-        this list is a rejection — the vocabularies never cross despite the
-        coincident ``"admin"`` string (contract 12 invariant 1).
+        this list is a rejection — the vocabularies never cross (contract 12 invariant 1).
         """
         if ROLES_CLAIM not in payload or payload[ROLES_CLAIM] is None:
             raise TokenValidationError(ROLES_CLAIM_MISSING_MESSAGE)
@@ -600,6 +598,8 @@ class JwtTokenVerifier:
         if not isinstance(raw, list):
             raise TokenValidationError(ROLES_CLAIM_INVALID_MESSAGE)
         known = {role.value: role for role in MembershipRole}
+        # Older local tokens used the organization role spelling ``admin``.
+        known["admin"] = MembershipRole.ORG_ADMIN
         collected: list[MembershipRole] = []
         for item in raw:
             if not isinstance(item, str) or item not in known:

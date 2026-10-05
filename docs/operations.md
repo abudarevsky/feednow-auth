@@ -62,8 +62,20 @@ does not take the API's host port 8000.
 After stopping the stack, erase its local DynamoDB data with
 `docker volume rm feednow-auth_dynamodb-data`.
 
-To exercise service API-key validation in this composition, set a random
+To enable the local Vispector registration and handoff, set
+`FEEDNOW_VISPECTOR_URL` to the frontend's origin,
+`FEEDNOW_VISPECTOR_CALLBACK_PATH` to its fixed callback path, and a random
 `FEEDNOW_VISPECTOR_SERVICE_SECRET` in `deploy/docker/.env` before starting it.
+The local service secret is for Docker development only. Production receives
+only the KMS ciphertext input described below. Role grants are intersected
+with `FEEDNOW_VISPECTOR_PERMISSIONS`; the local default is
+`projects:read,projects:write,inspect`.
+
+To exercise service API-key validation in this composition, create a Vispector
+key for an active organization through the authenticated API-key endpoint with
+exactly the `vispector:inspection:run` scope, then call the local service
+endpoint with both the service credential and key. The current account UI
+creates empty-scope keys, which this endpoint correctly rejects:
 Create a Vispector key for an active organization through the authenticated
 API-key endpoint with exactly the `vispector:inspection:run` scope, then call
 the local service endpoint with both the service credential and key. The
@@ -83,21 +95,25 @@ curl -sS http://localhost:8000/v1/service-auth/api-keys/validate \
 
 The response should contain the user and organization IDs, `service`, mapped
 `permissions`, and `expires_at`, without returning the API-key literal. Run the
-focused route checks and the DynamoDB Local storage-contract suite with:
+focused route and storage checks with:
 
 ```bash
 uv run pytest src/tests/unit/test_service_auth.py -q
+uv run pytest src/tests/unit/test_service_authorization_handoff.py -q
 FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
   PYTHONPATH=.:deploy/aws/runtime:src uv run pytest \
   src/tests/integration/test_service_auth_dynamodb_local.py -q
 ```
 
-For AWS, provide only
+For AWS, configure the registered origin with `FEEDNOW_VISPECTOR_URL`, and
+optionally set the callback path, enabled flag, and permission allowlist using
+the matching `FEEDNOW_VISPECTOR_*` settings. Supply only
 `FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64` in the CDK environment
-file. Encrypt the credential with the stack's pepper KMS key and encryption
-context `environment=<dev|staging|prod>`; Lambda decrypts it in memory, and the
-runtime role's existing scoped KMS decrypt grant applies. Never put the
-plaintext credential in the CDK file or source control.
+file. Encrypt the credential with the stack's environment-scoped KMS key and
+encryption context `environment=<dev|staging|prod>`; Lambda decrypts it in
+memory. Rotate it by replacing the encrypted value and deploying the updated
+stack. Never put the plaintext credential in Lambda environment configuration,
+the CDK file, or source control.
 
 ## DynamoDB Local
 

@@ -2,7 +2,7 @@
 
 Application-wide administrator privileges are separate from organization
 membership roles. `ApplicationRole` is the closed `user` / `admin` vocabulary;
-organization roles are `viewer`, `member`, `admin`, and `owner`.
+organization roles are `viewer`, `member`, `org_admin`, and `owner`.
 
 ## Operator bootstrap
 

@@ -65,7 +65,7 @@ class MembershipRole(StrEnum):
     """Roles a user may hold inside one organization (domain model contract)."""
 
     OWNER = "owner"
-    ADMIN = "admin"
+    ORG_ADMIN = "org_admin"
     MEMBER = "member"
     VIEWER = "viewer"
 
@@ -76,9 +76,9 @@ class ApplicationRole(StrEnum):
     Completely separate from :class:`MembershipRole`: membership roles are
     **organization-local** grants resolved per organization, while an
     application role is a single global attribute of the user record. The
-    two enums share no code path and neither substitutes for the other —
-    ``ADMIN`` appearing in both vocabularies is a naming coincidence, not a
-    relationship (contract 12 invariant 1). ``USER`` is the only value any
+    two enums share no code path and neither substitutes for the other:
+    ``ApplicationRole.ADMIN`` is FeedNow-wide, while ``MembershipRole.ORG_ADMIN``
+    is scoped to one organization. ``USER`` is the only value any
     writer obtains without naming it; ``ADMIN`` is granted out of band
     (admin bootstrap), never by login, and API-key principal contexts
     stay roleless (contract 12 invariant 7).

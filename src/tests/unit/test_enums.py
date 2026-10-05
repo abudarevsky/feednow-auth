@@ -31,7 +31,7 @@ PINNED_ENUM_VALUES: dict[type[StrEnum], set[str]] = {
     OrganizationStatus: {"active", "disabled"},
     MembershipStatus: {"active", "disabled"},
     ApiKeyStatus: {"active", "revoked"},
-    MembershipRole: {"owner", "admin", "member", "viewer"},
+    MembershipRole: {"owner", "org_admin", "member", "viewer"},
     ApplicationRole: {"user", "admin"},
     OrganizationType: {"personal", "customer", "internal"},
     ApiKeyEnvironment: {"live", "test"},

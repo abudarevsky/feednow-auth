@@ -114,6 +114,7 @@ from app.models.enums import (
     ApiKeyStatus,
     ApplicationRole,
     IdentityProvider,
+    MembershipRole,
     MembershipStatus,
     UserStatus,
 )
@@ -122,6 +123,7 @@ from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization
 from app.models.pagination import Page, PageParams, clamp_limit
+from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.models.timestamps import UtcDatetime, ensure_utc, utc_now
 from app.models.user import User
@@ -316,6 +318,18 @@ _SESSION_SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         expires_at TEXT NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS service_authorization_codes (
+        code_digest        TEXT PRIMARY KEY,
+        service_id         TEXT NOT NULL,
+        user_id            TEXT NOT NULL,
+        organization_id    TEXT NOT NULL,
+        permissions_json   TEXT NOT NULL,
+        permission_version TEXT NOT NULL,
+        expires_at         TEXT NOT NULL,
+        consumed_at        TEXT
+    )
+    """,
 )
 
 #: Tables the schema owns (documentation and conformance-facing inventory).
@@ -328,6 +342,7 @@ TABLE_NAMES: Final[tuple[str, ...]] = (
     "audit_events",
     "oauth_login_states",
     "app_sessions",
+    "service_authorization_codes",
 )
 
 #: Unique index inventory (four: three domain-uniqueness constraints plus the
@@ -518,7 +533,7 @@ def membership_from_row(row: sqlite3.Row) -> Membership:
             "id": row["id"],
             "organization_id": row["organization_id"],
             "user_id": row["user_id"],
-            "role": row["role"],
+            "role": "org_admin" if row["role"] == "admin" else row["role"],
             "status": row["status"],
             "created_at": decode_timestamp(row["created_at"]),
         }
@@ -583,6 +598,24 @@ def oauth_login_state_from_row(row: sqlite3.Row) -> OAuthLoginState:
     )
 
 
+def service_authorization_code_from_row(row: sqlite3.Row) -> ServiceAuthorizationCode:
+    """Rebuild a service authorization code from its digest-only row."""
+    return ServiceAuthorizationCode.model_validate(
+        {
+            "code_digest": row["code_digest"],
+            "service_id": row["service_id"],
+            "user_id": row["user_id"],
+            "organization_id": row["organization_id"],
+            "permissions": json.loads(row["permissions_json"]),
+            "permission_version": row["permission_version"],
+            "expires_at": decode_timestamp(row["expires_at"]),
+            "consumed_at": (
+                decode_timestamp(row["consumed_at"]) if row["consumed_at"] is not None else None
+            ),
+        }
+    )
+
+
 def app_session_from_row(row: sqlite3.Row) -> AppSession:
     """Rebuild an :class:`AppSession` from an ``app_sessions`` row."""
     return AppSession.model_validate(
@@ -617,6 +650,7 @@ _UNIQUE_KIND_BY_COLUMNS: Final[dict[tuple[str, tuple[str, ...]], DuplicateEntity
     ("api_keys", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("api_keys", ("key_id",)): DuplicateEntityKind.API_KEY_ID,
     ("app_sessions", ("session_id",)): DuplicateEntityKind.ENTITY_ID,
+    ("service_authorization_codes", ("code_digest",)): DuplicateEntityKind.ENTITY_ID,
     ("audit_events", ("id",)): DuplicateEntityKind.ENTITY_ID,
     ("external_identities", ("id",)): DuplicateEntityKind.ENTITY_ID,
     (
@@ -1364,6 +1398,9 @@ class SQLiteStorage:
                 (stored_at, str(organization_id)),
             )
             conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
         except Exception:
             conn.rollback()
             raise
@@ -1560,6 +1597,57 @@ class SQLiteStorage:
             conn.rollback()
             raise EntityNotFoundError("no membership for that (organization, user) tuple")
         conn.commit()
+
+    def transfer_organization_owner(
+        self,
+        *,
+        organization_id: OrganizationId,
+        former_owner_id: UserId,
+        new_owner_id: UserId,
+        new_owner_role: MembershipRole,
+        audit_event: AuditEvent,
+    ) -> None:
+        conn = self._connection()
+        org_id, former_id, new_id = map(str, (organization_id, former_owner_id, new_owner_id))
+        if former_id == new_id or new_owner_role is MembershipRole.OWNER:
+            raise EntityNotFoundError("ownership transfer precondition failed")
+        target_roles = (
+            (str(new_owner_role), "admin")
+            if new_owner_role is MembershipRole.ORG_ADMIN
+            else (str(new_owner_role),)
+        )
+        target_role_sql = "role IN (?, ?)" if len(target_roles) == 2 else "role = ?"
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            owner = conn.execute(
+                "SELECT 1 FROM memberships WHERE organization_id = ? AND user_id = ? AND role = 'owner'",
+                (org_id, former_id),
+            ).fetchone()
+            target = conn.execute(
+                "SELECT 1 FROM memberships WHERE organization_id = ? AND user_id = ? "
+                f"AND status = 'active' AND {target_role_sql}",
+                (org_id, new_id, *target_roles),
+            ).fetchone()
+            if owner is None or target is None:
+                raise EntityNotFoundError("ownership transfer precondition failed")
+            conn.execute(
+                "UPDATE memberships SET role = 'org_admin' WHERE organization_id = ? "
+                "AND user_id = ? AND role = 'owner'",
+                (org_id, former_id),
+            )
+            conn.execute(
+                "UPDATE memberships SET role = 'owner' WHERE organization_id = ? "
+                f"AND user_id = ? AND status = 'active' AND {target_role_sql}",
+                (org_id, new_id, *target_roles),
+            )
+            self._insert_audit_event_row(conn, audit_event)
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        except Exception:
+            conn.rollback()
+            raise
 
     # -- API keys (task 5) -----------------------------------------------------
 
@@ -2073,6 +2161,50 @@ class SQLiteStorage:
         if session.expires_at <= utc_now():
             return None
         return session
+
+    def save_service_authorization_code(self, code: ServiceAuthorizationCode) -> None:
+        """Persist a digest-only service authorization code."""
+        conn = self._connection()
+        try:
+            conn.execute(
+                "INSERT INTO service_authorization_codes "
+                "(code_digest, service_id, user_id, organization_id, permissions_json, "
+                "permission_version, expires_at, consumed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    code.code_digest,
+                    code.service_id,
+                    str(code.user_id),
+                    str(code.organization_id),
+                    json.dumps(list(code.permissions), separators=(",", ":")),
+                    code.permission_version,
+                    encode_timestamp(code.expires_at),
+                    encode_timestamp(code.consumed_at) if code.consumed_at is not None else None,
+                ),
+            )
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+
+    def consume_service_authorization_code(
+        self, code_digest: str
+    ) -> ServiceAuthorizationCode | None:
+        """Atomically set ``consumed_at`` for one live code, returning its context."""
+        now = utc_now()
+        conn = self._connection()
+        try:
+            row = conn.execute(
+                "UPDATE service_authorization_codes SET consumed_at = ? "
+                "WHERE code_digest = ? AND consumed_at IS NULL AND expires_at > ? "
+                "RETURNING code_digest, service_id, user_id, organization_id, permissions_json, "
+                "permission_version, expires_at, consumed_at",
+                (encode_timestamp(now), code_digest, encode_timestamp(now)),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise _translate_driver_error(exc) from exc
+        conn.commit()
+        return service_authorization_code_from_row(row) if row is not None else None
 
 
 def open_sqlite_storage(path: str | Path) -> Storage:

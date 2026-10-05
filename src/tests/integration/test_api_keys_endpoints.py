@@ -1,7 +1,7 @@
 """Integration tests for the API-key endpoints (API-key).
 
 Same identity and organization-proven stack as the member tests (design choice 12): loopback
-JWKS-signed tokens, real SQLite, seeded owner/admin/member/viewer matrix in
+JWKS-signed tokens, real SQLite, seeded owner/org_admin/member/viewer matrix in
 ``org_team`` plus an outsider anchoring ``org_outside``, and a
 :class:`~app.auth.pepper.StaticPepper` wired into
 :func:`~app.api.keys.build_api_keys_router` (so the management routes carry
@@ -19,7 +19,7 @@ Acceptance mapping (implementation Verify bullets):
 - the full literal appears in **no** other response (list bodies swept);
 - list: all statuses, org-scoped, masked ``key_prefix`` only, limit/cursor
   round-trip, foreign cursor → 400;
-- role matrix: owner/admin 201/204; member/viewer 403 + ``insufficient_role``
+- role matrix: owner/org_admin 201/204; member/viewer 403 + ``insufficient_role``
   audit; outsider 403 + ``no_membership`` audit; an API-key bearer on all
   three routes → 403 + ``human_only`` audit under the ``key_`` actor
   (no-escalation proof);
@@ -292,7 +292,7 @@ def env(tmp_path: Path, key: TestKey) -> Iterator[_Env]:
 
 @pytest.fixture
 def matrix(env: _Env) -> _Env:
-    """org_team seeded with owner/admin/member/viewer + outsider on org_outside."""
+    """org_team seeded with owner/org_admin/member/viewer + outsider on org_outside."""
     seed_user(env.storage, user_id="usr_owner", sub="owner-sub", email="owner@example.test")
     seed_user(env.storage, user_id="usr_admin", sub="admin-sub", email="admin@example.test")
     seed_user(env.storage, user_id="usr_member", sub="member-sub", email="member@example.test")
@@ -309,7 +309,7 @@ def matrix(env: _Env) -> _Env:
         env.storage,
         organization_id="org_team",
         user_id="usr_admin",
-        role=MembershipRole.ADMIN,
+        role=MembershipRole.ORG_ADMIN,
         membership_id="mem_admin",
     )
     seed_membership(
@@ -344,7 +344,7 @@ def matrix(env: _Env) -> _Env:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("caller", ["owner", "admin"])
+@pytest.mark.parametrize("caller", ["owner", "org_admin"])
 def test_create_201_exact_body_and_literal_verifies(matrix: _Env, caller: str) -> None:
     body = matrix.create_key(caller)
     # Frozen §15 response: exactly these four fields (no scopes, no prefix).
@@ -447,7 +447,7 @@ def test_create_member_and_viewer_403_with_audit_and_zero_write(matrix: _Env) ->
 def test_create_invalid_scope_shape_is_422(matrix: _Env, bad_scope: str) -> None:
     response = matrix.client.post(
         "/v1/organizations/org_team/api-keys",
-        headers=matrix.headers_for("admin"),
+        headers=matrix.headers_for("org_admin"),
         json={"name": "bad", "environment": "live", "scopes": [bad_scope]},
     )
     assert response.status_code == 422
@@ -461,7 +461,7 @@ def test_create_invalid_scope_shape_is_422(matrix: _Env, bad_scope: str) -> None
 def test_create_invalid_environment_is_422(matrix: _Env) -> None:
     response = matrix.client.post(
         "/v1/organizations/org_team/api-keys",
-        headers=matrix.headers_for("admin"),
+        headers=matrix.headers_for("org_admin"),
         json={"name": "bad", "environment": "staging", "scopes": []},
     )
     assert response.status_code == 422
@@ -607,7 +607,7 @@ def test_list_outsider_403_with_denial_audit_and_zero_mutation(matrix: _Env) -> 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("caller", ["owner", "admin"])
+@pytest.mark.parametrize("caller", ["owner", "org_admin"])
 def test_revoke_204_idempotent_second_call_with_truthful_audits(matrix: _Env, caller: str) -> None:
     created = matrix.create_key()
     key_id = created["id"]
@@ -687,7 +687,7 @@ def test_revoke_foreign_and_unknown_key_answer_byte_identical_404s(matrix: _Env)
         key_id_segment=SEG_OUTSIDE,
     )
     unknown = "key_" + "f" * 32  # valid ApiKeyId shape, never issued
-    headers = matrix.headers_for("admin")
+    headers = matrix.headers_for("org_admin")
     foreign = matrix.client.delete(
         "/v1/organizations/org_team/api-keys/key_outside", headers=headers
     )
@@ -709,7 +709,7 @@ def test_revoke_foreign_and_unknown_key_answer_byte_identical_404s(matrix: _Env)
 
 def test_revoke_malformed_key_id_path_is_422(matrix: _Env) -> None:
     response = matrix.client.delete(
-        "/v1/organizations/org_team/api-keys/not_a_key_id", headers=matrix.headers_for("admin")
+        "/v1/organizations/org_team/api-keys/not_a_key_id", headers=matrix.headers_for("org_admin")
     )
     assert response.status_code == 422
     assert Error.model_validate(response.json()).code == "validation_error"

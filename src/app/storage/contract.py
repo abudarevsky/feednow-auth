@@ -13,12 +13,13 @@ from pydantic import BaseModel, ConfigDict
 
 from app.models.api_key import ApiKey, KeyId
 from app.models.audit_event import AuditEvent
-from app.models.enums import ApplicationRole, IdentityProvider
+from app.models.enums import ApplicationRole, IdentityProvider, MembershipRole
 from app.models.external_identity import ExternalIdentity, ProviderTenant
 from app.models.ids import ApiKeyId, OrganizationId, ProviderSubject, UserId
 from app.models.membership import Membership
 from app.models.organization import Organization, OrganizationSlug
 from app.models.pagination import Page, PageParams
+from app.models.service_authorization import ServiceAuthorizationCode
 from app.models.session import AppSession, OAuthLoginState
 from app.models.timestamps import UtcDatetime
 from app.models.user import User
@@ -224,11 +225,8 @@ class RoleTransition:
 
 
 # ---------------------------------------------------------------------------
-# The protocol (25 methods: spec §11 surface + the §12 compound
-# ``provision_user`` + the Phase 04 compound ``provision_organization``
-# + the four additive Phase 11 login-state/session operations
-# + the additive Phase 12 ``list_users_by_email`` exact-lookup
-# + the additive Phase 13 ``transition_application_role`` atomic transition)
+# The protocol groups entity storage, provisioning, authorization, sessions,
+# and registered-service authorization-code operations.
 # ---------------------------------------------------------------------------
 
 
@@ -516,6 +514,22 @@ class Storage(Protocol):
         """
         ...
 
+    def transfer_organization_owner(
+        self,
+        *,
+        organization_id: OrganizationId,
+        former_owner_id: UserId,
+        new_owner_id: UserId,
+        new_owner_role: MembershipRole,
+        audit_event: AuditEvent,
+    ) -> None:
+        """Atomically promote an active member and demote the former owner.
+
+        Both membership role changes and the supplied audit event commit as
+        one transaction. The former owner becomes ``org_admin``.
+        """
+        ...
+
     # -- API keys -----------------------------------------------------------
 
     def create_api_key(self, api_key: ApiKey) -> ApiKey:
@@ -767,6 +781,24 @@ class Storage(Protocol):
         indistinguishable from absent ones to the caller). Never raises
         :class:`EntityNotFoundError` — session verification treats ``None`` as
         "not logged in".
+        """
+        ...
+
+    def save_service_authorization_code(self, code: ServiceAuthorizationCode) -> None:
+        """Persist a caller-formed, digest-only service authorization code.
+
+        A duplicate digest raises ``DuplicateEntityError(kind="entity_id")``.
+        No plaintext code is accepted by this storage contract.
+        """
+        ...
+
+    def consume_service_authorization_code(
+        self, code_digest: str
+    ) -> ServiceAuthorizationCode | None:
+        """Atomically mark one unexpired, unconsumed code consumed.
+
+        At most one concurrent caller receives the context. Unknown,
+        expired, consumed, and replayed digests all return ``None``.
         """
         ...
 

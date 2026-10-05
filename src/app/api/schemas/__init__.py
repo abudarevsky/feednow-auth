@@ -37,7 +37,7 @@ from app.api.schemas.manifest import (
     endpoint_for,
 )
 from app.api.schemas.me import MeResponse
-from app.api.schemas.members import MemberCreateRequest, MemberResponse
+from app.api.schemas.members import MemberCreateRequest, MemberResponse, OwnerTransferRequest
 from app.api.schemas.organizations import (
     OrganizationCreateRequest,
     OrganizationRenameRequest,
@@ -45,7 +45,13 @@ from app.api.schemas.organizations import (
     OrganizationSlugAvailabilityQuery,
     OrganizationSlugAvailabilityResponse,
 )
-from app.api.schemas.service_auth import ApiKeyValidationRequest, ApiKeyValidationResponse
+from app.api.schemas.service_auth import (
+    ApiKeyValidationRequest,
+    ApiKeyValidationResponse,
+    ServiceAuthorizationContextResponse,
+    ServiceCodeExchangeRequest,
+    ServiceHandoffRequest,
+)
 
 __all__ = [
     "API_V1_PREFIX",
@@ -66,6 +72,7 @@ __all__ = [
     "MeResponse",
     "MemberCreateRequest",
     "MemberResponse",
+    "OwnerTransferRequest",
     "OrganizationCreateRequest",
     "OrganizationRenameRequest",
     "OrganizationResponse",
@@ -73,5 +80,8 @@ __all__ = [
     "OrganizationSlugAvailabilityResponse",
     "Page",
     "PageParams",
+    "ServiceAuthorizationContextResponse",
+    "ServiceCodeExchangeRequest",
+    "ServiceHandoffRequest",
     "endpoint_for",
 ]

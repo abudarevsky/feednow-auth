@@ -19,6 +19,7 @@ import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, cast
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from kms_encrypted_cognito_client_secret import (
@@ -55,6 +56,7 @@ from app.auth.pepper import PepperSource
 from app.auth.session import SessionManager
 from app.auth.token_exchange import CognitoTokenEndpoint
 from app.main import create_app
+from app.models.service_authorization import ServiceRegistration
 from app.storage.contract import Storage
 from app.storage.dynamodb import DynamoDbStorage, open_dynamodb_storage
 from app.storage.local_admin import LocalAdminStorage
@@ -87,6 +89,10 @@ OAUTH_REDIRECT_URL_ENV: Final = "FEEDNOW_OAUTH_REDIRECT_URL"
 ALLOWED_RETURN_ORIGINS_ENV: Final = "FEEDNOW_ALLOWED_RETURN_ORIGINS"
 SESSION_TTL_SECONDS_ENV: Final = "FEEDNOW_SESSION_TTL_SECONDS"
 COOKIE_SECURE_ENV: Final = "FEEDNOW_COOKIE_SECURE"
+VISPECTOR_CALLBACK_PATH_ENV: Final = "FEEDNOW_VISPECTOR_CALLBACK_PATH"
+VISPECTOR_ENABLED_ENV: Final = "FEEDNOW_VISPECTOR_ENABLED"
+VISPECTOR_PERMISSIONS_ENV: Final = "FEEDNOW_VISPECTOR_PERMISSIONS"
+VISPECTOR_URL_ENV: Final = "FEEDNOW_VISPECTOR_URL"
 
 SESSION_ENV_KEYS: Final = (
     AUTHORIZE_URL_ENV,
@@ -169,6 +175,46 @@ def _session_config(env: Mapping[str, str]) -> SessionRuntimeConfig | None:
     )
 
 
+def _service_registration(env: Mapping[str, str]) -> ServiceRegistration | None:
+    """Resolve the initial Vispector registration from public operator settings."""
+    service_url = (env.get(VISPECTOR_URL_ENV) or "").strip()
+    if not service_url:
+        return None
+    try:
+        parsed = urlsplit(service_url)
+    except ValueError:
+        raise RuntimeError(f"invalid service registration: {VISPECTOR_URL_ENV}") from None
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise RuntimeError(f"invalid service registration: {VISPECTOR_URL_ENV}")
+    enabled_raw = (env.get(VISPECTOR_ENABLED_ENV) or "true").strip().lower()
+    if enabled_raw not in {"true", "false"}:
+        raise RuntimeError(f"invalid service registration: {VISPECTOR_ENABLED_ENV}")
+    permissions = _split_list(
+        env.get(VISPECTOR_PERMISSIONS_ENV) or "projects:read,projects:write,inspect"
+    )
+    callback_path = (env.get(VISPECTOR_CALLBACK_PATH_ENV) or "/auth/feednow/callback").strip()
+    try:
+        return ServiceRegistration(
+            service_id="vispector",
+            display_name="Vispector",
+            allowed_origins=(f"{parsed.scheme}://{parsed.netloc}",),
+            callback_path=callback_path,
+            enabled=enabled_raw == "true",
+            allowed_permissions=permissions,
+            credential_reference="feednow/vispector/service-credential",
+        )
+    except ValueError:
+        raise RuntimeError("invalid service registration configuration") from None
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     """The five injected runtime inputs plus the optional session gate.
@@ -185,6 +231,7 @@ class RuntimeConfig:
     environment: str
     pepper_ciphertext_b64: str
     session: SessionRuntimeConfig | None = None
+    service_registration: ServiceRegistration | None = None
 
     @classmethod
     def from_environ(cls, environ: Mapping[str, str] | None = None) -> RuntimeConfig:
@@ -229,6 +276,7 @@ class RuntimeConfig:
             environment=environment,
             pepper_ciphertext_b64=pepper_ciphertext_b64,
             session=_session_config(env),
+            service_registration=_service_registration(env),
         )
 
 
@@ -329,7 +377,13 @@ def build_app(
             environment=resolved.environment, environ=env
         ).current()
     routers.append(
-        build_service_auth_router(storage, pepper_source, service_credential=service_credential)
+        build_service_auth_router(
+            storage,
+            pepper_source,
+            service_credential=service_credential,
+            service_registration=(resolved.service_registration if service_credential else None),
+            session_manager=session_manager,
+        )
     )
     if session is not None and userinfo_client is not None:
         # The session boundary rides on the single configured app client

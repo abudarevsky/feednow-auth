@@ -298,13 +298,13 @@ def build_organization_admin_dependency(
     profile_source: ProfileSource | None = None,
     session_manager: SessionManager | None = None,
 ) -> Callable[..., OrganizationAccess]:
-    """Mutation access: rank >= ``admin`` (owner or admin only, design choice 3).
+    """Mutation access: rank >= ``org_admin`` (owner or org_admin only).
 
     ``pepper_source`` and ``profile_source`` behave exactly as in
     :func:`build_organization_member_dependency`.
     """
     return _build_organization_access_dependency(
-        storage, verifier, operation_id, MembershipRole.ADMIN, pepper_source, profile_source, session_manager
+        storage, verifier, operation_id, MembershipRole.ORG_ADMIN, pepper_source, profile_source, session_manager
     )
 
 

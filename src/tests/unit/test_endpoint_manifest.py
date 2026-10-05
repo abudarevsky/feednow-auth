@@ -45,10 +45,13 @@ SPEC_14_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("GET", "/v1/organizations/{organization_id}/members"),
         ("POST", "/v1/organizations/{organization_id}/members"),
         ("DELETE", "/v1/organizations/{organization_id}/members/{user_id}"),
+        ("POST", "/v1/organizations/{organization_id}/owner"),
         ("GET", "/v1/organizations/{organization_id}/api-keys"),
         ("POST", "/v1/organizations/{organization_id}/api-keys"),
         ("DELETE", "/v1/organizations/{organization_id}/api-keys/{key_id}"),
         ("POST", "/v1/service-auth/api-keys/validate"),
+        ("POST", "/v1/oauth/service-handoff"),
+        ("POST", "/v1/service-auth/authorization-codes/exchange"),
         ("PATCH", "/v1/organizations/{organization_id}"),
         ("GET", "/v1/admin/summary"),
         ("GET", "/v1/admin/organizations"),
@@ -82,6 +85,8 @@ def test_operation_ids_are_unique_and_lookup_works() -> None:
     assert len(ids) == len(set(ids))
     assert endpoint_for("revoke_api_key").method == "DELETE"
     assert endpoint_for("validate_service_api_key").path == "/v1/service-auth/api-keys/validate"
+    assert endpoint_for("handoff_to_registered_service").success_status == 303
+    assert endpoint_for("exchange_service_authorization_code").success_status == 200
     with pytest.raises(KeyError):
         endpoint_for("rotate_api_key")  # rotation explicitly not in Phase 01
 
@@ -104,7 +109,7 @@ def test_gets_are_200_and_creates_are_201() -> None:
             assert spec.success_status == 200, spec
             assert spec.request_model is None, spec
         elif spec.method == "POST":
-            assert spec.success_status in {200, 201, 204}, spec
+            assert spec.success_status in {200, 201, 204, 303}, spec
             assert spec.request_model is not None, spec
 
 

@@ -281,6 +281,42 @@ def test_runtime_config_normalizes_comma_separated_allowlists() -> None:
     assert config.cognito_client_ids == ("c1", "c2")
 
 
+def test_runtime_config_builds_the_public_vispector_registration() -> None:
+    config = RuntimeConfig.from_environ(
+        {
+            **FAKE_ENV,
+            "FEEDNOW_VISPECTOR_URL": "https://inspect.feednow.test",
+            "FEEDNOW_VISPECTOR_CALLBACK_PATH": "/auth/callback",
+            "FEEDNOW_VISPECTOR_ENABLED": "false",
+            "FEEDNOW_VISPECTOR_PERMISSIONS": "projects:read,inspect",
+        }
+    )
+    assert config.service_registration is not None
+    assert config.service_registration.service_id == "vispector"
+    assert config.service_registration.allowed_origins == ("https://inspect.feednow.test",)
+    assert config.service_registration.callback_path == "/auth/callback"
+    assert config.service_registration.enabled is False
+    assert config.service_registration.allowed_permissions == ("projects:read", "inspect")
+    assert config.service_registration.credential_reference
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        {"FEEDNOW_VISPECTOR_URL": "https://inspect.feednow.test/path"},
+        {"FEEDNOW_VISPECTOR_URL": "https://user:pass@inspect.feednow.test"},
+        {"FEEDNOW_VISPECTOR_ENABLED": "sometimes"},
+        {"FEEDNOW_VISPECTOR_CALLBACK_PATH": "//attacker.test/callback"},
+        {"FEEDNOW_VISPECTOR_PERMISSIONS": " , "},
+    ),
+)
+def test_runtime_config_rejects_invalid_service_registration(values: dict[str, str]) -> None:
+    with pytest.raises(RuntimeError, match="service registration"):
+        RuntimeConfig.from_environ(
+            {**FAKE_ENV, "FEEDNOW_VISPECTOR_URL": "https://inspect.test", **values}
+        )
+
+
 @pytest.mark.parametrize("missing", CONFIG_KEYS)
 def test_runtime_config_failure_names_only_the_missing_key(missing: str) -> None:
     environ = {key: value for key, value in FAKE_ENV.items() if key != missing}

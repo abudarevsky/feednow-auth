@@ -311,13 +311,13 @@ def test_organization_response_shape_and_unknown_field_rejection() -> None:
 
 
 def test_member_create_accepts_application_id_and_role_only() -> None:
-    parsed = MemberCreateRequest.model_validate({"user_id": "usr_01JXYZ7K", "role": "admin"})
+    parsed = MemberCreateRequest.model_validate({"user_id": "usr_01JXYZ7K", "role": "org_admin"})
     assert str(parsed.user_id) == "usr_01JXYZ7K"
     invalid_payloads: list[dict[str, Any]] = [
-        {"user_id": "mem_01JXYZ7K", "role": "admin"},  # record ID is not a user identity
-        {"user_id": "6ad3b1f2-4c5d-4e6f-8a9b-0c1d2e3f4a5b", "role": "admin"},  # provider sub
+        {"user_id": "mem_01JXYZ7K", "role": "org_admin"},  # record ID is not a user identity
+        {"user_id": "6ad3b1f2-4c5d-4e6f-8a9b-0c1d2e3f4a5b", "role": "org_admin"},  # provider sub
         {"user_id": "usr_01JXYZ7K", "role": "superadmin"},
-        {"user_id": "usr_01JXYZ7K", "role": "admin", "status": "disabled"},
+        {"user_id": "usr_01JXYZ7K", "role": "org_admin", "status": "disabled"},
         {"user_id": "usr_01JXYZ7K"},
     ]
     for payload in invalid_payloads:
