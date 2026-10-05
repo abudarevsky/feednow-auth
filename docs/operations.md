@@ -63,7 +63,7 @@ After stopping the stack, erase its local DynamoDB data with
 `docker volume rm feednow-auth_dynamodb-data`.
 
 To enable the local Vispector registration and handoff, set
-`FEEDNOW_VISPECTOR_URL` to the frontend's origin,
+`FEEDNOW_VISPECTOR_URL` to `http://localhost:5173`,
 `FEEDNOW_VISPECTOR_CALLBACK_PATH` to its fixed callback path, and a random
 `FEEDNOW_VISPECTOR_SERVICE_SECRET` in `deploy/docker/.env` before starting it.
 The local service secret is for Docker development only. Production receives

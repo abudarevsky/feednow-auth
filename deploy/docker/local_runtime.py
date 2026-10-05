@@ -129,7 +129,7 @@ def build_app() -> FastAPI:
             display_name="Vispector",
             allowed_origins=(f"{parsed_service_url.scheme}://{parsed_service_url.netloc}",),
             callback_path=os.getenv(
-                "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/feednow/callback"
+                "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/callback"
             ).strip(),
             enabled=enabled_raw == "true",
             allowed_permissions=_values("FEEDNOW_VISPECTOR_PERMISSIONS")

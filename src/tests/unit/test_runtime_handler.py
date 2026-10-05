@@ -200,7 +200,14 @@ def test_lambda_requirements_pin_the_payload_dependencies() -> None:
         for line in LAMBDA_REQUIREMENTS.read_text().splitlines()
         if line.strip() and not line.strip().startswith("#")
     }
-    assert pins == {"boto3", "fastapi", "mangum", "pydantic", "pyjwt"}
+    assert pins == {
+        "boto3",
+        "fastapi",
+        "mangum",
+        "pydantic",
+        "pyjwt",
+        "python-multipart",
+    }
 
 
 def test_lambda_requirements_exclude_synth_and_test_packages() -> None:

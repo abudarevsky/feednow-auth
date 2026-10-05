@@ -111,6 +111,12 @@ def install_session_csrf_middleware(
             unsafe
             and request.url.path.startswith("/v1/")
             and not request.url.path.startswith("/v1/service-auth/")
+            and not (
+                request.url.path == "/v1/oauth/service-handoff"
+                and request.headers.get("content-type", "").startswith(
+                    "application/x-www-form-urlencoded"
+                )
+            )
             and session_id
             and session_manager.verify(session_id)
         ):

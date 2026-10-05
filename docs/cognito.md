@@ -68,11 +68,17 @@ Lambda. The runtime decrypts it in memory for token exchange. The Google
 provider secret is entered only through the secure backend operator prompt. The issuer has the
 form `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`.
 
-For local account development, register
-`http://localhost:8000/oauth/callback` and `http://localhost:8000/logout`;
-the UI is normally served at `http://localhost:3000`. The backend performs
-the code exchange, token validation, verified-profile lookup, and session
-issuance. Do not put Cognito tokens in browser storage.
+For local browser SSO, use `http://localhost:3000` for the FeedNow account UI
+and `http://localhost:5173` for Vispector. Set
+`FEEDNOW_COGNITO_REDIRECT_URI` to
+`http://localhost:3000/api/oauth/callback` and `FEEDNOW_FRONTEND_URL` to
+`http://localhost:3000`. Register the callback URL in the Cognito app client.
+The account UI's `/api` proxy forwards the callback to the FeedNow API, and the
+browser stores the session cookie for `localhost`, shared across the UI ports.
+Set `FEEDNOW_VISPECTOR_URL` to `http://localhost:5173` in the FeedNow runtime
+and `FEEDNOW_ACCOUNT_ORIGIN` to `http://localhost:3000` in Vispector. The
+backend performs the code exchange, token validation, verified-profile lookup,
+and session issuance. Do not put Cognito tokens in browser storage.
 
 Native Cognito email registration uses its email verification flow. For
 federated Google users, first-login provisioning requires explicit verified

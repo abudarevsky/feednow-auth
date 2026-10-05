@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Request, Security
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 
 from app.api.schemas.manifest import endpoint_for
 from app.api.schemas.service_auth import (
@@ -103,10 +104,27 @@ def build_service_auth_router(
     exchange_spec = endpoint_for("exchange_service_authorization_code")
 
     @router.post(handoff_spec.path, status_code=handoff_spec.success_status)
-    def handoff_to_service(body: ServiceHandoffRequest, request: Request) -> RedirectResponse:
+    async def handoff_to_service(request: Request) -> RedirectResponse:
         """Issue a short-lived code and redirect only to configured service origin."""
         if service_registration is None or session_manager is None:
             raise HTTPException(status_code=503, detail="service authorization is not configured")
+        try:
+            if request.headers.get("content-type", "").startswith(
+                "application/x-www-form-urlencoded"
+            ):
+                body = ServiceHandoffRequest.model_validate(dict(await request.form()))
+            else:
+                body = ServiceHandoffRequest.model_validate(await request.json())
+        except (ValidationError, ValueError):
+            raise HTTPException(status_code=422, detail="invalid service handoff request") from None
+        origin = request.headers.get("origin")
+        if request.headers.get("content-type", "").startswith(
+            "application/x-www-form-urlencoded"
+        ):
+            if origin is None or origin.rstrip("/") not in service_registration.allowed_origins:
+                raise HTTPException(status_code=403, detail="service access denied")
+        elif origin and origin.rstrip("/") not in service_registration.allowed_origins:
+            raise HTTPException(status_code=403, detail="service access denied")
         session_id = read_session_cookie(request)
         user_id = session_manager.verify(session_id) if session_id is not None else None
         if user_id is None:

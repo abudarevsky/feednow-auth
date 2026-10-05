@@ -200,7 +200,7 @@ def _service_registration(env: Mapping[str, str]) -> ServiceRegistration | None:
     permissions = _split_list(
         env.get(VISPECTOR_PERMISSIONS_ENV) or "projects:read,projects:write,inspect"
     )
-    callback_path = (env.get(VISPECTOR_CALLBACK_PATH_ENV) or "/auth/feednow/callback").strip()
+    callback_path = (env.get(VISPECTOR_CALLBACK_PATH_ENV) or "/auth/callback").strip()
     try:
         return ServiceRegistration(
             service_id="vispector",

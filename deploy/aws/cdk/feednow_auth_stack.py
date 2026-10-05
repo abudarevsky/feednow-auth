@@ -697,7 +697,7 @@ class FeedNowAuthStack(cdk.Stack):
                 **(
                     {
                         "FEEDNOW_VISPECTOR_CALLBACK_PATH": os.getenv(
-                            "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/feednow/callback"
+                            "FEEDNOW_VISPECTOR_CALLBACK_PATH", "/auth/callback"
                         ),
                         "FEEDNOW_VISPECTOR_ENABLED": os.getenv("FEEDNOW_VISPECTOR_ENABLED", "true"),
                         "FEEDNOW_VISPECTOR_PERMISSIONS": os.getenv(
