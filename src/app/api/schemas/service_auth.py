@@ -66,6 +66,8 @@ class ServiceContextValidationResponse(ApiSchema):
 
     user_id: UserId
     organization_id: OrganizationId
+    display_name: str
+    organization_name: str
     service: ServiceId
     permissions: list[str]
     permission_version: str

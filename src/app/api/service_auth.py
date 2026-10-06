@@ -129,6 +129,49 @@ def build_service_auth_router(
             raise HTTPException(status_code=403, detail="service access denied")
         return user, organization, membership
 
+    def issue_handoff(user_id: str, body: ServiceHandoffRequest) -> RedirectResponse:
+        if (
+            service_registration is None
+            or body.service_id != service_registration.service_id
+            or not service_registration.enabled
+        ):
+            raise HTTPException(status_code=403, detail="service access denied")
+        user, organization, membership = resolve_active_context(user_id, body.organization_id)
+        permissions = service_permissions_for_role(
+            membership.role, service_registration.allowed_permissions
+        )
+        if not permissions:
+            raise HTTPException(status_code=403, detail="service access denied")
+        now = utc_now()
+        raw_code = secrets.token_urlsafe(32)
+        code_digest = hashlib.sha256(raw_code.encode("ascii")).hexdigest()
+        storage.save_service_authorization_code(
+            ServiceAuthorizationCode(
+                code_digest=code_digest,
+                service_id=service_registration.service_id,
+                user_id=user.id,
+                organization_id=organization.id,
+                permissions=permissions,
+                permission_version=membership_permission_version(
+                    membership.role, membership.created_at
+                ),
+                expires_at=now + _AUTHORIZATION_CODE_TTL,
+            )
+        )
+        destination = (
+            service_registration.allowed_origins[0].rstrip("/")
+            + service_registration.callback_path
+        )
+        return RedirectResponse(
+            f"{destination}?{urlencode({'code': raw_code, 'state': body.state})}",
+            status_code=handoff_spec.success_status,
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "no-referrer",
+            },
+        )
+
     @router.post(context_spec.path, response_model=ServiceContextValidationResponse)
     def validate_service_context(
         body: ServiceContextValidationRequest,
@@ -159,6 +202,8 @@ def build_service_auth_router(
         return ServiceContextValidationResponse(
             user_id=user.id,
             organization_id=organization.id,
+            display_name=user.display_name,
+            organization_name=organization.name,
             service=body.service_id,
             permissions=list(permissions),
             permission_version=membership_permission_version(
@@ -190,60 +235,39 @@ def build_service_auth_router(
         user_id = session_manager.verify(session_id) if session_id is not None else None
         if user_id is None:
             raise HTTPException(status_code=401, detail="authenticated session required")
-        if body.service_id != service_registration.service_id or not service_registration.enabled:
-            raise HTTPException(status_code=403, detail="service access denied")
+        return issue_handoff(user_id, body)
+
+    @router.get("/v1/oauth/service-handoff/continue", include_in_schema=False)
+    async def continue_service_handoff(state: str, request: Request) -> RedirectResponse:
+        """Resume a browser handoff using the authenticated top-level GET."""
+        if service_registration is None or session_manager is None:
+            raise HTTPException(status_code=503, detail="service authorization is not configured")
         try:
-            user = storage.get_user(user_id)
-            if body.organization_id is None:
-                organizations = storage.list_user_organizations(user_id, PageParams(limit=2)).items
-                if len(organizations) != 1:
-                    raise HTTPException(status_code=403, detail="service access denied")
-                organization = organizations[0]
-                organization_id = OrganizationId(organization.id)
-            else:
-                organization_id = body.organization_id
-                organization = storage.get_organization(organization_id)
-            membership = storage.get_membership(organization_id=organization_id, user_id=user_id)
-        except EntityNotFoundError as exc:
-            raise HTTPException(status_code=403, detail="service access denied") from exc
-        if (
-            user.status is not UserStatus.ACTIVE
-            or organization.status is not OrganizationStatus.ACTIVE
-            or membership.status is not MembershipStatus.ACTIVE
-        ):
-            raise HTTPException(status_code=403, detail="service access denied")
-        permissions = service_permissions_for_role(
-            membership.role, service_registration.allowed_permissions
-        )
-        if not permissions:
-            raise HTTPException(status_code=403, detail="service access denied")
-        now = utc_now()
-        raw_code = secrets.token_urlsafe(32)
-        code_digest = hashlib.sha256(raw_code.encode("ascii")).hexdigest()
-        storage.save_service_authorization_code(
-            ServiceAuthorizationCode(
-                code_digest=code_digest,
-                service_id=service_registration.service_id,
-                user_id=user.id,
-                organization_id=organization.id,
-                permissions=permissions,
-                permission_version=membership_permission_version(
-                    membership.role, membership.created_at
-                ),
-                expires_at=now + _AUTHORIZATION_CODE_TTL,
+            ServiceHandoffRequest.model_validate(
+                {"service_id": service_registration.service_id, "state": state}
             )
-        )
-        destination = (
-            service_registration.allowed_origins[0].rstrip("/") + service_registration.callback_path
-        )
-        return RedirectResponse(
-            f"{destination}?{urlencode({'code': raw_code, 'state': body.state})}",
-            status_code=handoff_spec.success_status,
-            headers={
-                "Cache-Control": "no-store",
-                "Pragma": "no-cache",
-                "Referrer-Policy": "no-referrer",
-            },
+        except ValidationError:
+            raise HTTPException(status_code=400, detail="invalid service handoff state") from None
+        if not service_registration.enabled:
+            raise HTTPException(status_code=403, detail="service access denied")
+        session_id = read_session_cookie(request)
+        user_id = session_manager.verify(session_id) if session_id is not None else None
+        headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
+        if user_id is None:
+            callback = (
+                service_registration.allowed_origins[0]
+                + service_registration.callback_path
+                + "?"
+                + urlencode({"resume": state})
+            )
+            return RedirectResponse(
+                "/api/oauth/login?" + urlencode({"next": callback}),
+                status_code=303,
+                headers=headers,
+            )
+        return issue_handoff(
+            user_id,
+            ServiceHandoffRequest(service_id=service_registration.service_id, state=state),
         )
 
     @router.post(

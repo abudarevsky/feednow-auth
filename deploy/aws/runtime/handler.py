@@ -412,7 +412,16 @@ def build_app(
                 client_id=client_id,
                 redirect_uri=session.redirect_uri,
                 landing_url=session.allowed_return_origins[0],
-                allowed_return_origins=session.allowed_return_origins,
+                allowed_return_origins=(
+                    *session.allowed_return_origins,
+                    *(
+                        resolved.service_registration.allowed_origins
+                        if resolved.service_registration is not None
+                        and resolved.service_registration.enabled
+                        and service_credential
+                        else ()
+                    ),
+                ),
                 cookie_secure=session.cookie_secure,
                 onboarding_dispatch=(
                     lambda organization_id: dispatch_organization_onboarding(

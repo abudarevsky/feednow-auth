@@ -93,8 +93,17 @@ or ambiguous context is denied uniformly with 403.
 
 ## Browser handoff to a registered service
 
-`POST /v1/oauth/service-handoff` requires the active FeedNow session and the
-session-bound CSRF token. Its request selects a registered `service_id` and
+The browser begins with `GET /api/v1/oauth/service-handoff/continue?state=…`
+on the account origin. The Vite and CloudFront `/api` proxy strips that prefix
+before forwarding the request to FeedNow's `/v1` route.
+With no FeedNow session, FeedNow starts its configured OAuth login and returns
+to the enabled service's registered callback with the opaque resume state. The
+service then repeats the continuation as an authenticated top-level GET,
+including the `SameSite=Lax` session cookie, and completes the handoff. The
+continuation accepts no destination URL. The underlying browser
+`POST /v1/oauth/service-handoff` and API-style JSON handoffs require an active
+FeedNow session; URL-encoded form origins must match the registered service
+origin. The request selects a `service_id` and
 optionally an organization the current user actively belongs to. If omitted,
 FeedNow resolves the organization only when exactly one active membership
 exists. It accepts no destination
@@ -114,6 +123,11 @@ service ID, allowed permissions, and permission version are returned. Invalid,
 expired,
 wrong-service, and replayed codes share one 401 response. API keys remain a
 separate machine credential and grant only the `inspect` permission.
+
+The registered service-context validation response also includes the current
+user `display_name` and organization `organization_name`. Vispector uses these
+two display values in its account menu; it does not render the returned IDs or
+permissions there.
 
 Vispector API keys must have exactly one scope:
 `vispector:inspection:run`, which maps to `inspect`. Keys with no scope, a
@@ -165,7 +179,6 @@ The system follows strict practices to prevent credential exposure:
 - No rotation capabilities (single pepper version)
 - No scope wildcards or hierarchical matching
 - No self-service key rotation or service reassignment
-- No browser handoff authorization-code flow or configurable service registry yet
 - Audit records appended after commit, with potential window for loss
 
 ## Security Properties

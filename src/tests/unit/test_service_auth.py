@@ -213,6 +213,8 @@ def test_service_context_validation_rechecks_active_membership_and_returns_permi
     assert response.json() == {
         "user_id": "usr_01JXYZ7KA20MB63PCQ8VNDWFTG",
         "organization_id": "org_01JXYZ7KA20MB63PCQ8VNDWFTG",
+        "display_name": "Test User",
+        "organization_name": "Test org",
         "service": "vispector",
         "permissions": ["inspect", "projects:read", "projects:write"],
         "permission_version": "owner:2026-10-01T00:00:00Z",

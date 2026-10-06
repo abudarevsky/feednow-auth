@@ -42,9 +42,9 @@ and a subprocess-isolated `import app.main` loads no driver or adapter module.
 
 ## HTTP composition
 
-Every mounted route matches the manifest in
-`src/app/api/schemas/manifest.py`; the app is built once via
-`create_app(routers=[...])`.
+Every versioned public API route matches the manifest in
+`src/app/api/schemas/manifest.py`; browser session and OAuth routes are
+composed separately. The app is built once via `create_app(routers=[...])`.
 
 | Surface | Builder / mount | Notes |
 | --- | --- | --- |
@@ -53,13 +53,19 @@ Every mounted route matches the manifest in
 | api-keys routes (3) | `build_api_keys_router` | Machine-credential seam; `fn_live_`/`fn_test_` dispatch |
 | `POST /v1/service-auth/api-keys/validate` | `build_service_auth_router` | Server-credential protected; returns API-key actor and mapped permission context |
 | `POST /v1/service-auth/contexts/validate` | `build_service_auth_router` | Server-credential protected; rechecks an active user, organization, and membership before refreshing service permissions |
-| `POST /v1/oauth/service-handoff` | `build_service_auth_router` | Session + CSRF protected; redirects only to the registered service callback with a short-lived code |
+| `POST /v1/oauth/service-handoff` | `build_service_auth_router` | Session protected; JSON uses CSRF and URL-encoded forms validate Origin; redirects only to the registered callback with a short-lived code |
 | `POST /v1/service-auth/authorization-codes/exchange` | `build_service_auth_router` | Server-credential protected; atomically consumes a code and rechecks current user, organization, and membership access |
 | local admin routes (7) | `build_admin_router` | Application-admin-gated operations through `LocalAdminStorage` |
 | session router | `build_oauth_router` (`src/app/api/oauth.py`) | Mounted **outside** the `/v1` manifest |
 
-`/health`, Cognito OAuth, CSRF, and the local Vispector proof route are outside
-the versioned manifest. The service-auth routes are always mounted; API-key
+`GET /v1/oauth/service-handoff/continue` is a browser-only route outside the
+public endpoint manifest. It starts FeedNow OAuth when there is no session and
+issues the registered-service handoff on the authenticated top-level GET after
+login. The browser-facing account URL uses
+`/api/v1/oauth/service-handoff/continue`; Vite and CloudFront remove the
+`/api` prefix before forwarding it. `/health`, Cognito OAuth, CSRF, and the
+local Vispector proof route are also outside the versioned manifest. The
+service-auth routes are always mounted; API-key
 validation and context revalidation require its configured service credential.
 Handoff and exchange return an unavailable response until the service credential and registration
 are configured. The local admin router uses manifest entries but is

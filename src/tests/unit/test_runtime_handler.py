@@ -482,7 +482,7 @@ def test_build_app_mounts_exactly_the_manifest_routes() -> None:
     app = _build_with_fakes()
     expected = {
         (spec.method, spec.path) for spec in ENDPOINTS if not spec.path.startswith("/v1/admin/")
-    } | {("GET", "/health")}
+    } | {("GET", "/health"), ("GET", "/v1/oauth/service-handoff/continue")}
     assert _mounted_routes(app) == expected
 
 
@@ -564,6 +564,7 @@ def test_build_app_mounts_the_session_flow_when_the_gate_is_on() -> None:
     app = _build_with_fakes(environ={**FAKE_ENV, **SESSION_ENV})
     expected = {(spec.method, spec.path) for spec in ENDPOINTS} | {
         ("GET", "/health"),
+        ("GET", "/v1/oauth/service-handoff/continue"),
         ("GET", "/oauth/login"),
         ("GET", "/oauth/callback"),
         ("GET", "/v1/csrf"),
@@ -625,6 +626,30 @@ def test_build_app_gate_on_wires_userinfo_token_endpoint_and_session_manager(
         "cookie_secure": True,
         "onboarding_dispatch": None,
     }
+
+
+def test_build_app_allows_enabled_registered_service_as_oauth_return_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _spy_routers(monkeypatch)
+    monkeypatch.setattr(
+        runtime_handler.KmsEncryptedServiceCredential,
+        "current",
+        lambda _self: "service-secret-for-test",
+    )
+    _build_with_fakes(environ={
+        **FAKE_ENV,
+        **SESSION_ENV,
+        runtime_handler.SERVICE_CREDENTIAL_CIPHERTEXT_ENV: "Y2lwaGVydGV4dA==",
+        "FEEDNOW_VISPECTOR_URL": "https://inspect.feednow.test",
+    })
+
+    oauth_kwargs = spies["build_oauth_router"].calls[0][1]
+    assert oauth_kwargs["allowed_return_origins"] == (
+        "https://app.feednow.test",
+        "https://admin.feednow.test",
+        "https://inspect.feednow.test",
+    )
 
 
 def test_build_app_reads_the_pepper_once_with_the_gate_on() -> None:

@@ -201,7 +201,15 @@ def build_app() -> FastAPI:
             client_id=client_id,
             redirect_uri=redirect_uri,
             landing_url=f"{frontend_url}/account",
-            allowed_return_origins=(frontend_url,),
+            allowed_return_origins=(
+                frontend_url,
+                *(
+                    service_registration.allowed_origins
+                    if service_registration is not None and service_registration.enabled
+                    and os.getenv("FEEDNOW_VISPECTOR_SERVICE_SECRET", "").strip()
+                    else ()
+                ),
+            ),
             cookie_secure=False,
             onboarding_dispatch=(
                 lambda organization_id: dispatch_organization_onboarding(

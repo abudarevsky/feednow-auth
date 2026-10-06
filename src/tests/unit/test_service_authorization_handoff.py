@@ -149,3 +149,42 @@ def test_handoff_rejects_unregistered_service_and_missing_session(tmp_path) -> N
         assert response.status_code == 401
     finally:
         storage.close()
+
+
+def test_browser_handoff_continuation_starts_login_without_a_session(tmp_path) -> None:
+    client, storage, _ = _client(tmp_path)
+    try:
+        client.cookies.clear()
+        response = client.get(
+            "/v1/oauth/service-handoff/continue?state=browser-state-123456"
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("/api/oauth/login?")
+        return_to_vispector = parse_qs(urlsplit(response.headers["location"]).query)["next"][0]
+        resume = urlsplit(return_to_vispector)
+        assert f"{resume.scheme}://{resume.netloc}{resume.path}" == (
+            "https://inspect.example.test/auth/feednow/callback"
+        )
+        assert parse_qs(resume.query) == {"resume": ["browser-state-123456"]}
+        assert "Cache-Control" in response.headers
+        assert "Referrer-Policy" in response.headers
+    finally:
+        storage.close()
+
+
+def test_authenticated_continuation_issues_code_on_top_level_get(tmp_path) -> None:
+    client, storage, _ = _client(tmp_path)
+    try:
+        response = client.get(
+            "/v1/oauth/service-handoff/continue?state=browser-state-123456"
+        )
+        assert response.status_code == 303
+        destination = urlsplit(response.headers["location"])
+        assert f"{destination.scheme}://{destination.netloc}{destination.path}" == (
+            "https://inspect.example.test/auth/feednow/callback"
+        )
+        assert parse_qs(destination.query)["state"] == ["browser-state-123456"]
+        assert parse_qs(destination.query)["code"][0]
+    finally:
+        storage.close()
