@@ -50,7 +50,7 @@ composed separately. The app is built once via `create_app(routers=[...])`.
 | --- | --- | --- |
 | `GET/PATCH /v1/me` | `build_me_router` | Identity and profile; earliest-active org + role, scopes `[]` |
 | organization + member routes (7) | `build_organizations_router`, `build_members_router` | Tenancy seam on top of identity |
-| api-keys routes (3) | `build_api_keys_router` | Machine-credential seam; `fn_live_`/`fn_test_` dispatch |
+| api-keys routes (5) | `build_api_keys_router` | Generic key management plus a restricted Vispector collection; `fn_live_`/`fn_test_` dispatch |
 | `POST /v1/service-auth/api-keys/validate` | `build_service_auth_router` | Server-credential protected; returns API-key actor and mapped permission context |
 | `POST /v1/service-auth/contexts/validate` | `build_service_auth_router` | Server-credential protected; rechecks an active user, organization, and membership before refreshing service permissions |
 | `POST /v1/oauth/service-handoff` | `build_service_auth_router` | Session protected; JSON uses CSRF and URL-encoded forms validate Origin; redirects only to the registered callback with a short-lived code |

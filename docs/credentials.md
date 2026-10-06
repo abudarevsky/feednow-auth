@@ -136,6 +136,16 @@ only to inspection execution. Project and taxonomy operations through
 `workspace-api` require an authenticated user session and do not accept API-key
 authorization.
 
+The account UI uses the restricted organization collection
+`/v1/organizations/{organization_id}/api-keys/vispector` for listing and
+creation. Creation accepts only `name` and `environment`; FeedNow fixes the
+service to `vispector` and assigns the sole `vispector:inspection:run` scope.
+Unknown request fields are rejected, so callers cannot select another service
+or supply browser-controlled scopes. Listing returns only Vispector keys.
+Revocation uses the existing organization-scoped
+`DELETE /v1/organizations/{organization_id}/api-keys/{key_id}` operation and
+retains the same human organization-admin authorization.
+
 ## Revocation (CAS)
 
 API key revocation follows a first-write-wins Compare-And-Swap (CAS) mechanism:

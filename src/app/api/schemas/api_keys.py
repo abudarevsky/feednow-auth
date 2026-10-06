@@ -63,6 +63,13 @@ class ApiKeyCreateRequest(ApiSchema):
     scopes: list[Scope]
 
 
+class VispectorApiKeyCreateRequest(ApiSchema):
+    """Restricted account request; service and scope are assigned by FeedNow."""
+
+    name: ApiKeyName
+    environment: ApiKeyEnvironment
+
+
 class ApiKeyCreatedResponse(ApiSchema):
     """Response of key creation (key-creation contract, verbatim).
 
@@ -97,4 +104,10 @@ class ApiKeySummary(ApiSchema):
     revoked_at: UtcDatetime | None = None
 
 
-__all__ = ["ApiKeyCreateRequest", "ApiKeyCreatedResponse", "ApiKeySummary", "FullApiKey"]
+__all__ = [
+    "ApiKeyCreateRequest",
+    "ApiKeyCreatedResponse",
+    "ApiKeySummary",
+    "FullApiKey",
+    "VispectorApiKeyCreateRequest",
+]

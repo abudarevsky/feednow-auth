@@ -21,7 +21,7 @@ routes.
 
 ## HTTP surface
 
-The versioned manifest currently contains 24 endpoints: two current-user
+The versioned manifest currently contains 26 endpoints: two current-user
 operations; organization and member operations; API-key management; and local
 application-administration operations, plus service-side API-key validation,
 registered-service handoff, and authorization-code exchange.

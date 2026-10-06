@@ -63,7 +63,12 @@ from app.api.schemas.admin import (
     AdminSummary,
     AdminSuspendRequest,
 )
-from app.api.schemas.api_keys import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeySummary
+from app.api.schemas.api_keys import (
+    ApiKeyCreatedResponse,
+    ApiKeyCreateRequest,
+    ApiKeySummary,
+    VispectorApiKeyCreateRequest,
+)
 from app.api.schemas.me import MeResponse, ProfileUpdateRequest
 from app.api.schemas.members import MemberCreateRequest, MemberResponse, OwnerTransferRequest
 from app.api.schemas.organizations import (
@@ -284,6 +289,25 @@ ENDPOINTS: tuple[EndpointSpec, ...] = (
         path=f"{API_V1_PREFIX}/organizations/{{organization_id}}/api-keys/{{key_id}}",
         success_status=204,
         path_params=_KEY_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="list_vispector_api_keys",
+        method="GET",
+        path="/v1/organizations/{organization_id}/api-keys/vispector",
+        success_status=200,
+        response_model=Page[ApiKeySummary],
+        query_model=PageParams,
+        paginated=True,
+        path_params=_ORG_PATH_PARAMS,
+    ),
+    EndpointSpec(
+        operation_id="create_vispector_api_key",
+        method="POST",
+        path="/v1/organizations/{organization_id}/api-keys/vispector",
+        success_status=201,
+        request_model=VispectorApiKeyCreateRequest,
+        response_model=ApiKeyCreatedResponse,
+        path_params=_ORG_PATH_PARAMS,
     ),
     EndpointSpec(
         operation_id="validate_service_api_key",

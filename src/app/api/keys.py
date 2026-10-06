@@ -57,7 +57,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app.api.schemas.api_keys import ApiKeyCreatedResponse, ApiKeyCreateRequest, ApiKeySummary
+from app.api.schemas.api_keys import (
+    ApiKeyCreatedResponse,
+    ApiKeyCreateRequest,
+    ApiKeySummary,
+    VispectorApiKeyCreateRequest,
+)
 from app.api.schemas.manifest import endpoint_for
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.organization_access import (
@@ -78,6 +83,9 @@ from app.storage.contract import InvalidCursorError, Storage
 _LIST_SPEC = endpoint_for("list_api_keys")
 _CREATE_SPEC = endpoint_for("create_api_key")
 _REVOKE_SPEC = endpoint_for("revoke_api_key")
+_VISPECTOR_LIST_SPEC = endpoint_for("list_vispector_api_keys")
+_VISPECTOR_CREATE_SPEC = endpoint_for("create_vispector_api_key")
+VISPECTOR_SCOPE = "vispector:inspection:run"
 
 #: Fixed safe message for a rejected client cursor (decision 11; the
 #: Phase 04 precedent — the adapter's cursor text never echoes upward).
@@ -204,6 +212,46 @@ def build_api_keys_router(
         except ApiKeyNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    def list_vispector_api_keys(
+        access: Annotated[OrganizationAccess, Depends(list_access)],
+        page: Annotated[PageParams, Query()],
+    ) -> Page[ApiKeySummary]:
+        """List only Vispector keys for the authorized organization."""
+        try:
+            domain_page = api_key_service.list_api_keys(storage, access.organization.id, page)
+        except InvalidCursorError as exc:
+            raise HTTPException(status_code=400, detail=INVALID_CURSOR_MESSAGE) from exc
+        items = [key for key in domain_page.items if key.service_id == "vispector"]
+        return Page[ApiKeySummary](
+            items=[_to_summary(key) for key in items],
+            limit=domain_page.limit,
+            next_cursor=domain_page.next_cursor,
+        )
+
+    def create_vispector_api_key(
+        body: VispectorApiKeyCreateRequest,
+        access: Annotated[OrganizationAccess, Depends(create_access)],
+    ) -> ApiKeyCreatedResponse:
+        """Create a Vispector inspection-only key with server-fixed permissions."""
+        try:
+            api_key, literal = api_key_service.create_api_key(
+                storage,
+                access.identity.user.id,
+                access.organization.id,
+                body.name,
+                body.environment,
+                [VISPECTOR_SCOPE],
+                pepper=pepper_source.current(),
+            )
+        except ApiKeyConflictError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return ApiKeyCreatedResponse(
+            id=api_key.id,
+            name=api_key.name,
+            key=literal,
+            created_at=api_key.created_at,
+        )
+
     router.add_api_route(
         _LIST_SPEC.path,
         list_api_keys,
@@ -224,6 +272,20 @@ def build_api_keys_router(
         methods=[_REVOKE_SPEC.method],
         status_code=_REVOKE_SPEC.success_status,
         response_model=_REVOKE_SPEC.response_model,
+    )
+    router.add_api_route(
+        _VISPECTOR_LIST_SPEC.path,
+        list_vispector_api_keys,
+        methods=[_VISPECTOR_LIST_SPEC.method],
+        status_code=_VISPECTOR_LIST_SPEC.success_status,
+        response_model=_VISPECTOR_LIST_SPEC.response_model,
+    )
+    router.add_api_route(
+        _VISPECTOR_CREATE_SPEC.path,
+        create_vispector_api_key,
+        methods=[_VISPECTOR_CREATE_SPEC.method],
+        status_code=_VISPECTOR_CREATE_SPEC.success_status,
+        response_model=_VISPECTOR_CREATE_SPEC.response_model,
     )
     return router
 
