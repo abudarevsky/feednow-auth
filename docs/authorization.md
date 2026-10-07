@@ -9,6 +9,14 @@ audited. The frozen error and status envelope lives in
 
 ## Organization tenancy
 
+Organizations carry an `enabled` flag (default `true`) independently of their
+ordinary lifecycle status. The shared role classifier, API-key scope gate,
+registered-service validation, and service handoff/revalidation all require
+`enabled == true`; disabling an organization therefore denies existing user
+sessions and API keys on their next request while preserving organization data.
+The `demo` organization type marks managed demo tenants and does not change
+membership or permission rules.
+
 The organization surface (`GET/POST/PATCH /v1/organizations`,
 `/v1/organizations/{organization_id}/members`) is mounted from the frozen `/v1`
 manifest by `build_organizations_router` / `build_members_router`

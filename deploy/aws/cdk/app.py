@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """CDK entrypoint for the feednow-auth infrastructure.
 
-Loads non-secret deployment inputs from the environment-specific (never
-committed) ``deploy/aws/cdk/.env.<environment>`` without overriding the shell,
-requires
+Loads deployment inputs from the environment-specific ignored
+``deploy/aws/cdk/.env.<environment>`` and its owner-only
+``.env.<environment>.secrets`` companion, without overriding the shell. It requires
 ``FEEDNOW_ENV`` (dev|staging|prod), ``CDK_DEFAULT_ACCOUNT``, ``AWS_REGION``,
 and ``ACCOUNT_ORIGIN`` (the HTTPS origin served by the account UI). It then
 synthesizes :class:`FeedNowAuthStack` bound to an explicit
@@ -40,10 +40,35 @@ ALLOWED_ENV_FILE_KEYS = frozenset(
         "FEEDNOW_PEPPER_CIPHERTEXT_B64",
     }
 )
+ALLOWED_SECRET_FILE_KEYS = frozenset(
+    {
+        "FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64",
+        "FEEDNOW_VISPECTOR_SERVICE_SECRET",
+    }
+)
+
+
+def _load_env_file(path: Path, allowed_keys: frozenset[str], *, private: bool = False) -> None:
+    if not path.exists():
+        return
+    if private and path.stat().st_mode & 0o077:
+        raise SystemExit(f"Secret environment file must have owner-only permissions (chmod 600): {path}")
+    seen: set[str] = set()
+    for line in path.read_text().splitlines():
+        key, separator, value = line.strip().partition("=")
+        if not separator or not key or key.startswith("#"):
+            continue
+        if key not in allowed_keys:
+            raise SystemExit(f"Unsupported or sensitive setting {key} in {path}")
+        if key in seen:
+            raise SystemExit(f"Duplicate setting {key} in {path}")
+        seen.add(key)
+        if os.getenv(key) is None:
+            os.environ[key] = value.strip().strip("\"'")
 
 
 def load_cdk_env(env_path: Path | None = None) -> None:
-    """Load the selected environment's inputs without overriding the shell."""
+    """Load config and private values without overriding existing shell values."""
     if env_path is None:
         environment = os.getenv("FEEDNOW_ENV", "")
         if environment not in {"dev", "staging", "prod"}:
@@ -53,16 +78,12 @@ def load_cdk_env(env_path: Path | None = None) -> None:
         path = env_path
     if not path.exists():
         raise SystemExit(f"Missing environment configuration: {path}")
-
-    for line in path.read_text().splitlines():
-        key, separator, value = line.strip().partition("=")
-        if not separator or not key or key.startswith("#"):
-            continue
-        if key not in ALLOWED_ENV_FILE_KEYS:
-            raise SystemExit(f"Unsupported or sensitive setting {key} in {path}")
-        if os.getenv(key):
-            continue
-        os.environ[key] = value.strip().strip("\"'")
+    _load_env_file(path, ALLOWED_ENV_FILE_KEYS)
+    _load_env_file(
+        path.with_name(f"{path.name}.secrets"),
+        ALLOWED_SECRET_FILE_KEYS,
+        private=True,
+    )
     if not os.getenv("ACCOUNT_ORIGIN") and os.getenv("ACCOUNT_BASE_URL"):
         os.environ["ACCOUNT_ORIGIN"] = os.environ["ACCOUNT_BASE_URL"].rstrip("/")
     if not os.getenv("FEEDNOW_VISPECTOR_URL") and os.getenv("VISPECTOR_BASE_URL"):

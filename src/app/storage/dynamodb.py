@@ -360,17 +360,21 @@ def user_item(user: User) -> dict[str, Any]:
     rewrites both in one conditional update), so the active-admin guard Query
     is an index read and never a Scan.
     """
-    return {
+    item: dict[str, Any] = {
         "pk": str(user.id),
         "display_name": user.display_name,
-        "email": user.email,
         "status": str(user.status),
         "application_role": str(user.application_role),
-        "g_email": user.email,
         "g_role": str(user.application_role),
         "created_at": encode_timestamp(user.created_at),
         "updated_at": encode_timestamp(user.updated_at),
     }
+    if user.email is not None:
+        item["email"] = user.email
+        item["g_email"] = user.email
+    if user.username is not None:
+        item["username"] = user.username
+    return item
 
 
 def user_from_item(item: Mapping[str, Any]) -> User:
@@ -388,7 +392,8 @@ def user_from_item(item: Mapping[str, Any]) -> User:
     payload: dict[str, Any] = {
         "id": item["pk"],
         "display_name": item["display_name"],
-        "email": item["email"],
+        "email": item.get("email"),
+        "username": item.get("username", item.get("email")),
         "status": item["status"],
         "created_at": decode_timestamp(item["created_at"]),
         "updated_at": decode_timestamp(item["updated_at"]),
@@ -436,6 +441,7 @@ def organization_item(organization: Organization) -> dict[str, Any]:
         "slug": organization.slug,
         "type": str(organization.type),
         "status": str(organization.status),
+        "enabled": organization.enabled,
         "name_status": str(organization.name_status),
         "created_at": encode_timestamp(organization.created_at),
         "updated_at": encode_timestamp(organization.updated_at),
@@ -454,6 +460,7 @@ def organization_from_item(item: Mapping[str, Any]) -> Organization:
             "slug": item["slug"],
             "type": item["type"],
             "status": item["status"],
+            "enabled": item.get("enabled", True),
             "name_status": item.get("name_status", "confirmed"),
             "suspended_at": None
             if item.get("suspended_at") is None
@@ -1279,6 +1286,17 @@ class DynamoDbStorage:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_item(item)
 
+    def delete_unlinked_user(self, user_id: UserId) -> None:
+        try:
+            self._table("users").delete_item(
+                Key={"pk": str(user_id)},
+                ConditionExpression="attribute_exists(pk)",
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                raise EntityNotFoundError("user not found") from None
+            raise StorageError("storage delete failed") from None
+
     def update_user(self, user: User) -> User:
         try:
             self._client().update_item(
@@ -2044,6 +2062,15 @@ class DynamoDbStorage:
             raise EntityNotFoundError(f"no organization with id {organization_id!r}")
         return organization_from_item(item)
 
+    def get_organization_by_slug(self, slug: str) -> Organization:
+        constraint = self._get(
+            "unique_constraints",
+            {"pk": encode_constraint_key(ConstraintKind.ORGANIZATION_SLUG, slug)},
+        )
+        if constraint is None:
+            raise EntityNotFoundError("organization not found")
+        return self.get_organization(OrganizationId(constraint["entity_id"]))
+
     def update_organization(self, organization: Organization) -> Organization:
         current = self.get_organization(organization.id)
         if current.slug == organization.slug:
@@ -2052,12 +2079,13 @@ class DynamoDbStorage:
                     TableName=self._table_name("organizations"),
                     Key={"pk": str(organization.id)},
                     UpdateExpression=(
-                        "SET #name = :name, name_status = :name_status, updated_at = :updated_at"
+                        "SET #name = :name, name_status = :name_status, enabled = :enabled, updated_at = :updated_at"
                     ),
                     ExpressionAttributeNames={"#name": "name"},
                     ExpressionAttributeValues={
                         ":name": organization.name,
                         ":name_status": str(organization.name_status),
+                        ":enabled": organization.enabled,
                         ":updated_at": encode_timestamp(organization.updated_at),
                     },
                     ConditionExpression="attribute_exists(pk)",
@@ -2075,7 +2103,7 @@ class DynamoDbStorage:
                 "Key": {"pk": str(organization.id)},
                 "UpdateExpression": (
                     "SET #name = :name, #slug = :slug, name_status = :name_status, "
-                    "updated_at = :updated_at"
+                    "enabled = :enabled, updated_at = :updated_at"
                 ),
                 "ExpressionAttributeNames": {"#name": "name", "#slug": "slug"},
                 "ExpressionAttributeValues": {
@@ -2083,6 +2111,7 @@ class DynamoDbStorage:
                     ":slug": organization.slug,
                     ":old_slug": current.slug,
                     ":name_status": str(organization.name_status),
+                    ":enabled": organization.enabled,
                     ":updated_at": encode_timestamp(organization.updated_at),
                 },
                 "ConditionExpression": "attribute_exists(pk) AND #slug = :old_slug",

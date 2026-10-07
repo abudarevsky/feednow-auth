@@ -56,6 +56,7 @@ import contextlib
 import os
 import sys
 from collections.abc import Sequence
+from typing import cast
 
 from app.models.ids import OrganizationId
 from app.services.administration import (
@@ -71,6 +72,14 @@ from app.storage.contract import (
     Storage,
 )
 from app.storage.factory import create_storage, storage_settings_from_env
+from app.storage.local_admin import LocalAdminStorage
+from feednow_auth.demo_organizations import (
+    DemoProvisioningError,
+    create_demo_organization,
+    delete_demo_organization,
+    list_demo_organizations,
+    reset_demo_password,
+)
 
 #: Pinned CLI exit codes (see the module docstring table).
 EXIT_SUCCESS = 0
@@ -90,6 +99,11 @@ _REVOKE = "revoke"
 _LIST = "list"
 _ONBOARDING_STATUS = "onboarding-status"
 _ONBOARDING_RETRY = "onboarding-retry"
+_DEMO = "demo"
+_DEMO_CREATE = "create"
+_DEMO_DELETE = "delete"
+_DEMO_LIST = "list"
+_DEMO_RESET_PASSWORD = "reset-password"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -105,7 +119,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(
         dest="command",
         required=True,
-        metavar="{grant,revoke,list,onboarding-status,onboarding-retry}",
+        metavar="{grant,revoke,list,onboarding-status,onboarding-retry,demo}",
     )
     grant = subparsers.add_parser(_GRANT, help="promote the user for --email to admin")
     revoke = subparsers.add_parser(_REVOKE, help="demote the user for --email to user")
@@ -123,7 +137,85 @@ def _build_parser() -> argparse.ArgumentParser:
         subparsers.add_parser(command).add_argument(
             "--organization-id", required=True, metavar="<org_id>"
         )
+    demo = subparsers.add_parser(_DEMO, help="manage demo organizations and their Cognito login")
+    demo_commands = demo.add_subparsers(dest="demo_command", required=True)
+    create = demo_commands.add_parser(_DEMO_CREATE, help="create a demo organization and login")
+    create.add_argument("--name", required=True, metavar="<name>")
+    create.add_argument(
+        "--slug",
+        metavar="<slug>",
+        help=(
+            "FeedNow organization slug (defaults to normalized name); email-sign-in "
+            "pools use <slug>@demo.feednow.io"
+        ),
+    )
+    delete = demo_commands.add_parser(_DEMO_DELETE, help="delete a demo organization and its login")
+    delete.add_argument("--org", required=True, metavar="<slug>")
+    reset_password = demo_commands.add_parser(
+        _DEMO_RESET_PASSWORD, help="generate and set a new demo login password"
+    )
+    reset_password.add_argument("--org", required=True, metavar="<slug>")
+    demo_commands.add_parser(_DEMO_LIST, help="list demo organizations without credentials")
     return parser
+
+
+def _run_demo(storage: Storage, *, command: str, args: argparse.Namespace) -> int:
+    managed_storage = cast(LocalAdminStorage, storage)
+    try:
+        if command == _DEMO_CREATE:
+            organization, login_identifier, password = create_demo_organization(
+                managed_storage, name=args.name, slug=args.slug
+            )
+            onboarding = "pending; use onboarding-retry if dispatch is not configured"
+            base_url = os.environ.get("FEEDNOW_VISPECTOR_URL", "").strip()
+            credential = os.environ.get("FEEDNOW_VISPECTOR_SERVICE_SECRET", "")
+            if base_url and credential:
+                try:
+                    delivered = dispatch_organization_onboarding(
+                        managed_storage,
+                        organization.id,
+                        base_url=base_url,
+                        service_credential=credential,
+                    )
+                    onboarding = (
+                        "succeeded" if delivered else "pending; retry with onboarding-retry"
+                    )
+                except Exception:
+                    onboarding = "pending; retry with onboarding-retry"
+            print(
+                "Demo organization created\n\n"
+                f"Organization: {organization.name}\n"
+                f"Organization ID: {organization.id}\n"
+                f"Organization slug: {organization.slug}\n"
+                f"Vispector onboarding: {onboarding}\n"
+                f"Login: {login_identifier}\n"
+                f"Password: {password}\n\n"
+                "Store the password now. It cannot be retrieved later."
+            )
+            return EXIT_SUCCESS
+        if command == _DEMO_DELETE:
+            delete_demo_organization(managed_storage, slug=args.org)
+            print(f"deleted demo organization {args.org}")
+            return EXIT_SUCCESS
+        if command == _DEMO_RESET_PASSWORD:
+            login_identifier, password = reset_demo_password(managed_storage, slug=args.org)
+            print(
+                "Demo password reset\n\n"
+                f"Login: {login_identifier}\n"
+                f"Password: {password}\n\n"
+                "Store the password now. It cannot be retrieved later."
+            )
+            return EXIT_SUCCESS
+        print("NAME\tLOGIN\tSTATUS")
+        for name, username, status in list_demo_organizations(managed_storage):
+            print(f"{name}\t{username}\t{status}")
+        return EXIT_SUCCESS
+    except DemoProvisioningError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_UNEXPECTED
+    except Exception:
+        print(_UNEXPECTED_FAILURE, file=sys.stderr)
+        return EXIT_UNEXPECTED
 
 
 def _run_onboarding(storage: Storage, *, command: str, organization_id: str) -> int:
@@ -220,11 +312,12 @@ def _run_list(storage: Storage) -> int:
     except Exception:
         print(_UNEXPECTED_FAILURE, file=sys.stderr)
         return EXIT_UNEXPECTED
-    print("id\temail\tstatus\trole\tregistered_at\tlast_login")
+    print("id\tusername\temail\tstatus\trole\tregistered_at\tlast_login")
     for user in users:
         registered = user.created_at.isoformat().replace("+00:00", "Z")
         print(
-            f"{user.id}\t{user.email}\t{user.status}\t{user.application_role}"
+            f"{user.id}\t{user.username or ''}\t{user.email or ''}\t{user.status}"
+            f"\t{user.application_role}"
             f"\t{registered}\tnot recorded"
         )
     return EXIT_SUCCESS
@@ -274,6 +367,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_UNEXPECTED
         if args.command == _LIST:
             return _run_list(storage)
+        if args.command == _DEMO:
+            return _run_demo(storage, command=args.demo_command, args=args)
         if args.command in {_ONBOARDING_STATUS, _ONBOARDING_RETRY}:
             return _run_onboarding(
                 storage, command=args.command, organization_id=args.organization_id

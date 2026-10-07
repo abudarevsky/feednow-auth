@@ -15,7 +15,11 @@ signatures use domain values and typed results;
 adapters do not mint identifiers or timestamps.
 
 `open_sqlite_storage` is used for local persistence. SQLite schema migrations
-are forward-only; the current schema version is 5. `open_dynamodb_storage`
+are forward-only; the current schema version is 7. Organization rows store
+their independent `enabled` flag; migration backfills existing organizations
+to enabled. The user migration allows a missing email and backfills the
+Cognito username projection from existing email values. New managed demo users
+store their username and no email. `open_dynamodb_storage`
 provides the AWS adapter. The DynamoDB schema and deployment table definitions
 are maintained together. Both adapters implement the same core contract and
 the shared storage-conformance suite.

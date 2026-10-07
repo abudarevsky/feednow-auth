@@ -90,7 +90,7 @@ def build_service_auth_router(
             organization = storage.get_organization(OrganizationId(api_key.organization_id))
         except EntityNotFoundError as exc:
             raise HTTPException(status_code=403, detail="service access denied") from exc
-        if organization.status is not OrganizationStatus.ACTIVE:
+        if not organization.enabled or organization.status is not OrganizationStatus.ACTIVE:
             raise HTTPException(status_code=403, detail="service access denied")
 
         return ApiKeyValidationResponse(
@@ -123,6 +123,7 @@ def build_service_auth_router(
             raise HTTPException(status_code=403, detail="service access denied") from exc
         if (
             user.status is not UserStatus.ACTIVE
+            or not organization.enabled
             or organization.status is not OrganizationStatus.ACTIVE
             or membership.status is not MembershipStatus.ACTIVE
         ):
@@ -310,6 +311,7 @@ def build_service_auth_router(
         current_version = membership_permission_version(membership.role, membership.created_at)
         if (
             user.status is not UserStatus.ACTIVE
+            or not organization.enabled
             or organization.status is not OrganizationStatus.ACTIVE
             or membership.status is not MembershipStatus.ACTIVE
             or current_version != code.permission_version

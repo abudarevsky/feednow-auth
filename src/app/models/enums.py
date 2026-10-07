@@ -94,6 +94,8 @@ class OrganizationType(StrEnum):
     PERSONAL = "personal"
     CUSTOMER = "customer"
     INTERNAL = "internal"
+    STANDARD = "standard"
+    DEMO = "demo"
 
 
 class ApiKeyEnvironment(StrEnum):

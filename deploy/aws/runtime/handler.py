@@ -371,12 +371,12 @@ def build_app(
     service_credential = ""
     # Preserve the injected-config composition seam: only read this optional
     # setting when configuration is sourced from the runtime environment.
-    if (config is None or environ is not None) and (
-        env.get(SERVICE_CREDENTIAL_CIPHERTEXT_ENV) or ""
-    ).strip():
-        service_credential = KmsEncryptedServiceCredential(
-            environment=resolved.environment, environ=env
-        ).current()
+    if config is None or environ is not None:
+        service_credential = (env.get("FEEDNOW_VISPECTOR_SERVICE_SECRET") or "").strip()
+        if not service_credential and (env.get(SERVICE_CREDENTIAL_CIPHERTEXT_ENV) or "").strip():
+            service_credential = KmsEncryptedServiceCredential(
+                environment=resolved.environment, environ=env
+            ).current()
     routers.append(
         build_service_auth_router(
             storage,

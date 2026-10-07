@@ -131,7 +131,7 @@ def classify_access(
     classify as ``inactive_organization``); the caller renders every denial
     as the same 403, so only the audit distinguishes them.
     """
-    if organization.status is not OrganizationStatus.ACTIVE:
+    if not organization.enabled or organization.status is not OrganizationStatus.ACTIVE:
         return AccessDecision(AccessOutcome.INACTIVE_ORGANIZATION)
     if membership is None:
         return AccessDecision(AccessOutcome.NO_MEMBERSHIP)

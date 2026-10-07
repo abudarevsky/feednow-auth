@@ -9,6 +9,7 @@ from app.models.enums import MembershipRole, MembershipStatus, UserStatus
 from app.models.ids import OrganizationId, UserId
 from app.models.pagination import PageParams
 from app.models.timestamps import UtcDatetime
+from app.models.user import Email, Username
 
 
 class AdminSummary(ApiSchema):
@@ -23,7 +24,8 @@ class AdminOrganizationQuery(PageParams):
 class AdminMember(ApiSchema):
     user_id: UserId
     display_name: str
-    email: str
+    username: Username | None = None
+    email: Email | None = None
     account_status: UserStatus
     membership_status: MembershipStatus
     role: MembershipRole
@@ -34,8 +36,11 @@ class AdminMember(ApiSchema):
 class AdminOrganization(ApiSchema):
     id: OrganizationId
     name: str
+    slug: str
+    type: str
     name_status: str
     status: str
+    enabled: bool = True
     suspended_at: UtcDatetime | None = None
     created_at: UtcDatetime
     member_count: int
@@ -44,10 +49,15 @@ class AdminOrganization(ApiSchema):
 
 
 class AdminOrganizationDetail(AdminOrganization):
-    type: str
     updated_at: UtcDatetime
     services: list[dict[str, str]]
     api_keys: list[dict[str, object]]
+
+
+class AdminOrganizationStateRequest(ApiSchema):
+    """Empty body required by the versioned POST enable/disable actions."""
+
+    pass
 
 
 class AdminSuspendRequest(ApiSchema):
@@ -67,6 +77,7 @@ __all__ = [
     "AdminOrganization",
     "AdminOrganizationDetail",
     "AdminOrganizationQuery",
+    "AdminOrganizationStateRequest",
     "AdminReactivateRequest",
     "AdminSummary",
 ]

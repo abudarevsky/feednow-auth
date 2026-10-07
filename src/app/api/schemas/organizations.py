@@ -57,6 +57,7 @@ class OrganizationResponse(ApiSchema):
     slug: OrganizationSlug
     type: OrganizationType
     status: OrganizationStatus
+    enabled: bool = True
     name_status: OrganizationNameStatus
     suspended_at: UtcDatetime | None = None
     created_at: UtcDatetime

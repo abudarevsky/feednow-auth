@@ -100,6 +100,7 @@ EMAIL_MISSING_MESSAGE: Final = "registration requires an email attribute"
 EMAIL_TOO_LONG_MESSAGE: Final = "registration email exceeds the supported length"
 GOOGLE_VERIFICATION_MISSING_MESSAGE: Final = "Google email verification evidence is missing"
 GOOGLE_VERIFICATION_ATTRIBUTE: Final = "custom:g_verified"
+DEMO_PROVISIONING_METADATA_KEY: Final = "feednow_demo_provisioning"
 PRE_AUTHENTICATION_SOURCE: Final = "PreAuthentication_Authentication"
 
 
@@ -137,6 +138,7 @@ class CognitoRegistrationEvent:
     client_id: str
     trigger_source: str
     user_attributes: Mapping[str, Any]
+    client_metadata: Mapping[str, Any]
 
 
 def _require_text(value: object) -> str:
@@ -182,6 +184,9 @@ def parse_cognito_trigger_event(event: Mapping[str, Any]) -> CognitoRegistration
     user_attributes = request.get("userAttributes")
     if not isinstance(user_attributes, Mapping):
         raise CognitoTriggerRejectionError(EVENT_STRUCTURE_MESSAGE)
+    client_metadata = request.get("clientMetadata", {})
+    if not isinstance(client_metadata, Mapping):
+        raise CognitoTriggerRejectionError(EVENT_STRUCTURE_MESSAGE)
     return CognitoRegistrationEvent(
         version=version,
         region=region,
@@ -190,6 +195,7 @@ def parse_cognito_trigger_event(event: Mapping[str, Any]) -> CognitoRegistration
         client_id=client_id,
         trigger_source=trigger_source,
         user_attributes=user_attributes,
+        client_metadata=client_metadata,
     )
 
 
@@ -243,7 +249,12 @@ def handle_pre_sign_up(event: Mapping[str, Any]) -> dict[str, Any]:
     """
     parsed = parse_cognito_trigger_event(event)
     _require_registration_source(parsed, prefix=PRE_SIGN_UP_SOURCE_PREFIX)
-    _require_valid_registration_email(parsed)
+    managed_demo = (
+        parsed.trigger_source == TRIGGER_SOURCE_PRE_SIGN_UP_ADMIN_CREATE
+        and parsed.client_metadata.get(DEMO_PROVISIONING_METADATA_KEY) == "true"
+    )
+    if not managed_demo:
+        _require_valid_registration_email(parsed)
     result = _event_with_response(event)
     if parsed.trigger_source == TRIGGER_SOURCE_PRE_SIGN_UP_EXTERNAL and _is_google_username(
         parsed.user_name

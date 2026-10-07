@@ -544,7 +544,7 @@ class _SpyRouterFactory:
 
 
 def _spy_routers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _SpyRouterFactory]:
-    """Replace all five router factories in the composition root."""
+    """Replace router factories in the composition root."""
     spies = {
         name: _SpyRouterFactory()
         for name in (
@@ -553,6 +553,7 @@ def _spy_routers(monkeypatch: pytest.MonkeyPatch) -> dict[str, _SpyRouterFactory
             "build_members_router",
             "build_api_keys_router",
             "build_oauth_router",
+            "build_service_auth_router",
         )
     }
     for name, spy in spies.items():
@@ -650,6 +651,30 @@ def test_build_app_allows_enabled_registered_service_as_oauth_return_target(
         "https://admin.feednow.test",
         "https://inspect.feednow.test",
     )
+
+
+def test_build_app_uses_service_credential_from_environment_without_kms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spies = _spy_routers(monkeypatch)
+
+    def unexpected_decrypt(_self: Any) -> str:
+        raise AssertionError("plain environment credential should not call KMS")
+
+    monkeypatch.setattr(
+        runtime_handler.KmsEncryptedServiceCredential, "current", unexpected_decrypt
+    )
+    _build_with_fakes(
+        environ={
+            **FAKE_ENV,
+            **SESSION_ENV,
+            "FEEDNOW_VISPECTOR_SERVICE_SECRET": "local-env-service-secret",
+            "FEEDNOW_VISPECTOR_URL": "https://inspect.feednow.test",
+        }
+    )
+
+    service_auth_kwargs = spies["build_service_auth_router"].calls[0][1]
+    assert service_auth_kwargs["service_credential"] == "local-env-service-secret"
 
 
 def test_build_app_reads_the_pepper_once_with_the_gate_on() -> None:

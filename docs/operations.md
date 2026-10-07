@@ -69,8 +69,10 @@ To enable the local Vispector registration and handoff, set
 `FEEDNOW_VISPECTOR_SERVICE_SECRET` in `deploy/docker/.env` before starting it.
 The browser-facing URL is used for the authorization handoff; the dispatch URL
 lets the FeedNow container call the host-published Vispector API directly.
-The local service secret is for Docker development only. Production receives
-only the KMS ciphertext input described below. Role grants are intersected
+The local service secret is for Docker development only. AWS deployments use
+the shared environment secret file described below; KMS-encrypted configuration
+remains available for deployments that already use it. Role grants are
+intersected
 with `FEEDNOW_VISPECTOR_PERMISSIONS`; the local default is
 `projects:read,projects:write,inspect`.
 
@@ -104,15 +106,11 @@ docker compose --profile cognito --profile ui exec \
 ```
 
 To exercise service API-key validation in this composition, create a Vispector
-key for an active organization through the authenticated API-key endpoint with
-exactly the `vispector:inspection:run` scope, then call the local service
-endpoint with both the service credential and key. The current account UI
-creates empty-scope keys, which this endpoint correctly rejects:
-Create a Vispector key for an active organization through the authenticated
-API-key endpoint with exactly the `vispector:inspection:run` scope, then call
-the local service endpoint with both the service credential and key. The
-current account UI creates empty-scope keys, which this endpoint correctly
-rejects:
+key for an active organization through the account UI or authenticated
+API-key endpoint, then call the local service endpoint with both the service
+credential and key. The account UI fixes the service and
+`vispector:inspection:run` scope server-side; callers cannot request additional
+scopes:
 
 ```bash
 set -a
@@ -139,13 +137,14 @@ FEEDNOW_DYNAMODB_LOCAL_ENDPOINT=http://localhost:8000 \
 
 For AWS, configure the registered origin with `FEEDNOW_VISPECTOR_URL`, and
 optionally set the callback path, enabled flag, and permission allowlist using
-the matching `FEEDNOW_VISPECTOR_*` settings. Supply only
-`FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64` in the CDK environment
-file. Encrypt the credential with the stack's environment-scoped KMS key and
-encryption context `environment=<dev|staging|prod>`; Lambda decrypts it in
-memory. Rotate it by replacing the encrypted value and deploying the updated
-stack. Never put the plaintext credential in Lambda environment configuration,
-the CDK file, or source control.
+the matching `FEEDNOW_VISPECTOR_*` settings. The current deployment accepts
+`FEEDNOW_VISPECTOR_SERVICE_SECRET` in FeedNow's ignored
+`.env.<environment>.secrets` file; set the same random value in Vispector's
+ignored CDK environment file. Keep both files owner-only (`chmod 600`) and out
+of source control. CDK passes the value to the Lambda environment, so restrict
+deployment and CloudFormation access to the operators who need it. Rotate by
+updating both files and deploying both stacks. Existing KMS-encrypted service
+credential configuration remains supported for deployments that already use it.
 
 ## DynamoDB Local
 
@@ -168,14 +167,23 @@ credentials. Without a reachable endpoint, marked cases skip with a reason.
 ## AWS deployment
 
 AWS deployments target `dev`, `staging`, or `prod` through standard AWS CLI
-profiles. FeedNow settings are non-secret files at
-`deploy/aws/cdk/.env.<environment>`; copy `deploy/aws/cdk/.env.example` for
-each target and set `FEEDNOW_ENV`, `AWS_ACCOUNT_ID`, `AWS_REGION`, and
-`ACCOUNT_BASE_URL`. Set `FEEDNOW_COGNITO_DOMAIN` when the imported pool's
-existing hosted domain does not use the default `feednow-auth-<environment>`
-prefix. The file must not contain AWS credentials, profile names, Google OAuth
-secrets, or plaintext API-key pepper/client-secret values. `.env.*` is ignored
-by Git; the operator stores only KMS ciphertext for Lambda secrets.
+profiles. FeedNow settings use two ignored files per environment. Copy
+`deploy/aws/cdk/.env.example` to `.env.<environment>` and set
+`FEEDNOW_ENV`, `AWS_ACCOUNT_ID`, `AWS_REGION`, and `ACCOUNT_BASE_URL`. Copy
+`deploy/aws/cdk/.env.secrets.example` to `.env.<environment>.secrets` and set
+`FEEDNOW_VISPECTOR_SERVICE_SECRET` to the same random value as Vispector's
+`FEEDNOW_SERVICE_SECRET`. The CDK entrypoint and deploy wrapper preload the
+secret file into the process environment without evaluating it as shell code.
+The service credential is passed to Lambda as an environment variable.
+
+KMS ciphertext for the Cognito client secret and API-key pepper stays in
+`.env.<environment>`; the deployment operator writes those values after
+encrypting them with the environment KMS key. Never put their plaintext values
+in either file. The Cognito issuer and UserInfo endpoint are derived by CDK
+from the imported pool and its configured hosted domain, so do not add
+`FEEDNOW_COGNITO_ISSUER` or `FEEDNOW_COGNITO_USERINFO_URL`. Do not put AWS
+credentials or profile names in either file. Both files are ignored by Git;
+keep them owner-only (`chmod 600`).
 
 Preview the backend change and then deploy it with an explicit standard AWS
 profile and FeedNow environment:
@@ -246,6 +254,40 @@ deploy/aws/feednow-auth.sh --profile work --env prod ensure-google --reset
 Production data resources use retention policies. Review the selected
 `cdk diff` and CloudFormation changes before deployment; never infer the target
 from a profile name or fall back to `prod`.
+
+## Rotate shared FeedNow and Vispector deployment credentials
+
+The local rotation helper updates the matching FeedNow service credential and
+Vispector service credential, plus Vispector's independent API-key cache
+digest. It does not deploy either service. By default it validates the target
+files and makes no changes; `--update` is required to rotate values:
+
+```bash
+python deploy/aws/rotate_shared_auth_secrets.py --env prod
+python deploy/aws/rotate_shared_auth_secrets.py --env prod --update
+```
+
+To rotate the remote-node auth and callback keys in the same operation, first
+create and configure `vispector/deploy/remote/.env` from its example. Then run
+one rotation command with `--include-remote-node`:
+
+```bash
+cp ../vispector/deploy/remote/.env.example ../vispector/deploy/remote/.env
+# Set the remote node's other required local values in that file.
+python deploy/aws/rotate_shared_auth_secrets.py --env prod --update --include-remote-node
+```
+
+The option calls Vispector's `rotate_remote_node_keys.py` to update the CDK and
+remote-node files together. The helper prints no credential values. Rotate
+only during a coordinated maintenance window: manually redeploy FeedNow and
+Vispector after rotation, and update/restart the remote-node runtime when its
+keys changed. To copy the new pair into an external RunPod template, use the
+existing rotation utility's explicit `--show-values` option after rotation;
+the shared helper omits credential values from routine output. The script
+intentionally leaves the FeedNow API-key pepper,
+Cognito secrets, model-provider API keys, and RunPod API credential untouched.
+Keep all generated environment files owner-only (`chmod 600`) and do not commit
+them.
 
 The deployed browser-session routes use an all-or-nothing set of seven Lambda
 environment values: `FEEDNOW_COGNITO_AUTHORIZE_URL`,
@@ -343,10 +385,16 @@ upload steps.
 ## Operator AWS access
 
 Run the administrator CLI with a separate restricted role scoped to the
-environment-prefixed DynamoDB tables and required indexes. It needs user
-resolution and application-role reads, conditional updates and transaction
-checks, membership and organization reads for the audit anchor, and append-only
-audit-event writes. It does not need `Scan`, Cognito, SSM, or pepper access. The Lambda execution role is a separate principal.
+environment-prefixed DynamoDB tables and required indexes. The existing
+application-role commands need user resolution, conditional updates and
+transaction checks, membership and organization reads for the audit anchor,
+and append-only audit-event writes. They do not need Cognito, SSM, or pepper
+access. Demo lifecycle commands additionally need demo organization storage
+operations and Cognito `DescribeUserPool`, `DescribeUserPoolClient`,
+`AdminGetUser`, `AdminCreateUser`, `AdminSetUserPassword`, and
+`AdminDeleteUser`. Grant those Cognito actions only to operators authorized to
+manage demo identities. `demo list` requires organization-search read access.
+The Lambda execution role is a separate principal.
 
 ## Verification commands
 

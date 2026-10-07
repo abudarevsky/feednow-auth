@@ -148,7 +148,7 @@ from app.storage.contract import (
 #: only with a spec-revision-approved migration story recorded in
 #: :data:`_MIGRATIONS`; an unrecognized stamp is rejected loudly rather than
 #: reinterpreted.
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 7
 
 #: Wall-clock bound (ms) for lock contention under WAL, per the breakdown's
 #: connection model (concurrency tests use barriers + WAL, never sleeps).
@@ -171,7 +171,8 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
     CREATE TABLE IF NOT EXISTS users (
         id               TEXT PRIMARY KEY,
         display_name     TEXT NOT NULL,
-        email            TEXT NOT NULL,
+        email            TEXT,
+        username         TEXT,
         status           TEXT NOT NULL,
         created_at       TEXT NOT NULL,
         updated_at       TEXT NOT NULL,
@@ -199,6 +200,7 @@ _SCHEMA_STATEMENTS: Final[tuple[str, ...]] = (
         slug       TEXT NOT NULL,
         type       TEXT NOT NULL,
         status     TEXT NOT NULL,
+        enabled    INTEGER NOT NULL DEFAULT 1,
         name_status TEXT NOT NULL DEFAULT 'confirmed',
         suspended_at TEXT,
         created_at TEXT NOT NULL,
@@ -290,6 +292,22 @@ _MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     4: (
         "ALTER TABLE organizations ADD COLUMN suspended_at TEXT",
         "PRAGMA user_version = 5",
+    ),
+    5: (
+        "ALTER TABLE organizations ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+        "PRAGMA user_version = 6",
+    ),
+    6: (
+        "CREATE TABLE users_new (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, email TEXT, "
+        "username TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+        "application_role TEXT NOT NULL DEFAULT 'user')",
+        "INSERT INTO users_new (id, display_name, email, username, status, created_at, updated_at, application_role) "
+        "SELECT id, display_name, email, email, status, created_at, updated_at, application_role FROM users",
+        "DROP TABLE users",
+        "ALTER TABLE users_new RENAME TO users",
+        "CREATE INDEX users_email_lookup ON users (email)",
+        "CREATE INDEX users_application_role_lookup ON users (application_role)",
+        "PRAGMA user_version = 7",
     ),
 }
 
@@ -498,6 +516,7 @@ def user_from_row(row: sqlite3.Row) -> User:
         {
             "id": row["id"],
             "display_name": row["display_name"],
+            "username": row["username"],
             "email": row["email"],
             "status": row["status"],
             "application_role": row["application_role"],
@@ -530,6 +549,7 @@ def organization_from_row(row: sqlite3.Row) -> Organization:
             "slug": row["slug"],
             "type": row["type"],
             "status": row["status"],
+            "enabled": bool(row["enabled"]),
             "name_status": row["name_status"],
             "suspended_at": None
             if row["suspended_at"] is None
@@ -894,9 +914,11 @@ class SQLiteStorage:
         exception escapes initialization either.
         """
         try:
+            conn.execute("PRAGMA foreign_keys = OFF")
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("PRAGMA user_version").fetchone()[0] != version:
                 conn.rollback()
+                conn.execute("PRAGMA foreign_keys = ON")
                 return
             current = version
             while current != SCHEMA_VERSION:
@@ -917,8 +939,16 @@ class SQLiteStorage:
                     )
                 current = stamped
             conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+            if conn.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise StorageError("schema migration left invalid references")
+        except StorageError:
+            conn.rollback()
+            conn.execute("PRAGMA foreign_keys = ON")
+            raise
         except sqlite3.Error as exc:
             conn.rollback()
+            conn.execute("PRAGMA foreign_keys = ON")
             raise StorageError("schema migration failed") from exc
 
     def close(self) -> None:
@@ -946,12 +976,13 @@ class SQLiteStorage:
         """
         conn.execute(
             "INSERT INTO users"
-            " (id, display_name, email, status, created_at, updated_at, application_role)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " (id, display_name, email, username, status, created_at, updated_at, application_role)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(user.id),
                 user.display_name,
                 user.email,
+                user.username,
                 str(user.status),
                 encode_timestamp(user.created_at),
                 encode_timestamp(user.updated_at),
@@ -990,6 +1021,17 @@ class SQLiteStorage:
         if row is None:
             raise EntityNotFoundError(f"no user with id {user_id!r}")
         return user_from_row(row)
+
+    def delete_unlinked_user(self, user_id: UserId) -> None:
+        conn = self._connection()
+        try:
+            cursor = conn.execute("DELETE FROM users WHERE id = ?", (str(user_id),))
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            raise ReferenceNotFoundError("user is already linked") from exc
+        if cursor.rowcount != 1:
+            raise EntityNotFoundError("user not found")
+        conn.commit()
 
     def update_user(self, user: User) -> User:
         conn = self._connection()
@@ -1224,14 +1266,15 @@ class SQLiteStorage:
         """
         conn.execute(
             "INSERT INTO organizations"
-            " (id, name, slug, type, status, name_status, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " (id, name, slug, type, status, enabled, name_status, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(organization.id),
                 organization.name,
                 organization.slug,
                 str(organization.type),
                 str(organization.status),
+                int(organization.enabled),
                 str(organization.name_status),
                 encode_timestamp(organization.created_at),
                 encode_timestamp(organization.updated_at),
@@ -1273,15 +1316,24 @@ class SQLiteStorage:
             raise EntityNotFoundError(f"no organization with id {organization_id!r}")
         return organization_from_row(row)
 
+    def get_organization_by_slug(self, slug: str) -> Organization:
+        row = self._connection().execute(
+            "SELECT * FROM organizations WHERE slug = ?", (slug,)
+        ).fetchone()
+        if row is None:
+            raise EntityNotFoundError("organization not found")
+        return organization_from_row(row)
+
     def update_organization(self, organization: Organization) -> Organization:
         conn = self._connection()
         try:
             cursor = conn.execute(
-                "UPDATE organizations SET name = ?, slug = ?, name_status = ?, updated_at = ? WHERE id = ?",
+                "UPDATE organizations SET name = ?, slug = ?, name_status = ?, enabled = ?, updated_at = ? WHERE id = ?",
                 (
                     organization.name,
                     organization.slug,
                     str(organization.name_status),
+                    int(organization.enabled),
                     encode_timestamp(organization.updated_at),
                     str(organization.id),
                 ),

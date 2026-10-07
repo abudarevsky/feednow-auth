@@ -13,6 +13,10 @@ Usage:
   scripts/feednow-admin.sh [--profile AWS_PROFILE] [--env dev|staging|prod] grant --email ADDRESS
   scripts/feednow-admin.sh [--profile AWS_PROFILE] [--env dev|staging|prod] revoke --email ADDRESS
   scripts/feednow-admin.sh [--profile AWS_PROFILE] [--env dev|staging|prod] list
+  scripts/feednow-admin.sh --profile AWS_PROFILE --env dev|staging|prod demo create --name NAME [--slug SLUG]
+  scripts/feednow-admin.sh --profile AWS_PROFILE --env dev|staging|prod demo delete --org SLUG
+  scripts/feednow-admin.sh --profile AWS_PROFILE --env dev|staging|prod demo reset-password --org SLUG
+  scripts/feednow-admin.sh [--profile AWS_PROFILE] [--env dev|staging|prod] demo list
 
 Without --profile, commands run in the local Cognito Docker composition.
 AWS mode requires both --profile and --env. --env selects
@@ -82,6 +86,11 @@ if [[ -n "$AWS_PROFILE_NAME" ]]; then
   export FEEDNOW_STORAGE_BACKEND=dynamodb
   cd "$ROOT"
   exec uv run -- python -m feednow_auth.admin "$@"
+fi
+
+if [[ "${1:-}" == "demo" && "${2:-}" != "list" ]]; then
+  echo "error: demo create/delete/reset-password require --profile and --env to manage the configured Cognito User Pool" >&2
+  exit 2
 fi
 
 # Use the app container's configured storage backend and credentials. This

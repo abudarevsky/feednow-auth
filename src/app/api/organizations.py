@@ -89,6 +89,7 @@ def _to_response(organization: Organization) -> OrganizationResponse:
         slug=organization.slug,
         type=organization.type,
         status=organization.status,
+        enabled=organization.enabled,
         name_status=organization.name_status,
         suspended_at=organization.suspended_at,
         created_at=organization.created_at,
@@ -149,7 +150,7 @@ def build_organizations_router(
             current_organization = storage.get_organization(identity.context.organization_id)
         except EntityNotFoundError as exc:
             raise HTTPException(status_code=403, detail="organization access is suspended") from exc
-        if current_organization.status is not OrganizationStatus.ACTIVE:
+        if not current_organization.enabled or current_organization.status is not OrganizationStatus.ACTIVE:
             raise HTTPException(status_code=403, detail="organization access is suspended")
         try:
             created = organization_service.create_organization(

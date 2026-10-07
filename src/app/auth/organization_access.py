@@ -358,7 +358,7 @@ def build_organization_scope_dependency(
         # API-key branch, fixed precedence (decision 6): organization status
         # -> tenancy -> scope. The actor for every audit is the ``key_``
         # identity (decision 7).
-        if organization.status is not OrganizationStatus.ACTIVE:
+        if not organization.enabled or organization.status is not OrganizationStatus.ACTIVE:
             _deny(
                 storage,
                 context.actor_id,

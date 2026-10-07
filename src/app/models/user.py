@@ -36,6 +36,10 @@ DisplayText = Annotated[str, StringConstraints(min_length=1, max_length=255)]
 #: module docstring.
 Email = Annotated[str, StringConstraints(min_length=1, max_length=320)]
 
+# Cognito's stable sign-in name; absent only on legacy records predating the
+# username projection, which are backfilled from their existing email.
+Username = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+
 
 class User(BaseModel):
     """A FeedNow application user."""
@@ -44,7 +48,8 @@ class User(BaseModel):
 
     id: UserId
     display_name: DisplayText
-    email: Email
+    username: Username | None = None
+    email: Email | None = None
     status: UserStatus
     #: Global application role (Phase 12). The explicit default makes ``USER``
     #: the only value any writer obtains without naming it; provisioning sets
@@ -55,4 +60,4 @@ class User(BaseModel):
     updated_at: UtcDatetime
 
 
-__all__ = ["Email", "User"]
+__all__ = ["Email", "User", "Username"]

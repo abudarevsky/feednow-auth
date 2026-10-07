@@ -9,6 +9,7 @@ from app.api.schemas.admin import (
     AdminMember,
     AdminOrganization,
     AdminOrganizationDetail,
+    AdminOrganizationStateRequest,
     AdminReactivateRequest,
     AdminSummary,
     AdminSuspendRequest,
@@ -18,7 +19,7 @@ from app.auth.application_access import build_application_admin_user_dependency
 from app.auth.cognito import AccessTokenVerifier, ProfileSource
 from app.auth.pepper import PepperSource
 from app.auth.session import SessionManager
-from app.models.enums import MembershipRole
+from app.models.enums import MembershipRole, OrganizationType
 from app.models.ids import OrganizationId
 from app.models.pagination import PageParams
 from app.models.timestamps import utc_now
@@ -33,6 +34,8 @@ _DETAIL_SPEC = endpoint_for("get_admin_organization")
 _MEMBERS_SPEC = endpoint_for("list_admin_organization_members")
 _SUSPEND_SPEC = endpoint_for("suspend_admin_organization")
 _REACTIVATE_SPEC = endpoint_for("reactivate_admin_organization")
+_ENABLE_SPEC = endpoint_for("enable_admin_organization")
+_DISABLE_SPEC = endpoint_for("disable_admin_organization")
 _DELETE_SPEC = endpoint_for("delete_admin_organization")
 
 
@@ -61,6 +64,7 @@ def build_admin_router(
                 AdminMember(
                     user_id=str(user.id),
                     display_name=user.display_name,
+                    username=user.username,
                     email=user.email,
                     account_status=str(user.status),
                     membership_status=membership.status,
@@ -117,8 +121,11 @@ def build_admin_router(
                 AdminOrganization(
                     id=str(org.id),
                     name=org.name,
+                    type=str(org.type),
+                    slug=org.slug,
                     name_status=str(org.name_status),
                     status=str(org.status),
+                    enabled=org.enabled,
                     suspended_at=org.suspended_at,
                     created_at=org.created_at,
                     member_count=len(members),
@@ -144,14 +151,15 @@ def build_admin_router(
         return AdminOrganizationDetail(
             id=str(org.id),
             name=org.name,
+            slug=org.slug,
             name_status=str(org.name_status),
             status=str(org.status),
+            enabled=org.enabled,
             suspended_at=org.suspended_at,
             created_at=org.created_at,
             member_count=len(members),
             members=members,
             is_current_user_owner=current_user_owns_organization(org.id, principal),
-            type=str(org.type),
             updated_at=org.updated_at,
             services=[{"id": "vispector", "name": "Vispector"}],
             api_keys=[
@@ -185,6 +193,7 @@ def build_admin_router(
                 AdminMember(
                     user_id=str(user.id),
                     display_name=user.display_name,
+                    username=user.username,
                     email=user.email,
                     account_status=str(user.status),
                     membership_status=membership.status,
@@ -220,6 +229,34 @@ def build_admin_router(
             raise HTTPException(status_code=404, detail="organization not found") from exc
         return Response(status_code=204)
 
+    @router.post(_ENABLE_SPEC.path.removeprefix("/v1/admin"), status_code=204)
+    def enable_organization(
+        organization_id: OrganizationId,
+        _principal: Annotated[User, Depends(current_admin)],
+        _request: AdminOrganizationStateRequest | None = None,
+    ) -> Response:
+        try:
+            organization = storage.get_organization(organization_id)
+        except EntityNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="organization not found") from exc
+        updated = organization.model_copy(update={"enabled": True, "updated_at": utc_now()})
+        storage.update_organization(updated)
+        return Response(status_code=204)
+
+    @router.post(_DISABLE_SPEC.path.removeprefix("/v1/admin"), status_code=204)
+    def disable_organization(
+        organization_id: OrganizationId,
+        _principal: Annotated[User, Depends(current_admin)],
+        _request: AdminOrganizationStateRequest | None = None,
+    ) -> Response:
+        try:
+            organization = storage.get_organization(organization_id)
+        except EntityNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="organization not found") from exc
+        updated = organization.model_copy(update={"enabled": False, "updated_at": utc_now()})
+        storage.update_organization(updated)
+        return Response(status_code=204)
+
     @router.post(_DELETE_SPEC.path.removeprefix("/v1/admin"), status_code=204)
     def delete_organization(
         organization_id: OrganizationId,
@@ -229,6 +266,11 @@ def build_admin_router(
         reject_owner_destructive_action(organization_id, principal)
         try:
             organization = storage.get_organization(organization_id)
+            if organization.type is OrganizationType.DEMO:
+                raise HTTPException(
+                    status_code=409,
+                    detail="demo organizations can only be deleted with the operator CLI",
+                )
             if request.organization_name != organization.name:
                 raise HTTPException(
                     status_code=409, detail="organization confirmation does not match"

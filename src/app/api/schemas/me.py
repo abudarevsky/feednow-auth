@@ -21,7 +21,7 @@ from app.api.schemas.common import ApiSchema
 from app.models.enums import ApplicationRole, UserStatus
 from app.models.ids import UserId
 from app.models.timestamps import UtcDatetime
-from app.models.user import DisplayText, Email
+from app.models.user import DisplayText, Email, Username
 
 
 class MeResponse(ApiSchema):
@@ -29,7 +29,8 @@ class MeResponse(ApiSchema):
 
     id: UserId
     display_name: DisplayText
-    email: Email
+    username: Username | None = None
+    email: Email | None = None
     status: UserStatus
     application_role: ApplicationRole
     created_at: UtcDatetime

@@ -286,6 +286,7 @@ def build_provisioning_batch(
     user = User(
         id=ids.user_id,
         display_name=display_name,
+        username=claims.username or profile.email,
         email=profile.email,
         status=UserStatus.ACTIVE,
         application_role=ApplicationRole.USER,
@@ -521,7 +522,7 @@ def build_user_context(
             organization = storage.get_organization(organization_id)
         except EntityNotFoundError as exc:
             raise NoActiveOrganizationError() from exc
-        if organization.status is not OrganizationStatus.ACTIVE:
+        if not organization.enabled or organization.status is not OrganizationStatus.ACTIVE:
             raise NoActiveOrganizationError()
     try:
         membership = storage.get_membership(organization_id=organization.id, user_id=user.id)

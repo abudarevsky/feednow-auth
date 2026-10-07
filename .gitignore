@@ -13,6 +13,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+!.env.secrets.example
 
 # Build artifacts
 build/

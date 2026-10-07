@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Safe loader for non-secret FeedNow deployment settings. It parses KEY=value
-# lines and never evaluates the file as shell code.
+# Safe loader for FeedNow deployment settings. It parses KEY=value lines and
+# never evaluates the file as shell code; ignored env files may hold secrets.
 
 feednow_load_env() {
   local root="$1" expected_env="$2" config="$1/deploy/aws/cdk/.env.$2"
+  local secrets="$config.secrets"
   local line key value
   [[ -r "$config" ]] || { echo "Missing environment config: $config" >&2; return 2; }
 
@@ -35,6 +36,37 @@ feednow_load_env() {
     printf -v "$key" '%s' "$value"
     export "$key"
   done < "$config"
+
+  if [[ -e "$secrets" ]]; then
+    [[ -r "$secrets" ]] || { echo "Unreadable secret environment config: $secrets" >&2; return 2; }
+    python3 -c 'import os, stat, sys; sys.exit(0 if stat.S_IMODE(os.stat(sys.argv[1]).st_mode) & 0o077 == 0 else 1)' "$secrets" || {
+      echo "Secret environment config must be owner-only (chmod 600): $secrets" >&2
+      return 2
+    }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ "$line" =~ ^[[:space:]]*([A-Z][A-Z0-9_]*)=(.*)$ ]] || {
+        echo "Invalid secret environment config line in $secrets" >&2
+        return 2
+      }
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      case "$key" in
+        FEEDNOW_VISPECTOR_SERVICE_CREDENTIAL_CIPHERTEXT_B64|FEEDNOW_VISPECTOR_SERVICE_SECRET)
+          ;;
+        AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN|AWS_PROFILE)
+          echo "$key is AWS credential/profile configuration and is not allowed in $secrets" >&2
+          return 2
+          ;;
+        *) echo "Unsupported setting $key in $secrets" >&2; return 2 ;;
+      esac
+      if [[ ${#value} -ge 2 && ( ( ${value:0:1} == '"' && ${value: -1} == '"' ) || ( ${value:0:1} == "'" && ${value: -1} == "'" ) ) ]]; then
+        value="${value:1:${#value}-2}"
+      fi
+      printf -v "$key" '%s' "$value"
+      export "$key"
+    done < "$secrets"
+  fi
 
   [[ "${FEEDNOW_ENV:-}" == "$expected_env" ]] || {
     echo "FEEDNOW_ENV in $config must equal $expected_env" >&2

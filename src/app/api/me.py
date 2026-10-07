@@ -69,6 +69,7 @@ def build_me_router(
         return MeResponse(
             id=user.id,
             display_name=user.display_name,
+            username=user.username,
             email=user.email,
             status=user.status,
             application_role=user.application_role,

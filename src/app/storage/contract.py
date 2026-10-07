@@ -270,6 +270,10 @@ class Storage(Protocol):
         """
         ...
 
+    def delete_unlinked_user(self, user_id: UserId) -> None:
+        """Remove a just-created user that has no linked identity or membership."""
+        ...
+
     def update_user(self, user: User) -> User:
         """Persist caller-owned mutable profile fields and timestamp."""
         ...
@@ -422,6 +426,10 @@ class Storage(Protocol):
         Raises:
             EntityNotFoundError: when no such organization exists.
         """
+        ...
+
+    def get_organization_by_slug(self, slug: OrganizationSlug) -> Organization:
+        """Resolve the unique organization slug or raise ``EntityNotFoundError``."""
         ...
 
     def update_organization(self, organization: Organization) -> Organization:
